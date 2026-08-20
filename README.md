@@ -77,3 +77,92 @@ And then you get out of it:
 * An in-memory synchronous API to the commit graph
 * An asynchronous API to the commit grap
 
+## Fixed Memory
+
+One of the goals of stockfoil is to make it possible to perform all interactions
+with the commit graph in a constant amount of memory. The idea here is to make
+it easy to avoid DoS attacks. We structure everything so that given a small
+buffer, all work can be performed by spooling from disk/network into the buffer
+and incrementally writing computations out again.
+
+There are a few operations which are important from this perspective:
+
+* Validating the hash graph of incoming changes
+* Materializing the state of the CRDT
+
+### Validating the hash graph
+
+When we say "validate the hash graph" what we mean is that there are some invariants
+we want to maintain:
+
+* The hash graph linking every commit in the stockfoil DAG has been verified (i.e.
+  the referenced parent exists)
+* If we are validating signatures, then every commit which changes author (i.e. has
+  a parent with a different author to the current author) has a signature and the
+  signature is valid for the given author.
+
+Now, `stockfoil` ships commits around as sedimentree fragments. This means that we
+can ensure that we have verified the dependencies of a a fragment before we verify
+the fragment itself. We design the fragment layout so that it can be verified in a
+streaming fashion. This covers verifying the hash graph.
+
+### Materializing the view
+
+There are generally two flows to think about when materializing the view:
+
+* The cold start flow where we are feeding all the commits we have through the
+  materialization
+* The incremental flow where we are feeding new fragments we know about into the
+  materialization
+
+Note that `stockfoil` doesn't know anything about the encoding of commits or bundles.
+
+### Encoding Commits
+
+Assume that a single commit is larger than the memory we want to use. Verifying this
+in an incremental fashion is fine, how do we actually work with it at the application
+level. Let's say we have something like this:
+
+```rust
+struct DocSet {
+    docs: HashSet<DocumentId>,
+}
+```
+
+And let's say each commit is basically just a list of document IDs. What do we do if
+we encounter a commit which is just 5 billion document IDs? In principle we should 
+be able to scan through the commit and incrementally pass the document IDs out to 
+some separate process which can write it to a database. We never need to have the 
+whole thing in memory.
+
+Likewise when we _write_ the commit we can write it out in pieces to storage and when
+we seal the commit we can write the header.
+
+What might this look like:
+
+```rust
+struct DocSet {
+    storage: Storage,
+}
+
+impl DocSet {
+    fn encode_commit(hash: CommitHash) -> CommitEncoder {
+        CommitEncoder { storage: self.storage, hash}
+    }
+
+    async fn has_doc(&mut self, doc: DocumentId) -> Result<bool, Error> {
+        
+    }
+}
+
+struct CommitEncoder {
+    storage: Storage,
+    hash: CommitHash,
+}
+
+impl CommitEncoder {
+    fn encode(out: Buf) -> Result<Status, Error> {
+        
+    }
+}
+```
