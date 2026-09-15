@@ -12,7 +12,7 @@ pub use blob_hash::BlobHash;
 mod commit_hash;
 pub use commit_hash::{CommitHash, InvalidCommitHash};
 mod commit_graph;
-pub use commit_graph::CommitGraph;
+pub use commit_graph::{CommitGraph, NodeIdx};
 mod commit_meta;
 pub use commit_meta::{CommitMeta, CommitContents};
 mod parsing;

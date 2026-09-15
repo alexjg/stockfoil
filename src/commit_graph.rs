@@ -1,32 +1,46 @@
-use std::{collections::HashMap, ops::{ControlFlow, Index}};
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::{ControlFlow, Index},
+};
 
-use crate::{Author, CommitHash, CommitMeta, Signature};
+use crate::{CommitHash, CommitMeta};
 
+/// An in-memory commit DAG with causal delivery.
+/// Commits with missing parents are queued until all their ancestors are available.
+/// Queued commits are not exposed by graph queries or traversal.
 pub struct CommitGraph<P> {
     nodes: NodeStore,
     edges: EdgeStore,
     parents: Vec<Option<EdgeIdx>>,
     store: HashMap<NodeIdx, P>,
+    by_hash: HashMap<CommitHash, NodeIdx>,
+    pending: VecDeque<(CommitMeta, P)>,
 }
 
 struct Node {
     meta: CommitMeta,
-    parents: Vec<NodeIdx>,
 }
 
+impl<P> Default for CommitGraph<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<P> CommitGraph<P> {
     pub fn new() -> Self {
-        Self{
+        Self {
             nodes: NodeStore(Vec::new()),
             edges: EdgeStore(Vec::new()),
             store: HashMap::new(),
             parents: Vec::new(),
+            by_hash: HashMap::new(),
+            pending: VecDeque::new(),
         }
     }
 
     pub fn parents(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
-        let mut edge_idx = self.parents[node_idx.0 as usize];
+        let mut edge_idx = self.parents[node_idx.0];
         std::iter::from_fn(move || {
             let this_edge_idx = edge_idx?;
             let edge = &self.edges[this_edge_idx];
@@ -36,44 +50,96 @@ impl<P> CommitGraph<P> {
     }
 
     pub fn children(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
-        self.parents.iter().enumerate().filter_map(move |(i, parent_edge_idx)| {
-            let parent_edge_idx = *parent_edge_idx;
-            if let Some(parent_edge_idx) = parent_edge_idx {
-                let edge = &self.edges[parent_edge_idx];
-                if edge.target == node_idx {
-                    return Some(NodeIdx(i));
-                }
-            }
-            None
-        })
+        (0..self.nodes.0.len())
+            .map(NodeIdx)
+            .filter(move |&child| self.parents(child).any(|parent| parent == node_idx))
     }
 
     pub fn roots(&self) -> impl Iterator<Item = NodeIdx> {
-        self.parents.iter().filter(|e| e.is_none()).enumerate().map(|(i, _)| NodeIdx(i))
+        self.parents
+            .iter()
+            .enumerate()
+            .filter_map(|(i, edge)| edge.is_none().then_some(NodeIdx(i)))
     }
 
+    /// Ingest a commit, queuing it if any parents are missing.
+    /// Also inserts any queued commits made ready by this commit, recursively.
+    /// Duplicates (including queued commits) keep their original payload.
+    /// Commits whose dependencies never arrive remain queued indefinitely.
     pub fn ingest_commit(&mut self, meta: CommitMeta, data: P) {
-        let node_idx = NodeIdx(self.nodes.0.len());
-        self.store.insert(node_idx, data);
-        self.nodes.0.push(Node {
-            meta,
-            parents: Vec::new(),
-        });
+        if self.by_hash.contains_key(meta.hash())
+            || self
+                .pending
+                .iter()
+                .any(|(pending, _)| pending.hash() == meta.hash())
+        {
+            return;
+        }
+        self.pending.push_back((meta, data));
+
+        // Retry the queue until a complete pass makes no progress. A blocked
+        // commit must not prevent unrelated, ready commits from being inserted.
+        loop {
+            let pending_count = self.pending.len();
+            for _ in 0..pending_count {
+                let (meta, data) = self.pending.pop_front().unwrap();
+                if meta
+                    .parents()
+                    .iter()
+                    .all(|hash| self.by_hash.contains_key(hash))
+                {
+                    self.insert_ready(meta, data);
+                } else {
+                    self.pending.push_back((meta, data));
+                }
+            }
+            if self.pending.is_empty() || self.pending.len() == pending_count {
+                break;
+            }
+        }
     }
 
+    // Only called once all parents have been inserted into the graph.
+    fn insert_ready(&mut self, meta: CommitMeta, data: P) {
+        let hash = *meta.hash();
+        let parents = meta
+            .parents()
+            .iter()
+            .map(|hash| self.by_hash[hash])
+            .collect::<Vec<_>>();
+
+        let mut first_edge = None;
+        for parent in parents.into_iter().rev() {
+            let edge_idx = EdgeIdx(self.edges.0.len());
+            self.edges.0.push(Edge {
+                next: first_edge,
+                target: parent,
+            });
+            first_edge = Some(edge_idx);
+        }
+
+        let node_idx = NodeIdx(self.nodes.0.len());
+        self.parents.push(first_edge);
+        self.store.insert(node_idx, data);
+        self.nodes.0.push(Node { meta });
+        self.by_hash.insert(hash, node_idx);
+    }
+
+    /// Visit each ready commit once, parents before children, excluding queued commits.
+    /// Returning `ControlFlow::Break(())` stops the entire traversal.
     pub fn traverse<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(&self, mut traversal: F) {
-        let mut stack = self.roots().collect::<Vec::<_>>();
-        while let Some(next) = stack.pop() {
-            let node = &self.nodes[next];
-            if let ControlFlow::Continue(_) = traversal(&node.meta, &self.store[&next]) {
-                stack.extend(self.children(next));
+        // Only ready commits are inserted, so node order is already topological.
+        for (idx, node) in &self.nodes {
+            if traversal(&node.meta, &self.store[&idx]).is_break() {
+                break;
             }
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct NodeIdx(usize);
+/// An opaque node index, valid only in the graph that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeIdx(usize);
 
 struct NodeStore(Vec<Node>);
 
@@ -120,6 +186,4 @@ impl Index<EdgeIdx> for EdgeStore {
     fn index(&self, index: EdgeIdx) -> &Self::Output {
         &self.0[index.0]
     }
-
-
 }

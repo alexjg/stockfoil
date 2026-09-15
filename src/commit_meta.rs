@@ -27,6 +27,10 @@ impl CommitMeta {
     pub fn hash(&self) -> &CommitHash {
         &self.hash
     }
+
+    pub fn parents(&self) -> &[CommitHash] {
+        &self.parents
+    }
 }
 
 pub struct CommitContents {
