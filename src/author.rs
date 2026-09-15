@@ -1,3 +1,4 @@
+#[derive(Clone, Copy)]
 pub struct Author([u8;32]);
 
 impl Author {

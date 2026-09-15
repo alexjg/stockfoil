@@ -1,3 +1,4 @@
+#[derive(Clone, Copy)]
 pub struct Signature([u8; 64]);
 
 impl Signature {

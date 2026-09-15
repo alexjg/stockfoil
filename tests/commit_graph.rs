@@ -27,6 +27,15 @@ fn visited(graph: &CommitGraph<u8>) -> Vec<u8> {
     values
 }
 
+fn visited_since(graph: &CommitGraph<u8>, since: &[CommitHash]) -> Vec<u8> {
+    let mut values = Vec::new();
+    graph.traverse_since(since, |_, value| {
+        values.push(*value);
+        ControlFlow::Continue(())
+    });
+    values
+}
+
 fn assert_heads(graph: &CommitGraph<u8>, expected: &[CommitHash]) {
     let actual = graph
         .heads()
@@ -260,6 +269,74 @@ fn blocked_commits_do_not_block_unrelated_ready_commits() {
     insert(&mut graph, 1, &[]);
     assert_eq!(visited(&graph), vec![3, 4, 1, 2]);
     assert_eq!(graph.roots().count(), 2);
+}
+
+#[test]
+fn traverse_since_excludes_heads_and_all_their_ancestors() {
+    let mut graph = CommitGraph::new();
+    let root = insert(&mut graph, 1, &[]);
+    let left = insert(&mut graph, 2, &[root]);
+    let right = insert(&mut graph, 3, &[root]);
+    let merge = insert(&mut graph, 4, &[left, right]);
+    let tip = insert(&mut graph, 5, &[merge]);
+
+    assert_eq!(visited_since(&graph, &[merge]), vec![5]);
+    assert_eq!(visited_since(&graph, &[left, right]), vec![4, 5]);
+    assert_eq!(
+        visited_since(&graph, &[root, left, left, right]),
+        vec![4, 5]
+    );
+    assert!(visited_since(&graph, &[tip]).is_empty());
+    // Earlier insertion does not imply ancestry: left is concurrent with right.
+    assert_eq!(visited_since(&graph, &[right]), vec![2, 4, 5]);
+}
+
+#[test]
+fn traverse_since_delivers_only_new_history_after_merge() {
+    let mut graph = CommitGraph::new();
+    let root = insert(&mut graph, 1, &[]);
+    let mut other = graph.clone();
+    insert(&mut graph, 2, &[root]);
+    let before = graph.heads().collect::<Vec<_>>();
+    let branch = insert(&mut other, 3, &[root]);
+    insert(&mut other, 4, &[branch]);
+    insert(&mut other, 5, &[]);
+
+    graph.merge(&other);
+    assert_eq!(visited_since(&graph, &before), vec![3, 4, 5]);
+    assert!(visited_since(&graph, &graph.heads().collect::<Vec<_>>()).is_empty());
+}
+
+#[test]
+fn traverse_since_handles_empty_unknown_and_queued_heads() {
+    let mut graph = CommitGraph::new();
+    let unknown = *meta(99, &[]).hash();
+    assert!(visited_since(&graph, &[]).is_empty());
+    assert!(visited_since(&graph, &[unknown]).is_empty());
+    let root = insert(&mut graph, 1, &[]);
+    let child = insert(&mut graph, 2, &[root]);
+    let queued = insert(&mut graph, 3, &[child, unknown]);
+
+    assert_eq!(visited_since(&graph, &[]), visited(&graph));
+    assert_eq!(visited_since(&graph, &[unknown, queued]), vec![1, 2]);
+    assert_eq!(visited_since(&graph, &[root, unknown]), vec![2]);
+}
+
+#[test]
+fn traverse_since_honors_break() {
+    let mut graph = CommitGraph::new();
+    let root = insert(&mut graph, 1, &[]);
+    let child = insert(&mut graph, 2, &[root]);
+    insert(&mut graph, 3, &[child]);
+    insert(&mut graph, 4, &[]);
+
+    let mut values = Vec::new();
+    graph.traverse_since(&[child], |_, value| {
+        values.push(*value);
+        ControlFlow::Break(())
+    });
+    assert_eq!(values, vec![3]);
+    assert_eq!(visited_since(&graph, &[child]), vec![3, 4]);
 }
 
 #[test]

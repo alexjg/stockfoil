@@ -2,6 +2,7 @@ use eyre::{eyre, Context};
 
 use crate::{Author, BlobHash, CommitHash, Signature};
 
+#[derive(Clone)]
 pub struct CommitMeta {
     hash: CommitHash,
     parents: Vec<CommitHash>,

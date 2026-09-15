@@ -1,39 +1,26 @@
 use std::{collections::{BTreeSet}};
 
-use stockfoil::{BlobHash, CommitContents, CommitGraph, CommitMeta};
-
 mod orset;
-
 
 #[test]
 fn test_basic() {
-    let mut commit_graph = CommitGraph::<orset::OrSetCommit>::new();
+    let mut doc = orset::OrSet::new();
+    doc.add("foo".to_string());
 
-    let first_commit = orset::OrSetCommit {
-        ops: vec![orset::Op::Add{value: "foo".to_string()}],
-    };
-    let first_commit_meta = CommitMeta::new(CommitContents {
-        parents: Vec::new(),
-        author: None,
-        signatures: Vec::new(),
-        payload: BlobHash::of_contents(&first_commit.encode()),
-    });
+    assert_eq!(doc.value(), BTreeSet::from_iter(["foo".to_string()]));
 
-    let second_commit = orset::OrSetCommit {
-        ops: vec![orset::Op::Add{value: "foo".to_string()}],
-    };
-    let second_commit_meta = CommitMeta::new(CommitContents {
-        parents: vec![*first_commit_meta.hash()],
-        author: None,
-        signatures: Vec::new(),
-        payload: BlobHash::of_contents(&second_commit.encode()),
-    });
+    doc.remove("foo".to_string());
+    assert_eq!(doc.value(), BTreeSet::new());
 
+    let mut doc2 = doc.fork();
+    doc2.add("bar".to_string());
+    assert_eq!(doc2.value(), BTreeSet::from_iter(["bar".to_string()]));
 
-    commit_graph.ingest_commit(first_commit_meta, first_commit);
-    commit_graph.ingest_commit(second_commit_meta, second_commit);
+    doc2.remove("bar".to_string());
+    assert_eq!(doc2.value(), BTreeSet::new());
 
-    let result = orset::evaluate_orset(&commit_graph);
-    assert_eq!(result, BTreeSet::from_iter(["foo".to_string()]));
+    doc.add("bar".to_string());
+    doc2.merge(&doc);
 
+    assert_eq!(doc2.value(), BTreeSet::from_iter(["bar".to_string()]));
 }

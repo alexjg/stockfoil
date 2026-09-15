@@ -3,10 +3,137 @@ use std::{
     ops::ControlFlow,
 };
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use stockfoil::{CommitGraph, CommitHash};
+use stockfoil::{CommitGraph, CommitHash, CommitMeta};
 
-#[derive(Serialize, Deserialize)]
+pub struct OrSet {
+    graph: CommitGraph<OrSetCommit>,
+    state: State,
+    actor: ActorId,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ActorId([u8; 32]);
+
+impl ActorId {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl OrSet {
+    pub fn new() -> Self {
+        Self {
+            graph: CommitGraph::new(),
+            state: State {
+                adds: HashMap::new(),
+                removes: BTreeSet::new(),
+            },
+            actor: ActorId::generate(),
+        }
+    }
+
+    pub fn add(&mut self, value: String) {
+        let commit = OrSetCommit {
+            actor: self.actor.clone(),
+            ops: vec![Op::Add { value }],
+        };
+        let meta = CommitMeta::new(stockfoil::CommitContents {
+            parents: self.graph.heads().collect(),
+            author: None,
+            signatures: Vec::new(),
+            payload: stockfoil::BlobHash::of_contents(&commit.encode()),
+        });
+        self.ingest_commit(meta, commit);
+    }
+
+    pub fn remove(&mut self, value: String) {
+        let predecessors = self
+            .state
+            .adds
+            .get(&value)
+            .map(|commits| {
+                let remaining_adds = commits.difference(&self.state.removes);
+                remaining_adds.cloned().collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // There is no surviving key which sets this value. Nothing to do
+        if predecessors.is_empty() {
+            return;
+        }
+        let commit = OrSetCommit {
+            actor: self.actor.clone(),
+            ops: vec![Op::Remove { predecessors }],
+        };
+        let meta = CommitMeta::new(stockfoil::CommitContents {
+            parents: self.graph.heads().collect(),
+            signatures: Vec::new(),
+            author: None,
+            payload: stockfoil::BlobHash::of_contents(&commit.encode()),
+        });
+        self.ingest_commit(meta, commit);
+    }
+
+    pub fn fork(&self) -> Self {
+        Self {
+            graph: self.graph.clone(),
+            state: State {
+                adds: self.state.adds.clone(),
+                removes: self.state.removes.clone(),
+            },
+            actor: ActorId::generate(),
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        let heads_before = self.graph.heads().collect::<Vec<_>>();
+        self.graph.merge(&other.graph);
+        self.evaluate(&heads_before);
+    }
+
+    pub fn ingest_commit(&mut self, meta: stockfoil::CommitMeta, commit: OrSetCommit) {
+        let heads_before = self.graph.heads().collect::<Vec<_>>();
+        self.graph.ingest_commit(meta, commit);
+        self.evaluate(&heads_before);
+    }
+
+    fn evaluate(&mut self, start_at: &[CommitHash]) {
+        self.graph.traverse_since(start_at, |meta, commit| {
+            for op in &commit.ops {
+                match op {
+                    Op::Add { value } => {
+                        self.state
+                            .adds
+                            .entry(value.to_string())
+                            .or_default()
+                            .insert(*meta.hash());
+                    }
+                    Op::Remove { predecessors } => {
+                        self.state.removes.extend(predecessors);
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        });
+    }
+
+    pub fn value(&self) -> BTreeSet<String> {
+        let mut result = BTreeSet::new();
+        for (key, commits) in &self.state.adds {
+            let remaining_adds = commits.difference(&self.state.removes);
+            if remaining_adds.count() > 0 {
+                result.insert(key.to_string());
+            }
+        }
+        result
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Op {
     Add {
         value: String,
@@ -17,34 +144,10 @@ pub enum Op {
     },
 }
 
-pub fn evaluate_orset(graph: &CommitGraph<OrSetCommit>) -> BTreeSet<String> {
-    let mut state = State {
-        adds: HashMap::new(),
-        removes: BTreeSet::new(),
-    };
-    graph.traverse(|meta, payload| {
-        for op in &payload.ops {
-            match op {
-                Op::Add { value } => {
-                    state
-                        .adds
-                        .entry(value.to_string())
-                        .or_default()
-                        .insert(*meta.hash());
-                }
-                Op::Remove { predecessors } => {
-                    state.removes.extend(predecessors);
-                }
-            }
-        }
-        ControlFlow::Continue(())
-    });
-    state.finish()
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OrSetCommit {
     pub ops: Vec<Op>,
+    pub actor: ActorId,
 }
 
 impl OrSetCommit {
@@ -79,17 +182,4 @@ mod commit_hashes {
 pub struct State {
     adds: HashMap<String, BTreeSet<CommitHash>>,
     removes: BTreeSet<CommitHash>,
-}
-
-impl State {
-    pub fn finish(&self) -> BTreeSet<String> {
-        let mut result = BTreeSet::new();
-        for (key, commits) in &self.adds {
-            let remaining_adds = commits.difference(&self.removes);
-            if remaining_adds.count() > 0 {
-                result.insert(key.to_string());
-            }
-        }
-        result
-    }
 }

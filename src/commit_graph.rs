@@ -8,6 +8,7 @@ use crate::{CommitHash, CommitMeta};
 /// An in-memory commit DAG with causal delivery.
 /// Commits with missing parents are queued until all their ancestors are available.
 /// Queued commits are not exposed by graph queries or traversal.
+#[derive(Clone)]
 pub struct CommitGraph<P> {
     nodes: NodeStore,
     edges: EdgeStore,
@@ -18,17 +19,18 @@ pub struct CommitGraph<P> {
     pending: VecDeque<(CommitMeta, P)>,
 }
 
+#[derive(Clone)]
 struct Node {
     meta: CommitMeta,
 }
 
-impl<P> Default for CommitGraph<P> {
+impl<P: Clone> Default for CommitGraph<P> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P> CommitGraph<P> {
+impl<P: Clone> CommitGraph<P> {
     pub fn new() -> Self {
         Self {
             nodes: NodeStore(Vec::new()),
@@ -138,11 +140,51 @@ impl<P> CommitGraph<P> {
         self.by_hash.insert(hash, node_idx);
     }
 
+    pub fn merge(&mut self, other: &Self) {
+        for (idx, node) in &other.nodes {
+            if !self.by_hash.contains_key(node.meta.hash()) {
+                let data = other.store[&idx].clone();
+                self.ingest_commit(node.meta.clone(), data);
+            }
+        }
+    }
+
     /// Visit each ready commit once, parents before children, excluding queued commits.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
     pub fn traverse<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(&self, mut traversal: F) {
         // Only ready commits are inserted, so node order is already topological.
         for (idx, node) in &self.nodes {
+            if traversal(&node.meta, &self.store[&idx]).is_break() {
+                break;
+            }
+        }
+    }
+
+    /// Visit ready commits excluding `since` and all their ancestors, parents first.
+    /// An empty `since` visits all ready commits. Unknown or queued hashes are ignored.
+    /// Returning `ControlFlow::Break(())` stops the entire traversal.
+    pub fn traverse_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
+        &self,
+        since: &[CommitHash],
+        mut traversal: F,
+    ) {
+        let mut excluded = vec![false; self.nodes.0.len()];
+        let mut stack = since
+            .iter()
+            .filter_map(|hash| self.by_hash.get(hash).copied())
+            .collect::<Vec<_>>();
+        while let Some(idx) = stack.pop() {
+            if excluded[idx.0] {
+                continue;
+            }
+            excluded[idx.0] = true;
+            stack.extend(self.parents(idx));
+        }
+
+        for (idx, node) in &self.nodes {
+            if excluded[idx.0] {
+                continue;
+            }
             if traversal(&node.meta, &self.store[&idx]).is_break() {
                 break;
             }
@@ -154,6 +196,7 @@ impl<P> CommitGraph<P> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeIdx(usize);
 
+#[derive(Clone)]
 struct NodeStore(Vec<Node>);
 
 impl<'a> IntoIterator for &'a NodeStore {
@@ -184,11 +227,13 @@ impl Index<NodeIdx> for NodeStore {
     }
 }
 
+#[derive(Clone)]
 struct Edge {
     next: Option<EdgeIdx>,
     target: NodeIdx,
 }
 
+#[derive(Clone)]
 struct EdgeStore(Vec<Edge>);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EdgeIdx(usize);
