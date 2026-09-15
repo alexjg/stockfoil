@@ -3,7 +3,7 @@ use std::{
     ops::{ControlFlow, Index},
 };
 
-use crate::{CommitHash, CommitMeta};
+use crate::{BlobHash, CommitContents, CommitHash, CommitMeta};
 
 /// An in-memory commit DAG with causal delivery.
 /// Commits with missing parents are queued until all their ancestors are available.
@@ -189,6 +189,16 @@ impl<P: Clone> CommitGraph<P> {
                 break;
             }
         }
+    }
+
+    pub fn commit(&self, contents: &[u8]) -> CommitMeta {
+        let commit_contents = CommitContents{
+            parents: self.heads().collect(),
+            signatures: Vec::new(),
+            author: None,
+            payload: BlobHash::of_contents(contents),
+        };
+        CommitMeta::new(commit_contents)
     }
 }
 

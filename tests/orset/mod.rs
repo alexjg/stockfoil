@@ -41,13 +41,7 @@ impl OrSet {
             actor: self.actor.clone(),
             ops: vec![Op::Add { value }],
         };
-        let meta = CommitMeta::new(stockfoil::CommitContents {
-            parents: self.graph.heads().collect(),
-            author: None,
-            signatures: Vec::new(),
-            payload: stockfoil::BlobHash::of_contents(&commit.encode()),
-        });
-        self.ingest_commit(meta, commit);
+        self.ingest_commit(self.graph.commit(&commit.encode()), commit);
     }
 
     pub fn remove(&mut self, value: String) {
@@ -69,13 +63,7 @@ impl OrSet {
             actor: self.actor.clone(),
             ops: vec![Op::Remove { predecessors }],
         };
-        let meta = CommitMeta::new(stockfoil::CommitContents {
-            parents: self.graph.heads().collect(),
-            signatures: Vec::new(),
-            author: None,
-            payload: stockfoil::BlobHash::of_contents(&commit.encode()),
-        });
-        self.ingest_commit(meta, commit);
+        self.ingest_commit(self.graph.commit(&commit.encode()), commit);
     }
 
     pub fn fork(&self) -> Self {
