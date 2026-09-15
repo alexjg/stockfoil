@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     ops::{ControlFlow, Index},
 };
 
@@ -14,6 +14,7 @@ pub struct CommitGraph<P> {
     parents: Vec<Option<EdgeIdx>>,
     store: HashMap<NodeIdx, P>,
     by_hash: HashMap<CommitHash, NodeIdx>,
+    heads: BTreeSet<CommitHash>,
     pending: VecDeque<(CommitMeta, P)>,
 }
 
@@ -35,6 +36,7 @@ impl<P> CommitGraph<P> {
             store: HashMap::new(),
             parents: Vec::new(),
             by_hash: HashMap::new(),
+            heads: BTreeSet::new(),
             pending: VecDeque::new(),
         }
     }
@@ -60,6 +62,13 @@ impl<P> CommitGraph<P> {
             .iter()
             .enumerate()
             .filter_map(|(i, edge)| edge.is_none().then_some(NodeIdx(i)))
+    }
+
+    /// Return hashes of ready commits with no children, in hash order.
+    /// Queued commits neither appear as heads nor remove their parents from the heads.
+    /// Iterating all heads takes O(h) time for h heads, without scanning the graph.
+    pub fn heads(&self) -> impl Iterator<Item = CommitHash> {
+        self.heads.iter().copied()
     }
 
     /// Ingest a commit, queuing it if any parents are missing.
@@ -121,6 +130,10 @@ impl<P> CommitGraph<P> {
         let node_idx = NodeIdx(self.nodes.0.len());
         self.parents.push(first_edge);
         self.store.insert(node_idx, data);
+        for parent in meta.parents() {
+            self.heads.remove(parent);
+        }
+        self.heads.insert(hash);
         self.nodes.0.push(Node { meta });
         self.by_hash.insert(hash, node_idx);
     }

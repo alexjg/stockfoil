@@ -27,6 +27,66 @@ fn visited(graph: &CommitGraph<u8>) -> Vec<u8> {
     values
 }
 
+fn assert_heads(graph: &CommitGraph<u8>, expected: &[CommitHash]) {
+    let actual = graph
+        .heads()
+        .map(|hash| *hash.as_bytes())
+        .collect::<Vec<_>>();
+    let mut expected = expected
+        .iter()
+        .map(|hash| *hash.as_bytes())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn heads_follow_chains_forks_merges_and_disconnected_roots() {
+    let mut graph = CommitGraph::new();
+    assert_heads(&graph, &[]);
+    let root = insert(&mut graph, 1, &[]);
+    assert_heads(&graph, &[root]);
+    let left = insert(&mut graph, 2, &[root]);
+    assert_heads(&graph, &[left]);
+    let right = insert(&mut graph, 3, &[root]);
+    assert_heads(&graph, &[left, right]);
+    let unrelated = insert(&mut graph, 4, &[]);
+    assert_heads(&graph, &[left, right, unrelated]);
+    let merge = insert(&mut graph, 5, &[left, right]);
+    assert_heads(&graph, &[merge, unrelated]);
+
+    // Reingesting a non-head must not make it a head again.
+    insert(&mut graph, 1, &[]);
+    insert(&mut graph, 2, &[root]);
+    insert(&mut graph, 5, &[left, right]);
+    assert_heads(&graph, &[merge, unrelated]);
+
+    let tip = insert(&mut graph, 6, &[merge, merge]);
+    assert_heads(&graph, &[tip, unrelated]);
+}
+
+#[test]
+fn heads_change_only_when_queued_commits_become_ready() {
+    let mut graph = CommitGraph::new();
+    let first = *meta(1, &[]).hash();
+    let second = *meta(2, &[]).hash();
+    let merge = *meta(3, &[first, second]).hash();
+    let tip = insert(&mut graph, 4, &[merge]);
+    insert(&mut graph, 3, &[first, second]);
+    insert(&mut graph, 3, &[first, second]);
+    assert_heads(&graph, &[]);
+
+    insert(&mut graph, 1, &[]);
+    assert_heads(&graph, &[first]);
+    let unrelated = insert(&mut graph, 5, &[]);
+    assert_heads(&graph, &[first, unrelated]);
+
+    // This releases the merge and its descendant, even though the descendant
+    // arrived first. Neither intermediate commit should remain a head.
+    insert(&mut graph, 2, &[]);
+    assert_heads(&graph, &[tip, unrelated]);
+}
+
 #[test]
 fn empty_graph() {
     let graph = CommitGraph::<u8>::default();
