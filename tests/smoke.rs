@@ -1,5 +1,6 @@
 use std::{collections::{BTreeSet}};
 
+mod mv_register;
 mod orset;
 
 #[test]
