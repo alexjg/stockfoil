@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     ops::{ControlFlow, Index},
 };
 
@@ -71,6 +71,34 @@ impl<P: Clone> CommitGraph<P> {
     /// Iterating all heads takes O(h) time for h heads, without scanning the graph.
     pub fn heads(&self) -> impl Iterator<Item = CommitHash> {
         self.heads.iter().copied()
+    }
+
+    /// Whether `ancestor` is a strict ancestor of `descendant` via parent edges.
+    /// Returns false for identical hashes or if either commit is unknown or queued.
+    /// Walks the existing graph on demand, without storing a transitive ancestry index.
+    pub fn is_ancestor(&self, ancestor: &CommitHash, descendant: &CommitHash) -> bool {
+        let (Some(&ancestor), Some(&descendant)) =
+            (self.by_hash.get(ancestor), self.by_hash.get(descendant))
+        else {
+            return false;
+        };
+
+        // Parents always have smaller indices than their children.
+        if ancestor >= descendant {
+            return false;
+        }
+        let mut stack = vec![descendant];
+        let mut visited = HashSet::new();
+        while let Some(idx) = stack.pop() {
+            if idx == ancestor {
+                return true;
+            }
+            if idx < ancestor || !visited.insert(idx) {
+                continue;
+            }
+            stack.extend(self.parents(idx));
+        }
+        false
     }
 
     /// Ingest a commit, queuing it if any parents are missing.
@@ -192,7 +220,7 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     pub fn commit(&self, contents: &[u8]) -> CommitMeta {
-        let commit_contents = CommitContents{
+        let commit_contents = CommitContents {
             parents: self.heads().collect(),
             signatures: Vec::new(),
             author: None,

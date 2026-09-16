@@ -272,6 +272,80 @@ fn blocked_commits_do_not_block_unrelated_ready_commits() {
 }
 
 #[test]
+fn ancestry_is_strict_and_transitive() {
+    let mut graph = CommitGraph::new();
+    let root = insert(&mut graph, 1, &[]);
+    let child = insert(&mut graph, 2, &[root]);
+    let tip = insert(&mut graph, 3, &[child]);
+
+    assert!(graph.is_ancestor(&root, &child));
+    assert!(graph.is_ancestor(&child, &tip));
+    assert!(graph.is_ancestor(&root, &tip));
+    assert!(!graph.is_ancestor(&tip, &root));
+    assert!(!graph.is_ancestor(&child, &root));
+    for hash in [root, child, tip] {
+        assert!(!graph.is_ancestor(&hash, &hash));
+    }
+}
+
+#[test]
+fn ancestry_follows_all_merge_parents_but_not_concurrent_branches() {
+    let mut graph = CommitGraph::new();
+    let unrelated = insert(&mut graph, 0, &[]);
+    let root = insert(&mut graph, 1, &[]);
+    let left = insert(&mut graph, 2, &[root]);
+    let right = insert(&mut graph, 3, &[root]);
+    let merge = insert(&mut graph, 4, &[left, right, right]);
+    let tip = insert(&mut graph, 5, &[merge]);
+
+    for ancestor in [root, left, right, merge] {
+        assert!(graph.is_ancestor(&ancestor, &tip));
+    }
+    assert!(!graph.is_ancestor(&left, &right));
+    assert!(!graph.is_ancestor(&right, &left));
+    assert!(!graph.is_ancestor(&unrelated, &tip));
+    assert!(!graph.is_ancestor(&tip, &unrelated));
+}
+
+#[test]
+fn ancestry_ignores_unknown_and_queued_commits_until_ready() {
+    let mut graph = CommitGraph::new();
+    let missing = *meta(1, &[]).hash();
+    assert!(!graph.is_ancestor(&missing, &missing));
+    let root = insert(&mut graph, 0, &[]);
+    let queued = insert(&mut graph, 2, &[root, missing]);
+    let tip = insert(&mut graph, 3, &[queued]);
+
+    assert!(!graph.is_ancestor(&root, &missing));
+    assert!(!graph.is_ancestor(&missing, &root));
+    assert!(!graph.is_ancestor(&root, &queued));
+    assert!(!graph.is_ancestor(&queued, &root));
+    assert!(!graph.is_ancestor(&queued, &tip));
+
+    insert(&mut graph, 1, &[]);
+    assert!(graph.is_ancestor(&root, &tip));
+    assert!(graph.is_ancestor(&missing, &tip));
+    assert!(graph.is_ancestor(&queued, &tip));
+}
+
+#[test]
+fn ancestry_survives_fork_and_merge() {
+    let mut graph = CommitGraph::new();
+    let root = insert(&mut graph, 1, &[]);
+    let mut other = graph.clone();
+    let left = insert(&mut graph, 2, &[root]);
+    let right = insert(&mut other, 3, &[root]);
+    assert!(other.is_ancestor(&root, &right));
+    graph.merge(&other);
+    assert!(graph.is_ancestor(&root, &right));
+    assert!(!graph.is_ancestor(&left, &right));
+    assert!(!graph.is_ancestor(&right, &left));
+    let merge = insert(&mut graph, 4, &[left, right]);
+    assert!(graph.is_ancestor(&left, &merge));
+    assert!(graph.is_ancestor(&right, &merge));
+}
+
+#[test]
 fn traverse_since_excludes_heads_and_all_their_ancestors() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 1, &[]);
