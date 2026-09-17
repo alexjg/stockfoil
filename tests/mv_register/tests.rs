@@ -1,5 +1,16 @@
 use super::MvRegisterMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use stockfoil::WritePermission;
+
+fn grant_access(docs: &mut [&mut MvRegisterMap]) {
+    let permissions = docs
+        .iter()
+        .map(|doc| (doc.author(), WritePermission::Unbounded))
+        .collect::<HashMap<_, _>>();
+    for doc in docs {
+        doc.set_write_permissions(&permissions);
+    }
+}
 
 fn values(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
@@ -9,6 +20,7 @@ fn conflicting_replicas() -> (MvRegisterMap, MvRegisterMap) {
     let mut left = MvRegisterMap::new();
     left.set("title", "Hi");
     let mut right = left.fork();
+    grant_access(&mut [&mut left, &mut right]);
     left.set("title", "Hello");
     right.set("title", "Howdy");
     (left, right)
@@ -75,6 +87,7 @@ fn unrelated_key_does_not_resolve_conflict() {
 fn identical_concurrent_values_keep_distinct_write_identities() {
     let mut left = MvRegisterMap::new();
     let mut right = left.fork();
+    grant_access(&mut [&mut left, &mut right]);
     left.set("title", "Same");
     right.set("title", "Same");
     // Only the left-hand write has been observed by this assignment.
@@ -89,6 +102,7 @@ fn identical_concurrent_values_keep_distinct_write_identities() {
 fn three_way_merge_preserves_only_causally_maximal_writes() {
     let (mut left, mut right) = conflicting_replicas();
     let mut third = left.fork();
+    grant_access(&mut [&mut left, &mut right, &mut third]);
     third.set("title", "Welcome");
     // Welcome supersedes Hello but is concurrent with Howdy.
     left.merge(&right);

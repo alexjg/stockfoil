@@ -1,15 +1,16 @@
-//! A map of multi-value registers: causal writes replace earlier writes to the
-//! same key, while concurrent writes remain visible as conflicts.
+//! A map of multi-value registers. Keep every assignment in the graph, then
+//! select the causally maximal participating writes for each key.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::ControlFlow,
 };
 
+use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use stockfoil::{
-    Author, CommitGraph, CommitHash, CommitMeta, Pov, ResolveError, Signature, SignatureError,
-    WritePermission,
+    Author, BlobHash, CommitGraph, CommitHash, CommitMeta, Pov, ResolveError, Signature,
+    SignatureError, Vis, WritePermission,
 };
 
 mod revocation;
@@ -20,20 +21,17 @@ pub struct MvRegisterMap {
     graph: CommitGraph<Assignment>,
     state: State,
     actor: ActorId,
+    signing_key: Option<SigningKey>,
+    // Only locally captured working POVs may be read before signature-backed
+    // resolution. This small demo retains them to support historical reads.
+    local_povs: Vec<Pov>,
 }
 
 #[derive(Clone, Copy, Serialize)]
 struct ActorId([u8; 32]);
 
-impl ActorId {
-    fn generate() -> Self {
-        Self(rand::random())
-    }
-}
-
 #[derive(Clone, Serialize)]
 struct Assignment {
-    // Distinguish independent writes with identical parents, key, and value.
     actor: ActorId,
     key: String,
     value: String,
@@ -44,95 +42,154 @@ struct State {
     values: HashMap<String, BTreeMap<CommitHash, String>>,
 }
 
+impl State {
+    fn get(&self, key: &str) -> BTreeSet<String> {
+        self.values
+            .get(key)
+            .into_iter()
+            .flat_map(|writes| writes.values().cloned())
+            .collect()
+    }
+}
+
 impl MvRegisterMap {
     pub fn new() -> Self {
+        let key = SigningKey::from_bytes(&rand::random());
+        let author = Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap();
+        let mut doc = Self::with_author(author);
+        doc.signing_key = Some(key);
+        doc
+    }
+
+    pub fn with_author(author: Author) -> Self {
+        let mut graph = CommitGraph::new();
+        // An explicit demo grant, not a library default.
+        graph.set_write_permissions(&HashMap::from([(author, WritePermission::Unbounded)]));
+        let pov = graph.pov();
         Self {
-            graph: CommitGraph::new(),
+            graph,
             state: State::default(),
-            actor: ActorId::generate(),
+            actor: ActorId(*author.as_array()),
+            signing_key: None,
+            local_povs: vec![pov],
         }
     }
 
-    // Auth API placeholders; the existing unsigned demo still works below.
-    pub fn with_author(_author: Author) -> Self {
-        todo!("MVR with an external signer")
-    }
-
     pub fn author(&self) -> Author {
-        todo!("MVR author")
+        Author::try_from(self.actor.0.as_slice()).unwrap()
     }
 
-    pub fn prepare_set(&mut self, _key: &str, _value: &str) -> CommitHash {
-        todo!("prepare an unsigned local assignment")
-    }
-
-    pub fn ingest_signature(
-        &mut self,
-        _author: Author,
-        _hash: CommitHash,
-        _signature: Signature,
-    ) -> Result<(), SignatureError> {
-        todo!("MVR signature ingestion")
-    }
-
-    pub fn set_write_permissions(&mut self, _permissions: &HashMap<Author, WritePermission>) {
-        todo!("MVR write permissions")
-    }
-
-    pub fn get_at(&self, _pov: &Pov, _key: &str) -> Result<BTreeSet<String>, ResolveError> {
-        todo!("MVR read at a POV")
-    }
-
-    pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
+    pub fn prepare_set(&mut self, key: &str, value: &str) -> CommitHash {
         let assignment = Assignment {
             actor: self.actor,
             key: key.to_owned(),
             value: value.to_owned(),
         };
         let bytes = bcs::to_bytes(&assignment).expect("assignment serialization failed");
-        let meta = self.graph.commit(&bytes);
+        let meta = self.graph.commit_by(self.author(), &bytes);
         let hash = *meta.hash();
-        self.ingest_commit(meta, assignment);
+        self.graph.ingest_local_commit(meta, assignment);
+        self.refresh();
+        hash
+    }
+
+    pub fn ingest_signature(
+        &mut self,
+        author: Author,
+        hash: CommitHash,
+        signature: Signature,
+    ) -> Result<(), SignatureError> {
+        self.graph.ingest_signature(author, hash, signature)?;
+        self.refresh();
+        Ok(())
+    }
+
+    pub fn set_write_permissions(&mut self, permissions: &HashMap<Author, WritePermission>) {
+        self.graph.set_write_permissions(permissions);
+        self.refresh();
+    }
+
+    pub fn get_at(&self, pov: &Pov, key: &str) -> Result<BTreeSet<String>, ResolveError> {
+        if !self.local_povs.contains(pov) {
+            // Received descriptions are not authority to skip verification.
+            self.graph.resolve(pov)?;
+        }
+        Ok(self.state_at(pov)?.get(key))
+    }
+
+    pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
+        let signing_key = self
+            .signing_key
+            .as_ref()
+            .expect("external signers must use prepare_set and ingest_signature")
+            .clone();
+        let hash = self.prepare_set(key, value);
+        let signature = Signature::from(signing_key.sign(hash.as_bytes()).to_bytes());
+        self.ingest_signature(self.author(), hash, signature)
+            .expect("signature from our own signing key");
         hash
     }
 
     pub fn get(&self, key: &str) -> BTreeSet<String> {
-        self.state
-            .values
-            .get(key)
-            .into_iter()
-            .flat_map(|writes| writes.values().cloned())
-            .collect()
+        self.state.get(key)
     }
 
     pub fn fork(&self) -> Self {
-        Self {
-            graph: self.graph.clone(),
-            state: self.state.clone(),
-            actor: ActorId::generate(),
-        }
+        let mut fork = Self::new();
+        fork.set_write_permissions(self.graph.pov().write_permissions());
+        fork.merge(self);
+        fork
     }
 
     pub fn merge(&mut self, other: &Self) {
-        let before = self.graph.heads().collect::<Vec<_>>();
         self.graph.merge(&other.graph);
-        self.evaluate(&before);
+        self.refresh();
     }
 
-    fn ingest_commit(&mut self, meta: CommitMeta, assignment: Assignment) {
-        let before = self.graph.heads().collect::<Vec<_>>();
+    // Bind received operations to the payload hash before storing them, so an
+    // invalid first delivery cannot poison a later legitimate signed commit.
+    fn ingest_commit(
+        &mut self,
+        meta: CommitMeta,
+        assignment: Assignment,
+    ) -> Result<(), &'static str> {
+        let bytes = bcs::to_bytes(&assignment).map_err(|_| "assignment serialization failed")?;
+        if &BlobHash::of_contents(&bytes) != meta.payload_hash() {
+            return Err("assignment does not match the commit's payload hash");
+        }
         self.graph.ingest_commit(meta, assignment);
-        self.evaluate(&before);
+        self.refresh();
+        Ok(())
     }
 
-    fn evaluate(&mut self, since: &[CommitHash]) {
+    fn refresh(&mut self) {
+        let pov = self.graph.pov();
+        self.state = self
+            .state_at(&pov)
+            .expect("current working history is available");
+        if !self.local_povs.contains(&pov) {
+            self.local_povs.push(pov);
+        }
+    }
+
+    fn state_at(&self, pov: &Pov) -> Result<State, ResolveError> {
         let graph = &self.graph;
-        graph.traverse_since(since, |meta, assignment| {
-            let writes = self.state.values.entry(assignment.key.clone()).or_default();
-            // Replace only causally earlier writes, not concurrent assignments.
-            writes.retain(|hash, _| !graph.is_ancestor(hash, meta.hash()));
-            writes.insert(*meta.hash(), assignment.value.clone());
+        let participation = graph.diff(pov, pov)?;
+        let mut state = State::default();
+        graph.traverse_delivered(|meta, assignment| {
+            if participation
+                .visibility(meta.hash())
+                .expect("delivered commit")
+                == Vis::Both
+            {
+                let writes = state.values.entry(assignment.key.clone()).or_default();
+                // Inactive writes don't overwrite, but ancestry still passes
+                // through them. An allowed descendant can supersede older values.
+                writes.retain(|hash, _| !graph.is_ancestor(hash, meta.hash()));
+                writes.insert(*meta.hash(), assignment.value.clone());
+            }
             ControlFlow::Continue(())
         });
+        Ok(state)
     }
 }

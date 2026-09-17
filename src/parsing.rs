@@ -1,4 +1,4 @@
-use eyre::{eyre, Context};
+use eyre::{Context, eyre};
 
 pub(crate) struct Input<'a> {
     data: &'a [u8],
@@ -6,13 +6,13 @@ pub(crate) struct Input<'a> {
 }
 
 impl<'a> Input<'a> {
-
     pub(crate) fn new(data: &'a [u8]) -> Self {
         Input { data, offset: 0 }
     }
 
     pub(crate) fn u64(&mut self) -> eyre::Result<u64> {
-        let (value, num_bytes) = bijoux::u64::decode(&self.data[self.offset..]).wrap_err("failed to decode u64")?;
+        let (value, num_bytes) =
+            bijoux::u64::decode(&self.data[self.offset..]).wrap_err("failed to decode u64")?;
         self.offset += num_bytes;
         Ok(value)
     }
@@ -28,8 +28,17 @@ impl<'a> Input<'a> {
 
     pub(crate) fn array<const N: usize>(&mut self) -> eyre::Result<[u8; N]> {
         let bytes = self.bytes(N)?;
-        let array = <[u8; N]>::try_from(bytes).map_err(|e| eyre!("failed to convert bytes to array: {}", e))?;
+        let array = <[u8; N]>::try_from(bytes)
+            .map_err(|e| eyre!("failed to convert bytes to array: {}", e))?;
         Ok(array)
+    }
+
+    pub(crate) fn finish(self) -> eyre::Result<()> {
+        if self.offset == self.data.len() {
+            Ok(())
+        } else {
+            Err(eyre!("trailing bytes after encoded value"))
+        }
     }
 
     pub(crate) fn str(&mut self, len: usize) -> eyre::Result<&'a str> {
@@ -39,8 +48,11 @@ impl<'a> Input<'a> {
     }
 
     pub(crate) fn byte(&mut self) -> eyre::Result<u8> {
-        let byte = self.bytes(1)?.get(0).copied().ok_or_else(|| eyre!("not enough bytes to read"))?;
+        let byte = self
+            .bytes(1)?
+            .first()
+            .copied()
+            .ok_or_else(|| eyre!("not enough bytes to read"))?;
         Ok(byte)
     }
 }
-

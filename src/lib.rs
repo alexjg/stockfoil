@@ -2,13 +2,10 @@
 //!
 //! `stockfoil` is a library for storing and synchronizing authenticated commit
 //! graphs
-//!
-//! ```rust,ignore
-//! ```
 mod author;
 pub use author::Author;
-mod auth_error;
-pub use auth_error::{DiffError, QueryError, ResolveError, SignatureError};
+mod errors;
+pub use errors::{DiffError, QueryError, ResolveError, SignatureError};
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;

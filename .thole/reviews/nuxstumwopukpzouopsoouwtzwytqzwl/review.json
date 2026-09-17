@@ -1,0 +1,130 @@
+{
+  "change_id": "nuxstumwopukpzouopsoouwtzwytqzwl",
+  "algorithm": "patience",
+  "next_id": 1,
+  "files": {
+    "tests/mv_register/signatures.rs": {
+      "shadow_file": "tests_mv_register_signatures.rs.am",
+      "pre_image_hash": "82392410bcb66ee3",
+      "post_image_hash": "07db63b29e8f9da3",
+      "pre_shadow_file": "tests_mv_register_signatures.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "949b527b3a8cb33c",
+      "post_image_hash": "aeae285e2147e1d7",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "tests/mv_register/mod.rs": {
+      "shadow_file": "tests_mv_register_mod.rs.am",
+      "pre_image_hash": "ffc7e7375e1cd42c",
+      "post_image_hash": "589a6ac088b8a209",
+      "pre_shadow_file": "tests_mv_register_mod.rs_pre.am"
+    },
+    "tests/mv_register/revocation.rs": {
+      "shadow_file": "tests_mv_register_revocation.rs.am",
+      "pre_image_hash": "74f7b0d4c96420bd",
+      "post_image_hash": "26dcdd6e38f7d681",
+      "pre_shadow_file": "tests_mv_register_revocation.rs_pre.am"
+    },
+    "src/commit_meta.rs": {
+      "shadow_file": "src_commit_meta.rs.am",
+      "pre_image_hash": "4c4e9102b73a0bdb",
+      "post_image_hash": "224e3d9534866cf6",
+      "pre_shadow_file": "src_commit_meta.rs_pre.am"
+    },
+    "Cargo.toml": {
+      "shadow_file": "Cargo.toml.am",
+      "pre_image_hash": "7366019ed35e13d3",
+      "post_image_hash": "d8ad26bb9960907b",
+      "pre_shadow_file": "Cargo.toml_pre.am"
+    },
+    "design/authors_signatures_api.md": {
+      "shadow_file": "design_authors_signatures_api.md.am",
+      "pre_image_hash": "4dd4446d1d0df9bf",
+      "post_image_hash": "b6b0f3da6422b667",
+      "pre_shadow_file": "design_authors_signatures_api.md_pre.am"
+    },
+    "src/auth_error.rs": {
+      "shadow_file": "src_auth_error.rs.am",
+      "pre_image_hash": "3edc27f8756c3af1",
+      "post_image_hash": "af64724c8602eb6e",
+      "pre_shadow_file": "src_auth_error.rs_pre.am"
+    },
+    "src/errors.rs": {
+      "shadow_file": "src_errors.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "54a201af4e74ddad",
+      "pre_shadow_file": "src_errors.rs_pre.am"
+    },
+    "tests/commit_graph.rs": {
+      "shadow_file": "tests_commit_graph.rs.am",
+      "pre_image_hash": "cd33501e9fe3dcf8",
+      "post_image_hash": "5c0f5ee72f796a61",
+      "pre_shadow_file": "tests_commit_graph.rs_pre.am"
+    },
+    "src/pov.rs": {
+      "shadow_file": "src_pov.rs.am",
+      "pre_image_hash": "f6c9ae21e38d7508",
+      "post_image_hash": "55de9dbee09b32eb",
+      "pre_shadow_file": "src_pov.rs_pre.am"
+    },
+    "tests/mv_register/tests.rs": {
+      "shadow_file": "tests_mv_register_tests.rs.am",
+      "pre_image_hash": "b43835aa5ccfbb4d",
+      "post_image_hash": "366af78388969f35",
+      "pre_shadow_file": "tests_mv_register_tests.rs_pre.am"
+    },
+    "tests/orset/mod.rs": {
+      "shadow_file": "tests_orset_mod.rs.am",
+      "pre_image_hash": "7954b4bb03bf8964",
+      "post_image_hash": "33bd080fb30b7e88",
+      "pre_shadow_file": "tests_orset_mod.rs_pre.am"
+    },
+    "causal-delivery.md": {
+      "shadow_file": "causal-delivery.md.am",
+      "pre_image_hash": "40e5bab813ee867a",
+      "post_image_hash": "adbda5355034cc9a",
+      "pre_shadow_file": "causal-delivery.md_pre.am"
+    },
+    "src/lib.rs": {
+      "shadow_file": "src_lib.rs.am",
+      "pre_image_hash": "af74245f159fad85",
+      "post_image_hash": "3641757aab47113a",
+      "pre_shadow_file": "src_lib.rs_pre.am"
+    },
+    "tests/auth.rs": {
+      "shadow_file": "tests_auth.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "c8b75dedbf497b75",
+      "pre_shadow_file": "tests_auth.rs_pre.am"
+    },
+    "design/authors_signatures_revocation.md": {
+      "shadow_file": "design_authors_signatures_revocation.md.am",
+      "pre_image_hash": "9ba93ef22f121889",
+      "post_image_hash": "518ce93a63e803d6",
+      "pre_shadow_file": "design_authors_signatures_revocation.md_pre.am"
+    },
+    "src/parsing.rs": {
+      "shadow_file": "src_parsing.rs.am",
+      "pre_image_hash": "7f0eb6a04db911b8",
+      "post_image_hash": "c99854754ca7489b",
+      "pre_shadow_file": "src_parsing.rs_pre.am"
+    }
+  },
+  "annotations": [
+    {
+      "file_path": "src/commit_graph.rs",
+      "start_cursor": "010310bdb575f691b0c29637a7a5272e44398fb95b02",
+      "end_cursor": "010310bdb575f691b0c29637a7a5272e44398fcf5b02",
+      "original_text": "                break;",
+      "context_before": "        let publishable = self.publishable_nodes();\n        for (idx, node) in &self.nodes {\n            if publishable[idx.0] && traversal(&node.meta, &self.store[&idx]).is_break() {",
+      "context_after": "            }\n        }\n    }",
+      "body": "This will stop the entire traversal right? Not just this branch?",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    }
+  ],
+  "comment": ""
+}

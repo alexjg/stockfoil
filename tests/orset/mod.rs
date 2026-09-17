@@ -1,11 +1,13 @@
+//! Delivery-only OR-set example. The MVR demo exercises authentication and permissions.
+
 use std::{
     collections::{BTreeSet, HashMap},
     ops::ControlFlow,
 };
 
-use rand::Rng;
+use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
-use stockfoil::{CommitGraph, CommitHash, CommitMeta};
+use stockfoil::{Author, CommitGraph, CommitHash, CommitMeta};
 
 pub struct OrSet {
     graph: CommitGraph<OrSetCommit>,
@@ -18,9 +20,12 @@ pub struct ActorId([u8; 32]);
 
 impl ActorId {
     pub fn generate() -> Self {
-        let mut bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut bytes);
-        Self(bytes)
+        let key = SigningKey::from_bytes(&rand::random());
+        Self(key.verifying_key().to_bytes())
+    }
+
+    fn author(&self) -> Author {
+        Author::try_from(self.0.as_slice()).unwrap()
     }
 }
 
@@ -41,7 +46,10 @@ impl OrSet {
             actor: self.actor.clone(),
             ops: vec![Op::Add { value }],
         };
-        self.ingest_commit(self.graph.commit(&commit.encode()), commit);
+        self.ingest_commit(
+            self.graph.commit_by(self.actor.author(), &commit.encode()),
+            commit,
+        );
     }
 
     pub fn remove(&mut self, value: String) {
@@ -63,7 +71,10 @@ impl OrSet {
             actor: self.actor.clone(),
             ops: vec![Op::Remove { predecessors }],
         };
-        self.ingest_commit(self.graph.commit(&commit.encode()), commit);
+        self.ingest_commit(
+            self.graph.commit_by(self.actor.author(), &commit.encode()),
+            commit,
+        );
     }
 
     pub fn fork(&self) -> Self {
@@ -78,35 +89,36 @@ impl OrSet {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        let heads_before = self.graph.heads().collect::<Vec<_>>();
+        let heads_before = self.graph.delivered_heads().collect::<Vec<_>>();
         self.graph.merge(&other.graph);
         self.evaluate(&heads_before);
     }
 
-    pub fn ingest_commit(&mut self, meta: stockfoil::CommitMeta, commit: OrSetCommit) {
-        let heads_before = self.graph.heads().collect::<Vec<_>>();
+    pub fn ingest_commit(&mut self, meta: CommitMeta, commit: OrSetCommit) {
+        let heads_before = self.graph.delivered_heads().collect::<Vec<_>>();
         self.graph.ingest_commit(meta, commit);
         self.evaluate(&heads_before);
     }
 
     fn evaluate(&mut self, start_at: &[CommitHash]) {
-        self.graph.traverse_since(start_at, |meta, commit| {
-            for op in &commit.ops {
-                match op {
-                    Op::Add { value } => {
-                        self.state
-                            .adds
-                            .entry(value.to_string())
-                            .or_default()
-                            .insert(*meta.hash());
-                    }
-                    Op::Remove { predecessors } => {
-                        self.state.removes.extend(predecessors);
+        self.graph
+            .traverse_delivered_since(start_at, |meta, commit| {
+                for op in &commit.ops {
+                    match op {
+                        Op::Add { value } => {
+                            self.state
+                                .adds
+                                .entry(value.to_string())
+                                .or_default()
+                                .insert(*meta.hash());
+                        }
+                        Op::Remove { predecessors } => {
+                            self.state.removes.extend(predecessors);
+                        }
                     }
                 }
-            }
-            ControlFlow::Continue(())
-        });
+                ControlFlow::Continue(())
+            });
     }
 
     pub fn value(&self) -> BTreeSet<String> {

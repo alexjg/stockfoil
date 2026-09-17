@@ -1,5 +1,4 @@
-//! Red contract test for the API in design/authors_signatures_api.md.
-//! The API stubs compile but intentionally panic until implemented.
+//! End-to-end revocation and POV comparisons in the MVR demo.
 
 use std::{
     collections::{BTreeSet, HashMap},

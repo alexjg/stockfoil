@@ -115,7 +115,7 @@ permissions prevent them from contributing.
 
 ## Revocation History
 
-The `stockfoil::CommitGraph::traverse_since` API is one example of a very
+The `stockfoil::CommitGraph::traverse_delivered_since` API is one example of a very
 useful kind of API which allows applications to perform incremental updates.
 Another example would be a `diff` API which allows applications to compute the
 difference between two parts of the commit graph. At the moment these kinds of

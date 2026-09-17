@@ -1,13 +1,12 @@
 use eyre::{Context, eyre};
 
-use crate::{Author, BlobHash, CommitHash, Signature};
+use crate::{Author, BlobHash, CommitHash};
 
 #[derive(Clone)]
 pub struct CommitMeta {
     hash: CommitHash,
     parents: Vec<CommitHash>,
-    author: Option<Author>,
-    signatures: Vec<Signature>,
+    author: Author,
     payload_hash: BlobHash,
 }
 
@@ -20,7 +19,6 @@ impl CommitMeta {
             hash,
             parents: contents.parents,
             author: contents.author,
-            signatures: contents.signatures,
             payload_hash: contents.payload,
         }
     }
@@ -33,16 +31,21 @@ impl CommitMeta {
         &self.parents
     }
 
+    /// Hash of the canonical payload bytes. Applications must check received
+    /// payloads against this before attaching them to authenticated metadata.
+    pub fn payload_hash(&self) -> &BlobHash {
+        &self.payload_hash
+    }
+
     /// The claimed author. This alone is not proof of authorship.
-    pub fn author(&self) -> Option<&Author> {
-        todo!("commit author accessor")
+    pub fn author(&self) -> &Author {
+        &self.author
     }
 }
 
 pub struct CommitContents {
     pub parents: Vec<CommitHash>,
-    pub author: Option<Author>,
-    pub signatures: Vec<Signature>,
+    pub author: Author,
     pub payload: BlobHash,
 }
 
@@ -53,23 +56,19 @@ impl CommitContents {
         for parent in &self.parents {
             bytes.extend_from_slice(parent.as_bytes());
         }
-        if let Some(author) = &self.author {
-            bytes.push(1);
-            bytes.extend_from_slice(author.as_slice());
-        } else {
-            bytes.push(0);
-        }
-        bijoux::u64::encode(self.signatures.len() as u64, &mut bytes);
-        for signature in &self.signatures {
-            bytes.extend_from_slice(signature.as_slice());
-        }
+        bytes.extend_from_slice(self.author.as_slice());
         bytes.extend_from_slice(self.payload.as_slice());
         bytes
     }
 
     fn decode(data: &[u8]) -> eyre::Result<Self> {
         let mut input = crate::parsing::Input::new(data);
-        let num_parents = input.u64().wrap_err("failed to decode number of parents")? as usize;
+        let num_parents =
+            usize::try_from(input.u64().wrap_err("failed to decode number of parents")?)
+                .wrap_err("parent count is too large")?;
+        if num_parents > data.len() / 32 {
+            return Err(eyre!("parent count exceeds envelope length"));
+        }
         let mut parents = Vec::with_capacity(num_parents);
         for _ in 0..num_parents {
             let parent_bytes = input.bytes(32).wrap_err("failed to read parent hash")?;
@@ -77,37 +76,60 @@ impl CommitContents {
                 CommitHash::try_from(parent_bytes).wrap_err("failed to parse parent hash")?;
             parents.push(parent_hash);
         }
-        let author_flag = input.bytes(1).wrap_err("failed to read author flag")?;
-        let author = match author_flag[0] {
-            1 => {
-                let author_bytes = input.bytes(32).wrap_err("failed to read author bytes")?;
-                Some(Author::try_from(author_bytes).wrap_err("failed to parse author")?)
-            }
-            0 => None,
-            _ => return Err(eyre!("invalid author flag")),
-        };
-        let num_signatures = input
-            .u64()
-            .wrap_err("failed to decode number of signatures")?
-            as usize;
-        let mut signatures = Vec::with_capacity(num_signatures);
-        for _ in 0..num_signatures {
-            let signature_bytes = input
-                .array::<64>()
-                .wrap_err("failed to read signature bytes")?;
-            let signature = Signature::from(signature_bytes);
-            signatures.push(signature);
-        }
+        let author_bytes = input.bytes(32).wrap_err("failed to read author bytes")?;
+        let author = Author::try_from(author_bytes).wrap_err("failed to parse author")?;
         let payload_bytes = input
             .array::<32>()
             .wrap_err("failed to read payload hash")?;
         let payload_hash = BlobHash::from(payload_bytes);
+        input.finish()?;
         Ok(Self {
             parents,
             author,
-            signatures,
             payload: payload_hash,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_envelope_round_trips_and_binds_the_author() {
+        let author = Author::try_from([1u8; 32].as_slice()).unwrap();
+        let payload = BlobHash::of_contents(b"payload");
+        let contents = CommitContents {
+            parents: Vec::new(),
+            author,
+            payload,
+        };
+        let encoded = contents.encode();
+        // One parent-count byte, mandatory author key, payload hash.
+        // Signatures are detached from the envelope.
+        assert_eq!(encoded.len(), 1 + 32 + 32);
+        let decoded = CommitContents::decode(&encoded).unwrap();
+        assert_eq!(decoded.encode(), encoded);
+        let mut trailing_bytes = encoded.clone();
+        trailing_bytes.push(0);
+        assert!(CommitContents::decode(&trailing_bytes).is_err());
+        for len in 0..encoded.len() {
+            assert!(CommitContents::decode(&encoded[..len]).is_err());
+        }
+        let mut oversized_count = Vec::new();
+        bijoux::u64::encode(u64::MAX, &mut oversized_count);
+        assert!(CommitContents::decode(&oversized_count).is_err());
+        let meta = CommitMeta::new(contents);
+        assert_eq!(meta.author(), &author);
+        assert!(meta.payload_hash == payload);
+        assert_eq!(CommitMeta::new(decoded).hash(), meta.hash());
+
+        let another_author = CommitMeta::new(CommitContents {
+            parents: Vec::new(),
+            author: Author::try_from([2u8; 32].as_slice()).unwrap(),
+            payload,
+        });
+        assert_ne!(another_author.hash(), meta.hash());
     }
 }
 

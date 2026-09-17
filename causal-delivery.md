@@ -40,7 +40,7 @@ Let's say this is the trusted API:
 ```rust
 let graph = stockfoil::CommitGraph::new();
 
-let old_heads = graph.heads();
+let old_heads = graph.delivered_heads();
 let changes: Vec<stockfoil::Commit<am::Change>> = stockfoil::load_changes(&data)?;
 graph.ingest(changes);
 let changes = graph.diff(&old_heads);
@@ -64,7 +64,7 @@ impl stockfoil::Fragment for Fragment {
 
 let frag_graph = stockfoil::FragmentGraph::new();
 
-let old_heads = graph.heads();
+let old_heads = graph.delivered_heads();
 let changes: Vec<stockfoil::Fragment<am::Fragment>> = stockfoil::load_fragments(&data)?;
 frag_graph.ingest(&chages);
 ```

@@ -8,10 +8,10 @@ edition = "2024"
 [dependencies]
 bijoux = "0.3.2"
 blake3 = "1.8.7"
+ed25519-dalek = "2"
 eyre = "0.6.14"
 
 [dev-dependencies]
 bcs = "0.2.1"
-ed25519-dalek = "2"
 rand = "0.10.2"
 serde = { version = "1", features = ["derive"] }

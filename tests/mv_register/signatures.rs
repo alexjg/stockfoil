@@ -1,4 +1,4 @@
-//! Red contract test: local edits don't wait for signing, publication does.
+//! Local edits don't wait for signing; publication does.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -25,6 +25,69 @@ fn publishable(doc: &MvRegisterMap) -> Vec<CommitHash> {
         ControlFlow::Continue(())
     });
     hashes
+}
+
+#[test]
+fn incoming_own_author_claims_are_not_local_and_signing_does_not_grant_access() {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let author = Author::try_from(signing_key.verifying_key().as_bytes().as_slice()).unwrap();
+    let mut local = MvRegisterMap::with_author(author);
+    let hash = local.prepare_set("title", "pending");
+    let working = local.graph.pov();
+    let fork = local.fork();
+    assert!(fork.get("title").is_empty());
+    assert_eq!(fork.graph.delivered_heads().count(), 0);
+    assert!(fork.get_at(&working, "title").is_err());
+
+    // Simulate receipt outside the normal export path, even claiming our key.
+    let mut peer = MvRegisterMap::with_author(author);
+    local.graph.traverse_delivered(|meta, assignment| {
+        peer.ingest_commit(meta.clone(), assignment.clone())
+            .unwrap();
+        ControlFlow::Continue(())
+    });
+    assert!(peer.get("title").is_empty());
+    assert!(peer.get_at(&working, "title").is_err());
+    assert_eq!(local.get_at(&working, "title").unwrap(), values("pending"));
+
+    local.set_write_permissions(&HashMap::new());
+    assert!(local.get("title").is_empty());
+    assert!(publishable(&local).is_empty());
+    local
+        .ingest_signature(author, hash, sign(&signing_key, &hash))
+        .unwrap();
+    assert!(local.get("title").is_empty());
+    assert!(publishable(&local) == vec![hash]);
+    assert!(local.graph.resolve(&working).is_ok());
+    assert_eq!(local.get_at(&working, "title").unwrap(), values("pending"));
+    let fork = local.fork();
+    assert!(fork.get("title").is_empty()); // Copies the revoked permissions.
+    assert_eq!(fork.get_at(&working, "title").unwrap(), values("pending"));
+    peer.merge(&local);
+    // The peer has its own permissions; merge transfers evidence, not policy.
+    assert_eq!(peer.get("title"), values("pending"));
+    assert_eq!(peer.get_at(&working, "title").unwrap(), values("pending"));
+}
+
+#[test]
+fn received_payload_must_match_the_signed_metadata_before_ingestion() {
+    let key = SigningKey::from_bytes(&[8; 32]);
+    let author = Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap();
+    let mut source = MvRegisterMap::with_author(author);
+    let hash = source.prepare_set("title", "legitimate");
+    let mut peer = MvRegisterMap::with_author(author);
+    source.graph.traverse_delivered(|meta, assignment| {
+        let mut substituted = assignment.clone();
+        substituted.value = "substituted".to_owned();
+        assert!(peer.ingest_commit(meta.clone(), substituted).is_err());
+        ControlFlow::Continue(())
+    });
+    assert_eq!(peer.graph.delivered_heads().count(), 0);
+    source
+        .ingest_signature(author, hash, sign(&key, &hash))
+        .unwrap();
+    peer.merge(&source);
+    assert_eq!(peer.get("title"), values("legitimate"));
 }
 
 #[test]

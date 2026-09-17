@@ -2,13 +2,17 @@
 
 This is the implementation sketch for
 [Authors, Signatures, and Write Frontiers](authors_signatures_revocation.md).
-The public types and methods are now stubbed out with `todo!()`. Names are still
-provisional; authentication, POV handling, and publication aren't implemented.
-The existing unsigned APIs and commit encoding are unchanged for now.
+The in-memory graph and MVR demo implement this API. This is an experimental
+sketch: no compatibility APIs or format migrations.
 
 ## Commit metadata and signatures
 
-* Keep the author in the hashed commit contents; expose `CommitMeta::author()`.
+* Every commit has an author in its hashed contents. `CommitMeta::author()`
+  returns `&Author`; `payload_hash()` exposes the payload hash. `CommitGraph<P>`
+  cannot encode an arbitrary `P`: callers must bind received payloads to this
+  hash before ingestion or use. Signature
+  verification authenticates the envelope and hash, not an unchecked decoded
+  value. The MVR receive path checks its canonical BCS bytes before storing them.
 * Remove signatures from `CommitContents`, `CommitMeta`, and the hashed encoding.
   Deliver them separately as `(author, commit_hash, signature)`.
 * Add an authored commit builder, roughly `commit_by(author, payload)`. Parents
@@ -21,7 +25,9 @@ The existing unsigned APIs and commit encoding are unchanged for now.
   Verify real Ed25519 signatures. A signature can arrive before its commit;
   retain it until the graph can establish which ancestors it covers. Verified
   signatures advance the signed frontier and release covered local commits for
-  publication. Invalid signatures do neither.
+  publication. Invalid signatures do neither. Older signatures are pruned once a
+  covering signature and its ancestry are publishable; until then we retain the
+  older proof so exported history can still be authenticated.
 * Give `Author` equality, ordering, hashing, and debug output so it works as a
   map key. Keep signing keys outside Stockfoil.
 
@@ -31,15 +37,13 @@ synchronous. A later frontier signature may cover a batch of local commits. We
 don't need a signature per keystroke or a resolver API listing pending requests.
 Signing never grants write permission.
 
-The old unsigned constructor needs an explicit migration decision. Anonymous
-commits must not quietly bypass default-deny in the authenticated API.
+`commit_by(author, payload)` is the commit builder. An author is mandatory even
+when signatures haven't arrived yet.
 
 ## Delivery and permissions
 
-* Rename `heads`, `traverse`, and `traverse_since` to `delivered_heads`,
-  `traverse_delivered`, and `traverse_delivered_since`. Keep the current causal
-  ordering and callback shape. Authentication and permissions don't gate delivery.
-  For now the new names are stubs alongside the existing working methods.
+* `delivered_heads`, `traverse_delivered`, and `traverse_delivered_since` expose
+  causally delivered history. Authentication and permissions don't gate delivery.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.
@@ -53,8 +57,8 @@ commits must not quietly bypass default-deny in the authenticated API.
   still be forwarded pending verification; the holdback is for unpublished local
   work. Revoked, published commits remain available for delivery and sync.
 
-Existing graph tests can still use unsigned commits to test delivery. The demos
-will need authored, signed commits and explicit grants in their test fixtures.
+Graph tests and the delivery-only OR-set example use authored commits without
+signatures. The MVR demo uses signatures and explicit permission grants.
 
 ## POVs and diffs
 
@@ -62,8 +66,10 @@ will need authored, signed commits and explicit grants in their test fixtures.
 write permissions, and authentication frontiers. Those frontiers say which commits
 the POV treats as authenticated, not whether signatures are available.
 Give it a `delivered_heads() -> &[CommitHash]` accessor, plus read-only
-`write_permissions()` and `authentication_frontiers()` maps. It must survive graph
-mutation and can be resolved elsewhere once enough signature evidence is available.
+`write_permissions()` and `authentication_frontiers()` maps. `Pov::from_parts`
+reconstructs the description after transport or storage; it doesn't validate its
+claims. The POV survives graph mutation and can be resolved elsewhere once enough
+signature evidence is available.
 
 Working and signed POVs have the same shape. The working frontier also
 covers our own prepared commits pending signing; the signed frontier uses only
@@ -123,8 +129,9 @@ select the causally maximal *participating* assignments for each key. Revoking
 an assignment removes both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
-For the first implementation, rebuilding the small demo's state from retained
-assignments is fine. Later we can use the commit diff to pick affected keys.
+The small demo rebuilds its state from retained assignments. Later we can use
+the commit diff to pick affected keys. It also retains its locally captured POVs
+so it can recognize historical local reads that don't yet have signatures.
 In either case, compare POVs after local creation, commit ingestion,
 signature ingestion, and permission updates, not just after explicit revocation.
 The displayed state uses the working POV; signing status compares it with
@@ -150,16 +157,16 @@ Small demo API changes used by the contract test:
 
 `new()` generates a signing key and explicitly grants that author unbounded
 access. This is demo setup, not a Stockfoil default. `fork()` creates a new
-signing key but copies the old permission map; tests must grant the new author
-on both replicas before expecting its writes to contribute. `merge()` transfers
-publishable commits and signature evidence, and leaves local permissions alone.
+signing key, copies the old permission map, and imports only publishable history.
+It doesn't copy unsigned local drafts or the source's local POV exemptions. Tests
+must grant the new author on both replicas before expecting its writes to
+contribute. `merge()` transfers publishable commits and signature evidence, and
+leaves local permissions alone.
 
 ## First test and follow-ups
 
-`tests/mv_register/revocation.rs` is a red contract test against these APIs. It and
-the signature-flow test now compile in the normal smoke target, but deliberately
-fail at runtime on the `todo!()` stubs. No fake authentication or reference
-implementation stands in for Stockfoil.
+`tests/mv_register/revocation.rs` and the signature-flow test run in the normal
+smoke target against the real graph and Ed25519 verification.
 
 It covers inclusive bounds, restored overwritten values, concurrent values,
 allowed descendants of revoked commits, default-deny, explicit denial, empty
@@ -167,7 +174,7 @@ bounds, restoring unbounded access, stable old POVs, backwards and
 cross-branch comparisons, and resolving a POV on another replica.
 Revocation must not change delivered heads or redeliver old commits.
 
-`tests/mv_register/signatures.rs` adds a second red contract test using the split
+`tests/mv_register/signatures.rs` exercises the split
 prepare/sign flow. It creates an Ed25519 key from a fixed test seed and signs the
 actual 32-byte commit hashes with `ed25519-dalek`. The test controls when those
 signatures reach Stockfoil, so it can exercise delayed signing without fixed
@@ -188,12 +195,12 @@ The flow test covers:
 
 It also checks a batch covered by one later signature, an overwritten pending
 edit, a valid signature supplied for the wrong hash, duplicate delivery, and
-holding back unsigned descendants. Still add a case where permissions change
-while signing is pending, and one where a signed descendant by a different author
+holding back unsigned descendants and permissions changing while signing is
+pending. `tests/auth.rs` also covers a signed descendant by another author that
 mustn't leak an unsigned local ancestor.
 
-The MVR can expose delayed remote signatures and frontier proofs too. These need
-a fixture that delivers commits and signatures separately. Add focused tests for:
+The graph-level tests in `tests/auth.rs` deliver commits and signatures separately
+to cover:
 
 * A remote signature arriving without new commits changes participation, not old
   POVs or delivered heads.
