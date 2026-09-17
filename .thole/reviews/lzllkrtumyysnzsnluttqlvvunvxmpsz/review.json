@@ -1,0 +1,21 @@
+{
+  "change_id": "lzllkrtumyysnzsnluttqlvvunvxmpsz",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "design/authors_signatures_revocation.md": {
+      "shadow_file": "design_authors_signatures_revocation.md.am",
+      "pre_image_hash": "2495c4c4469ed781",
+      "post_image_hash": "06859daea8e16d56",
+      "pre_shadow_file": "design_authors_signatures_revocation.md_pre.am"
+    },
+    "design/authors_signatures_api.md": {
+      "shadow_file": "design_authors_signatures_api.md.am",
+      "pre_image_hash": "26254daed609ffcc",
+      "post_image_hash": "243501f1cc25ca67",
+      "pre_shadow_file": "design_authors_signatures_api.md_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}
