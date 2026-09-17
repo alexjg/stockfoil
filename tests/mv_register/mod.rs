@@ -9,6 +9,7 @@ use std::{
 use serde::Serialize;
 use stockfoil::{CommitGraph, CommitHash, CommitMeta};
 
+mod revocation;
 mod tests;
 
 pub struct MvRegisterMap {

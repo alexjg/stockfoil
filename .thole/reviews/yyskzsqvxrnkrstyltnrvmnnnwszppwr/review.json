@@ -1,0 +1,33 @@
+{
+  "change_id": "yyskzsqvxrnkrstyltnrvmnnnwszppwr",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "design/authors_signatures_revocation.md": {
+      "shadow_file": "design_authors_signatures_revocation.md.am",
+      "pre_image_hash": "463938171b774106",
+      "post_image_hash": "2495c4c4469ed781",
+      "pre_shadow_file": "design_authors_signatures_revocation.md_pre.am"
+    },
+    "design/authors_signatures_api.md": {
+      "shadow_file": "design_authors_signatures_api.md.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "26254daed609ffcc",
+      "pre_shadow_file": "design_authors_signatures_api.md_pre.am"
+    },
+    "tests/mv_register/mod.rs": {
+      "shadow_file": "tests_mv_register_mod.rs.am",
+      "pre_image_hash": "d9b4da09209cfbcf",
+      "post_image_hash": "7af869213d64b056",
+      "pre_shadow_file": "tests_mv_register_mod.rs_pre.am"
+    },
+    "tests/mv_register/revocation.rs": {
+      "shadow_file": "tests_mv_register_revocation.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "a746c0ee3a6182fc",
+      "pre_shadow_file": "tests_mv_register_revocation.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

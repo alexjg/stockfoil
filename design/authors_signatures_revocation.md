@@ -209,6 +209,9 @@ confers process independence without requiring a shared authorization log or DAG
 
 ## API
 
+See the [implementation sketch](authors_signatures_api.md) for proposed API
+changes and the MVR test plan.
+
 `set_write_permissions` replaces the whole permission map. Omitted authors are
 denied, and existing perspectives keep their old snapshots.
 
