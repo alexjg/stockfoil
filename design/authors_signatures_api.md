@@ -40,7 +40,8 @@ commits must not quietly bypass default-deny in the authenticated API.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.
-* Add a publishable traversal/export path, separate from delivered traversal.
+* Add `traverse_publishable`, with the same callback shape as delivered traversal,
+  for the export path.
   Withhold our unpublished local commits until covered by verified signatures.
   A descendant export must not leak unsigned local ancestors. Publication uses
   actual signature coverage, not the working frontier or document visibility.
@@ -128,6 +129,11 @@ the signed one.
 Small demo API changes used by the contract test:
 
 * `author() -> Author` exposes the replica's public signing key.
+* `with_author(Author)` creates a replica whose signer lives elsewhere. It uses
+  the public key as the assignment's actor ID; no private key is required.
+* `prepare_set(key, value) -> CommitHash` creates and locally ingests an assignment
+  without signing it. `ingest_signature(author, hash, signature)` delivers a
+  signer response and refreshes the working and signed views.
 * `set(key, value) -> CommitHash` remains a convenience that prepares a local
   assignment and signs it immediately with the demo's in-memory key. Split those
   steps in the fixture so tests can hold back real signatures while the local
@@ -157,7 +163,13 @@ bounds, restoring unbounded access, stable old perspectives, backwards and
 cross-branch comparisons, and resolving a perspective on another replica.
 Revocation must not change delivered heads or redeliver old commits.
 
-Add a local-signing test using the split prepare/sign fixture:
+`tests/mv_register/signatures.rs` adds a second red contract test using the split
+prepare/sign flow. It creates an Ed25519 key from a fixed test seed and signs the
+actual 32-byte commit hashes with `ed25519-dalek`. The test controls when those
+signatures reach Stockfoil, so it can exercise delayed signing without fixed
+signature fixtures or a second implementation of the commit encoding.
+
+The flow test covers:
 
 1. Capture the initial working and signed perspectives.
 2. Prepare a local edit without delivering its signature. It appears in the
@@ -170,9 +182,11 @@ Add a local-signing test using the split prepare/sign fixture:
 5. Recheck the captured perspectives: their values and frontiers stay fixed.
    The earlier working perspective can now resolve against signature evidence.
 
-Also test a batch covered by one later signature, an overwritten pending edit
-whose status changes without a document patch, permissions changing while signing
-is pending, and a descendant export that mustn't leak an unsigned local ancestor.
+It also checks a batch covered by one later signature, an overwritten pending
+edit, a valid signature supplied for the wrong hash, duplicate delivery, and
+holding back unsigned descendants. Still add a case where permissions change
+while signing is pending, and one where a signed descendant by a different author
+mustn't leak an unsigned local ancestor.
 
 The MVR can expose delayed remote signatures and frontier proofs too. These need
 a fixture that delivers commits and signatures separately. Add focused tests for:

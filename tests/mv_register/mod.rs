@@ -10,6 +10,7 @@ use serde::Serialize;
 use stockfoil::{CommitGraph, CommitHash, CommitMeta};
 
 mod revocation;
+mod signatures;
 mod tests;
 
 pub struct MvRegisterMap {
