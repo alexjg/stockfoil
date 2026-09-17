@@ -1,5 +1,5 @@
 //! Red contract test for the API in design/authors_signatures_api.md.
-//! These APIs intentionally do not exist yet; don't replace them with mocks.
+//! The API stubs compile but intentionally panic until implemented.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -32,9 +32,9 @@ fn revocation_changes_participation_without_retracting_delivery() {
     // Two concurrent branches. The bound will include Alice's first write,
     // but neither of her later writes.
     let bound = alice.set("title", "allowed");
-    let alice_branch = alice.graph.perspective();
+    let alice_branch = alice.graph.pov();
     let concurrent = bob.set("title", "concurrent");
-    let bob_branch = bob.graph.perspective();
+    let bob_branch = bob.graph.pov();
     let revoked_title = alice.set("title", "revoked");
     let revoked_key = alice.set("private", "hidden after revocation");
 
@@ -63,13 +63,13 @@ fn revocation_changes_participation_without_retracting_delivery() {
         change.commit_id == concurrent && change.visibility_delta == VisDiff::After
     }));
 
-    let before = alice.graph.perspective();
+    let before = alice.graph.pov();
     let restricted = HashMap::from([
         (alice_id, WritePermission::Bounded(vec![bound])),
         (bob_id, WritePermission::Unbounded),
     ]);
     alice.set_write_permissions(&restricted);
-    let after = alice.graph.perspective();
+    let after = alice.graph.pov();
 
     // Revocation restores the overwritten value, removes the new key, and
     // leaves both the concurrent write and Bob's allowed descendant alone.
@@ -98,7 +98,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
         changes.iter().map(|c| c.commit_id).collect::<BTreeSet<_>>()
             == BTreeSet::from([revoked_title, revoked_key])
     );
-    // The bound participates in BOTH perspectives, but becomes a visible
+    // The bound participates in BOTH POVs, but becomes a visible
     // register value only after its overwriter stops participating.
     assert_eq!(diff.visibility(&bound).unwrap(), Vis::Both);
     assert_eq!(diff.visibility(&descendant).unwrap(), Vis::Both);
@@ -128,7 +128,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
         0
     );
 
-    // Old perspectives don't change, and another replica can resolve them
+    // Old POVs don't change, and another replica can resolve them
     // without adopting their write permissions as its current policy.
     assert_eq!(
         alice.get_at(&before, "title").unwrap(),
@@ -155,7 +155,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
     // Replacing the map really replaces it: omitting Alice denies even her
     // earlier commits. Explicit denial and an empty bound mean the same thing.
     alice.set_write_permissions(&HashMap::from([(bob_id, WritePermission::Unbounded)]));
-    let omitted = alice.graph.perspective();
+    let omitted = alice.graph.pov();
     assert_eq!(alice.get("title"), values(&["concurrent"]));
     assert_eq!(alice.get("description"), values(&["still here"]));
     let mut denied = HashMap::from([
@@ -166,7 +166,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
     assert_eq!(
         alice
             .graph
-            .diff(&omitted, &alice.graph.perspective())
+            .diff(&omitted, &alice.graph.pov())
             .unwrap()
             .changed_commits()
             .count(),
@@ -177,7 +177,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
     assert_eq!(
         alice
             .graph
-            .diff(&omitted, &alice.graph.perspective())
+            .diff(&omitted, &alice.graph.pov())
             .unwrap()
             .changed_commits()
             .count(),
@@ -189,7 +189,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
     alice.set_write_permissions(&allowed);
     assert_eq!(alice.get("title"), values(&["revoked", "concurrent"]));
     assert_eq!(alice.get("private"), values(&["hidden after revocation"]));
-    assert!(alice.graph.perspective().delivered_heads() == before.delivered_heads());
+    assert!(alice.graph.pov().delivered_heads() == before.delivered_heads());
     assert_eq!(
         alice.get_at(&after, "title").unwrap(),
         values(&["allowed", "concurrent"])
@@ -204,7 +204,7 @@ fn revocation_changes_participation_without_retracting_delivery() {
     assert_eq!(bob.get("title"), values(&["descendant wins"]));
 
     // Unbounded isn't an alias for today's heads; it permits future writes.
-    // That doesn't expand an already captured perspective.
+    // That doesn't expand an already captured POV.
     alice.set("title", "future write");
     assert_eq!(alice.get("title"), values(&["future write"]));
     assert_eq!(

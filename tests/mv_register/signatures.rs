@@ -43,20 +43,20 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     let base_signature = sign(&signing_key, &base);
     assert_eq!(local.get("title"), values("before"));
     assert!(publishable(&local).is_empty());
-    assert!(local.graph.resolve(&local.graph.perspective()).is_err());
+    assert!(local.graph.resolve(&local.graph.pov()).is_err());
     local
         .ingest_signature(author, base, base_signature)
         .unwrap();
-    let initial_working = local.graph.perspective();
-    let initial_signed = local.graph.signed_perspective();
+    let initial_working = local.graph.pov();
+    let initial_signed = local.graph.signed_pov();
     assert!(local.graph.resolve(&initial_working).is_ok());
     peer.merge(&local);
     assert_eq!(peer.get("title"), values("before"));
 
     // First edit: visible locally, but no signature has arrived.
     let first = local.prepare_set("title", "pending");
-    let first_working = local.graph.perspective();
-    let first_signed = local.graph.signed_perspective();
+    let first_working = local.graph.pov();
+    let first_signed = local.graph.signed_pov();
     assert_eq!(local.get("title"), values("pending"));
     assert_eq!(
         local.get_at(&first_signed, "title").unwrap(),
@@ -87,7 +87,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     assert_eq!(local.get("title"), values("pending"));
     assert!(local.graph.resolve(&first_working).is_err());
     assert!(publishable(&local) == vec![base]);
-    let still_signed = local.graph.signed_perspective();
+    let still_signed = local.graph.signed_pov();
     assert_eq!(
         local
             .graph
@@ -102,8 +102,8 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     // can leak through export or merge, including through the descendant.
     let tip = local.prepare_set("title", "after");
     let tip_signature = sign(&signing_key, &tip);
-    let batch_working = local.graph.perspective();
-    let batch_signed = local.graph.signed_perspective();
+    let batch_working = local.graph.pov();
+    let batch_signed = local.graph.signed_pov();
     assert_eq!(local.get("title"), values("after"));
     assert_eq!(
         local.get_at(&batch_signed, "title").unwrap(),
@@ -129,8 +129,8 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     // Deliver ONLY the tip's signature: it authenticates both pending edits.
     // The first pending commit is never signed directly.
     local.ingest_signature(author, tip, tip_signature).unwrap();
-    let published_working = local.graph.perspective();
-    let published_signed = local.graph.signed_perspective();
+    let published_working = local.graph.pov();
+    let published_signed = local.graph.signed_pov();
     assert_eq!(local.get("title"), values("after"));
     assert_eq!(
         local.get_at(&published_signed, "title").unwrap(),
@@ -159,19 +159,16 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     assert_eq!(exported.len(), 3);
     assert!(exported.into_iter().collect::<BTreeSet<_>>() == BTreeSet::from([base, first, tip]));
 
-    // Old pending perspectives can now resolve, without changing their meaning.
+    // Old pending POVs can now resolve, without changing their meaning.
     assert!(local.graph.resolve(&first_working).is_ok());
     assert!(local.graph.resolve(&batch_working).is_ok());
-    for perspective in [
+    for pov in [
         &initial_working,
         &initial_signed,
         &first_signed,
         &batch_signed,
     ] {
-        assert_eq!(
-            local.get_at(perspective, "title").unwrap(),
-            values("before")
-        );
+        assert_eq!(local.get_at(pov, "title").unwrap(), values("before"));
     }
     assert_eq!(
         local.get_at(&first_working, "title").unwrap(),
@@ -206,7 +203,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     assert_eq!(
         local
             .graph
-            .diff(&published_signed, &local.graph.signed_perspective())
+            .diff(&published_signed, &local.graph.signed_pov())
             .unwrap()
             .changed_commits()
             .count(),

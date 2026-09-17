@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CommitHash([u8; 32]);
 
 impl CommitHash {
@@ -15,12 +15,9 @@ impl<'a> TryFrom<&'a [u8]> for CommitHash {
     type Error = InvalidCommitHash;
 
     fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
-        let bytes = <[u8; 32]>::try_from(value).map_err(|e| {
-            InvalidCommitHash(e.to_string())
-        })?;
+        let bytes = <[u8; 32]>::try_from(value).map_err(|e| InvalidCommitHash(e.to_string()))?;
         Ok(Self(bytes))
     }
-
 }
 
 impl From<[u8; 32]> for CommitHash {

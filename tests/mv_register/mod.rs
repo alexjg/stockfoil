@@ -7,7 +7,10 @@ use std::{
 };
 
 use serde::Serialize;
-use stockfoil::{CommitGraph, CommitHash, CommitMeta};
+use stockfoil::{
+    Author, CommitGraph, CommitHash, CommitMeta, Pov, ResolveError, Signature, SignatureError,
+    WritePermission,
+};
 
 mod revocation;
 mod signatures;
@@ -50,14 +53,47 @@ impl MvRegisterMap {
         }
     }
 
-    pub fn set(&mut self, key: &str, value: &str) {
+    // Auth API placeholders; the existing unsigned demo still works below.
+    pub fn with_author(_author: Author) -> Self {
+        todo!("MVR with an external signer")
+    }
+
+    pub fn author(&self) -> Author {
+        todo!("MVR author")
+    }
+
+    pub fn prepare_set(&mut self, _key: &str, _value: &str) -> CommitHash {
+        todo!("prepare an unsigned local assignment")
+    }
+
+    pub fn ingest_signature(
+        &mut self,
+        _author: Author,
+        _hash: CommitHash,
+        _signature: Signature,
+    ) -> Result<(), SignatureError> {
+        todo!("MVR signature ingestion")
+    }
+
+    pub fn set_write_permissions(&mut self, _permissions: &HashMap<Author, WritePermission>) {
+        todo!("MVR write permissions")
+    }
+
+    pub fn get_at(&self, _pov: &Pov, _key: &str) -> Result<BTreeSet<String>, ResolveError> {
+        todo!("MVR read at a POV")
+    }
+
+    pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
         let assignment = Assignment {
             actor: self.actor,
             key: key.to_owned(),
             value: value.to_owned(),
         };
         let bytes = bcs::to_bytes(&assignment).expect("assignment serialization failed");
-        self.ingest_commit(self.graph.commit(&bytes), assignment);
+        let meta = self.graph.commit(&bytes);
+        let hash = *meta.hash();
+        self.ingest_commit(meta, assignment);
+        hash
     }
 
     pub fn get(&self, key: &str) -> BTreeSet<String> {

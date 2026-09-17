@@ -3,7 +3,10 @@ use std::{
     ops::{ControlFlow, Index},
 };
 
-use crate::{BlobHash, CommitContents, CommitHash, CommitMeta};
+use crate::{
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, Pov, PovDiff,
+    ResolveError, ResolvedPov, Signature, SignatureError, WritePermission,
+};
 
 /// An in-memory commit DAG with causal delivery.
 /// Commits with missing parents are queued until all their ancestors are available.
@@ -217,6 +220,86 @@ impl<P: Clone> CommitGraph<P> {
                 break;
             }
         }
+    }
+
+    /// Heads of the causally delivered history, regardless of participation.
+    /// This new API is a stub; `heads` remains available for existing callers.
+    pub fn delivered_heads(&self) -> impl Iterator<Item = CommitHash> + '_ {
+        std::iter::from_fn(|| todo!("delivered heads"))
+    }
+
+    /// Visit delivered commits, parents first, regardless of authentication or
+    /// write permission. Returning `Break` stops traversal.
+    pub fn traverse_delivered<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(&self, _traversal: F) {
+        todo!("delivered traversal")
+    }
+
+    /// Visit delivered commits excluding `since` and their ancestors.
+    pub fn traverse_delivered_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
+        &self,
+        _since: &[CommitHash],
+        _traversal: F,
+    ) {
+        todo!("incremental delivered traversal")
+    }
+
+    /// Visit exportable commits, withholding unsigned local work and descendants
+    /// that would expose it. Publication is separate from document participation.
+    pub fn traverse_publishable<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
+        &self,
+        _traversal: F,
+    ) {
+        todo!("publishable traversal")
+    }
+
+    /// Prepare an authored commit without signing or ingesting it.
+    pub fn commit_by(&self, _author: Author, _contents: &[u8]) -> CommitMeta {
+        todo!("authored commit preparation")
+    }
+
+    /// Ingest our own prepared commit for immediate local use. Keep it out of
+    /// publication until covered by verified signatures.
+    pub fn ingest_local_commit(&mut self, _meta: CommitMeta, _data: P) {
+        todo!("local commit ingestion")
+    }
+
+    /// Verify and record signature evidence, possibly before its commit arrives.
+    /// Does not grant write permission.
+    pub fn ingest_signature(
+        &mut self,
+        _author: Author,
+        _hash: CommitHash,
+        _signature: Signature,
+    ) -> Result<(), SignatureError> {
+        todo!("signature ingestion")
+    }
+
+    /// Replace the entire permission map. Missing authors are denied; captured
+    /// POVs keep their previous permissions.
+    pub fn set_write_permissions(&mut self, _permissions: &HashMap<Author, WritePermission>) {
+        todo!("write permissions")
+    }
+
+    /// Capture the working state, including our pending-signature local commits.
+    pub fn pov(&self) -> Pov {
+        todo!("working POV capture")
+    }
+
+    /// Capture the same history and permissions with signature-backed coverage.
+    pub fn signed_pov(&self) -> Pov {
+        todo!("signed POV capture")
+    }
+
+    /// Resolve against actual signature evidence. Pending signatures do not
+    /// suffice, even for a POV captured locally.
+    pub fn resolve(&self, _pov: &Pov) -> Result<ResolvedPov<'_>, ResolveError> {
+        todo!("POV resolution")
+    }
+
+    /// Compare participation without certifying signature evidence. Received POVs
+    /// must be resolved before they drive a materialized view.
+    pub fn diff(&self, _before: &Pov, _after: &Pov) -> Result<PovDiff<'_>, DiffError> {
+        todo!("POV comparison")
     }
 
     pub fn commit(&self, contents: &[u8]) -> CommitMeta {

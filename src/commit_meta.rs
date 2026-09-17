@@ -1,4 +1,4 @@
-use eyre::{eyre, Context};
+use eyre::{Context, eyre};
 
 use crate::{Author, BlobHash, CommitHash, Signature};
 
@@ -31,6 +31,11 @@ impl CommitMeta {
 
     pub fn parents(&self) -> &[CommitHash] {
         &self.parents
+    }
+
+    /// The claimed author. This alone is not proof of authorship.
+    pub fn author(&self) -> Option<&Author> {
+        todo!("commit author accessor")
     }
 }
 
@@ -68,7 +73,8 @@ impl CommitContents {
         let mut parents = Vec::with_capacity(num_parents);
         for _ in 0..num_parents {
             let parent_bytes = input.bytes(32).wrap_err("failed to read parent hash")?;
-            let parent_hash = CommitHash::try_from(parent_bytes).wrap_err("failed to parse parent hash")?;
+            let parent_hash =
+                CommitHash::try_from(parent_bytes).wrap_err("failed to parse parent hash")?;
             parents.push(parent_hash);
         }
         let author_flag = input.bytes(1).wrap_err("failed to read author flag")?;
@@ -76,18 +82,25 @@ impl CommitContents {
             1 => {
                 let author_bytes = input.bytes(32).wrap_err("failed to read author bytes")?;
                 Some(Author::try_from(author_bytes).wrap_err("failed to parse author")?)
-            },
+            }
             0 => None,
             _ => return Err(eyre!("invalid author flag")),
         };
-        let num_signatures = input.u64().wrap_err("failed to decode number of signatures")? as usize;
+        let num_signatures = input
+            .u64()
+            .wrap_err("failed to decode number of signatures")?
+            as usize;
         let mut signatures = Vec::with_capacity(num_signatures);
         for _ in 0..num_signatures {
-            let signature_bytes = input.array::<64>().wrap_err("failed to read signature bytes")?;
+            let signature_bytes = input
+                .array::<64>()
+                .wrap_err("failed to read signature bytes")?;
             let signature = Signature::from(signature_bytes);
             signatures.push(signature);
         }
-        let payload_bytes = input.array::<32>().wrap_err("failed to read payload hash")?;
+        let payload_bytes = input
+            .array::<32>()
+            .wrap_err("failed to read payload hash")?;
         let payload_hash = BlobHash::from(payload_bytes);
         Ok(Self {
             parents,

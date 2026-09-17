@@ -2,7 +2,9 @@
 
 This is the implementation sketch for
 [Authors, Signatures, and Write Frontiers](authors_signatures_revocation.md).
-Names and signatures below are proposals, not implemented APIs.
+The public types and methods are now stubbed out with `todo!()`. Names are still
+provisional; authentication, POV handling, and publication aren't implemented.
+The existing unsigned APIs and commit encoding are unchanged for now.
 
 ## Commit metadata and signatures
 
@@ -37,6 +39,7 @@ commits must not quietly bypass default-deny in the authenticated API.
 * Rename `heads`, `traverse`, and `traverse_since` to `delivered_heads`,
   `traverse_delivered`, and `traverse_delivered_since`. Keep the current causal
   ordering and callback shape. Authentication and permissions don't gate delivery.
+  For now the new names are stubs alongside the existing working methods.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.
@@ -58,7 +61,8 @@ will need authored, signed commits and explicit grants in their test fixtures.
 `Pov` is an owned, cloneable description containing delivered heads,
 write permissions, and authentication frontiers. Those frontiers say which commits
 the POV treats as authenticated, not whether signatures are available.
-Give it a `delivered_heads() -> &[CommitHash]` accessor. It must survive graph
+Give it a `delivered_heads() -> &[CommitHash]` accessor, plus read-only
+`write_permissions()` and `authentication_frontiers()` maps. It must survive graph
 mutation and can be resolved elsewhere once enough signature evidence is available.
 
 Working and signed POVs have the same shape. The working frontier also
@@ -152,10 +156,10 @@ publishable commits and signature evidence, and leaves local permissions alone.
 
 ## First test and follow-ups
 
-`tests/mv_register/revocation.rs` is a red contract test against these proposed
-APIs. It is wired into the normal smoke test target, so that target deliberately
-won't compile until the APIs and demo changes exist. No fake authentication or
-reference implementation stands in for Stockfoil.
+`tests/mv_register/revocation.rs` is a red contract test against these APIs. It and
+the signature-flow test now compile in the normal smoke target, but deliberately
+fail at runtime on the `todo!()` stubs. No fake authentication or reference
+implementation stands in for Stockfoil.
 
 It covers inclusive bounds, restored overwritten values, concurrent values,
 allowed descendants of revoked commits, default-deny, explicit denial, empty

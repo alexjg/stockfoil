@@ -1,5 +1,5 @@
-#[derive(Clone, Copy)]
-pub struct Author([u8;32]);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Author([u8; 32]);
 
 impl Author {
     pub fn as_slice(&self) -> &[u8] {
@@ -15,9 +15,7 @@ impl TryFrom<&[u8]> for Author {
     type Error = InvalidAuthor;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let bytes = <[u8; 32]>::try_from(value).map_err(|e| {
-            InvalidAuthor(e.to_string())
-        })?;
+        let bytes = <[u8; 32]>::try_from(value).map_err(|e| InvalidAuthor(e.to_string()))?;
         Ok(Self(bytes))
     }
 }

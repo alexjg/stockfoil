@@ -1,0 +1,81 @@
+{
+  "change_id": "qpusqmnxwwuzwxpxxmvwpkrmzyzkxztt",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "src/write_permission.rs": {
+      "shadow_file": "src_write_permission.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "90bf05486f756e01",
+      "pre_shadow_file": "src_write_permission.rs_pre.am"
+    },
+    "src/lib.rs": {
+      "shadow_file": "src_lib.rs.am",
+      "pre_image_hash": "43e51c5e7df57c7d",
+      "post_image_hash": "af74245f159fad85",
+      "pre_shadow_file": "src_lib.rs_pre.am"
+    },
+    "tests/mv_register/mod.rs": {
+      "shadow_file": "tests_mv_register_mod.rs.am",
+      "pre_image_hash": "6bea90872418b0b4",
+      "post_image_hash": "ffc7e7375e1cd42c",
+      "pre_shadow_file": "tests_mv_register_mod.rs_pre.am"
+    },
+    "src/auth_error.rs": {
+      "shadow_file": "src_auth_error.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "3edc27f8756c3af1",
+      "pre_shadow_file": "src_auth_error.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "a2c43d1e14f5af34",
+      "post_image_hash": "949b527b3a8cb33c",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "src/pov.rs": {
+      "shadow_file": "src_pov.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "f6c9ae21e38d7508",
+      "pre_shadow_file": "src_pov.rs_pre.am"
+    },
+    "tests/mv_register/revocation.rs": {
+      "shadow_file": "tests_mv_register_revocation.rs.am",
+      "pre_image_hash": "a746c0ee3a6182fc",
+      "post_image_hash": "74f7b0d4c96420bd",
+      "pre_shadow_file": "tests_mv_register_revocation.rs_pre.am"
+    },
+    "src/commit_hash.rs": {
+      "shadow_file": "src_commit_hash.rs.am",
+      "pre_image_hash": "5cb73f46de745b32",
+      "post_image_hash": "86d6384f9f8d9dc3",
+      "pre_shadow_file": "src_commit_hash.rs_pre.am"
+    },
+    "src/author.rs": {
+      "shadow_file": "src_author.rs.am",
+      "pre_image_hash": "e6b5d011a8fe1a88",
+      "post_image_hash": "b55e428b9ac4cc51",
+      "pre_shadow_file": "src_author.rs_pre.am"
+    },
+    "src/commit_meta.rs": {
+      "shadow_file": "src_commit_meta.rs.am",
+      "pre_image_hash": "3e6452bb6a4691b2",
+      "post_image_hash": "4c4e9102b73a0bdb",
+      "pre_shadow_file": "src_commit_meta.rs_pre.am"
+    },
+    "tests/mv_register/signatures.rs": {
+      "shadow_file": "tests_mv_register_signatures.rs.am",
+      "pre_image_hash": "ec6e2c6d7fa19859",
+      "post_image_hash": "82392410bcb66ee3",
+      "pre_shadow_file": "tests_mv_register_signatures.rs_pre.am"
+    },
+    "design/authors_signatures_api.md": {
+      "shadow_file": "design_authors_signatures_api.md.am",
+      "pre_image_hash": "29da53c6b8558e65",
+      "post_image_hash": "4dd4446d1d0df9bf",
+      "pre_shadow_file": "design_authors_signatures_api.md_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}
