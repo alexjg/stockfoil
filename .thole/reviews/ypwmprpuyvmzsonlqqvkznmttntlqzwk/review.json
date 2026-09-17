@@ -1,0 +1,15 @@
+{
+  "change_id": "ypwmprpuyvmzsonlqqvkznmttntlqzwk",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "design/authors_signatures_revocation.md": {
+      "shadow_file": "design_authors_signatures_revocation.md.am",
+      "pre_image_hash": "c54de3286fe7d89a",
+      "post_image_hash": "1d99969872fbc04a",
+      "pre_shadow_file": "design_authors_signatures_revocation.md_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}
