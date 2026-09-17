@@ -123,10 +123,9 @@ while its visible value changes because another commit stopped overwriting it.
 
 ## MVR demo
 
-The current `State` drops overwritten values. That won't work for revocation.
-Keep every delivered assignment (the graph already retains its payload), and
-select the causally maximal *participating* assignments for each key. Revoking
-an assignment removes both its value and its overwriting effect. An allowed
+The graph retains every delivered assignment. The MVR selects the causally
+maximal *participating* assignments for each key. Revoking an assignment removes
+both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
 The small demo rebuilds its state from retained assignments. Later we can use
@@ -137,7 +136,10 @@ signature ingestion, and permission updates, not just after explicit revocation.
 The displayed state uses the working POV; signing status compares it with
 the signed one.
 
-Small demo API changes used by the contract test:
+The implementation lives in `tests/mv_register/implementation.rs`. The tests are
+sibling modules, so Rust privacy keeps them out of its graph and assignment store.
+They exercise document reads, historical views, publication, and receive behavior
+through the MVR API:
 
 * `author() -> Author` exposes the replica's public signing key.
 * `with_author(Author)` creates a replica whose signer lives elsewhere. It uses
@@ -151,6 +153,11 @@ Small demo API changes used by the contract test:
   edit is already visible. Callers may still ignore the returned hash.
 * `set_write_permissions(&HashMap<Author, WritePermission>)` updates the graph
   and reevaluates the document.
+* `pov()` and `signed_pov()` capture working and signature-backed document views.
+* `export_assignments()` returns messages with opaque metadata and encoded MVR
+  payloads, withholding unsigned local work. `receive_assignment(message)` checks
+  the payload hash, decodes the assignment, and ingests it as received data.
+  Signatures travel separately; receipt alone doesn't make an assignment visible.
 * `get_at(&Pov, key) -> Result<BTreeSet<String>, ResolveError>` reads a
   captured POV without changing the current one. Local captures can be
   read before signing; imported POVs must be resolved first.
@@ -166,13 +173,17 @@ leaves local permissions alone.
 ## First test and follow-ups
 
 `tests/mv_register/revocation.rs` and the signature-flow test run in the normal
-smoke target against the real graph and Ed25519 verification.
+smoke target against the MVR API, backed by the real graph and Ed25519 verification.
 
-It covers inclusive bounds, restored overwritten values, concurrent values,
-allowed descendants of revoked commits, default-deny, explicit denial, empty
-bounds, restoring unbounded access, stable old POVs, backwards and
-cross-branch comparisons, and resolving a POV on another replica.
-Revocation must not change delivered heads or redeliver old commits.
+The revocation test covers inclusive bounds, restored overwritten values,
+concurrent values, allowed descendants of revoked commits, default-deny, explicit
+denial, empty bounds, restoring unbounded access, stable historical reads, and
+reading a captured view on another replica.
+
+`tests/pov_diff.rs` tests the graph API directly: bidirectional and cross-branch
+diffs, visibility classification, changed-commit enumeration, unchanged delivery
+under revocation, strict resolution, and working-versus-signed participation.
+Those assertions don't belong in the MVR tests.
 
 `tests/mv_register/signatures.rs` exercises the split
 prepare/sign flow. It creates an Ed25519 key from a fixed test seed and signs the
@@ -185,19 +196,20 @@ The flow test covers:
 1. Capture the initial working and signed POVs.
 2. Prepare a local edit without delivering its signature. It appears in the
    working document immediately; the signed view still shows the old value.
-3. Diff working against signed and check the pending change. Confirm another
-   replica cannot receive the local commit through export or merge, and that
-   signature-backed resolution of the working POV fails for now.
+3. Read the working and signed views. Confirm another replica cannot receive the
+   local assignment through export or merge, or read the captured pending view.
 4. Deliver the real signature. The signed view catches up, export is allowed,
    and the working document doesn't change again.
-5. Recheck the captured POVs: their values and frontiers stay fixed.
-   The earlier working POV can now resolve against signature evidence.
+5. Recheck the captured views: their values stay fixed. Another replica can now
+   read the earlier working view using the published signature evidence.
 
 It also checks a batch covered by one later signature, an overwritten pending
 edit, a valid signature supplied for the wrong hash, duplicate delivery, and
 holding back unsigned descendants and permissions changing while signing is
-pending. `tests/auth.rs` also covers a signed descendant by another author that
-mustn't leak an unsigned local ancestor.
+pending. The MVR receive tests also cover tampered assignment payloads and
+receiving our own author identity without granting local trust. `tests/auth.rs`
+covers a signed descendant by another author that mustn't leak an unsigned local
+ancestor.
 
 The graph-level tests in `tests/auth.rs` deliver commits and signatures separately
 to cover:
