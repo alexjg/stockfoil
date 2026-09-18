@@ -1,0 +1,94 @@
+{
+  "change_id": "pnpuymztostvvlsvokvwwsmrnnklpvyu",
+  "algorithm": "patience",
+  "next_id": 6,
+  "files": {
+    "design/sedimentree_sync.md": {
+      "shadow_file": "design_sedimentree_sync.md.am",
+      "pre_image_hash": "668f6c8c12ce8287",
+      "post_image_hash": "ef61cd7d3e0c7b04",
+      "pre_shadow_file": "design_sedimentree_sync.md_pre.am"
+    },
+    "design/sedimentree_sync_api.md": {
+      "shadow_file": "design_sedimentree_sync_api.md.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "3637ea425d822cc3",
+      "pre_shadow_file": "design_sedimentree_sync_api.md_pre.am"
+    }
+  },
+  "annotations": [
+    {
+      "file_path": "design/sedimentree_sync_api.md",
+      "start_cursor": "010310fd2f7e35fa08dccdabc644564b00e9ed982002",
+      "end_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edc82002",
+      "original_text": "    fn decompose(&self) -> Decomposition<'_, P>;",
+      "context_before": "\n```rust\nimpl<P> CommitGraph<P> {",
+      "context_after": "}\n\nimpl<P> Decomposition<'_, P> {",
+      "body": "I think as_sedimentree or similar would be a better name",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    },
+    {
+      "file_path": "design/sedimentree_sync_api.md",
+      "start_cursor": "010310fd2f7e35fa08dccdabc644564b00e9ed973f02",
+      "end_cursor": "010310fd2f7e35fa08dccdabc644564b00e9eda24302",
+      "original_text": "Initially we can simply retain all verified signatures. Once the indexes work,\npruning releases a proof only when no retained item or planned indexed range\nneeds it. A replacement proof must be usable inside each affected range, not\njust later in the document. Larger fragments can assemble proofs from their\nchildren; this doesn't justify deleting the children's proofs while those\nchildren remain exportable or regenerable. Dropping the last copy also means\nlosing the ability to recreate any smaller item which needs it.",
+      "context_before": "for an indexed fragment containing only `a, b`. That fragment must retain its\nown usable proof. A concurrent Alice branch may require another signature too.\n",
+      "context_after": "\nIndexes cannot manufacture missing signatures. Sealing a range may require\nasking an author to sign a range-local tip; signing remains external to",
+      "body": "To clarify here, I don't think we should ever prune proofs needed for fragments. We should always retain them. This is because I think ultimately we want to use sedimentree as the on disk format. I want to be able to load a fragment and know that if we have the causal predecessors of the fragment, then we will be able to apply it. If we prune signatures then we won't be able to save such chunks.",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    },
+    {
+      "file_path": "design/sedimentree_sync_api.md",
+      "start_cursor": "010310fd2f7e35fa08dccdabc644564b00e9eda44302",
+      "end_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edee4302",
+      "original_text": "Indexes cannot manufacture missing signatures. Sealing a range may require",
+      "context_before": "children remain exportable or regenerable. Dropping the last copy also means\nlosing the ability to recreate any smaller item which needs it.\n",
+      "context_after": "asking an author to sign a range-local tip; signing remains external to\nStockfoil. In particular, batched signing can publish a suitable sealed fragment,\nbut a still-loose tail needs direct signatures on its commits. If those proofs",
+      "body": "If we don't prune, then we never have to add new signatures beyond those required for local (and thus unpublished) commits",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    },
+    {
+      "file_path": "design/sedimentree_sync_api.md",
+      "start_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edb74402",
+      "end_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edd74502",
+      "original_text": "Stockfoil. In particular, batched signing can publish a suitable sealed fragment,\nbut a still-loose tail needs direct signatures on its commits. If those proofs",
+      "context_before": "\nIndexes cannot manufacture missing signatures. Sealing a range may require\nasking an author to sign a range-local tip; signing remains external to",
+      "context_after": "were never collected or were already pruned, keep the candidate unsealed rather\nthan borrowing a proof from outside it. This is a real change to the existing\nprototype's publication and pruning behavior, not just a new wire format.",
+      "body": "I see, this is a change yes. I guess we have to align signing with sedimentree generally. That's the intent of this library, to solve all these problems for other people.",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    },
+    {
+      "file_path": "design/sedimentree_sync_api.md",
+      "start_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edbe4e02",
+      "end_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edee4e02",
+      "original_text": "    fn canonical_payload(&mut self, payload: &P)",
+      "context_before": "    fn decode_fragment(&mut self, bytes: &[u8])\n        -> Result<DecodedFragment<P>, Self::Error>;\n",
+      "context_after": "        -> Result<Vec<u8>, Self::Error>;\n}\n```",
+      "body": "How does this handle bundling many commits into a fragment to take advantage of compression?",
+      "kind": "review",
+      "state": "resolved",
+      "side": "post"
+    },
+    {
+      "file_path": "design/sedimentree_sync_api.md",
+      "start_cursor": "010310fd2f7e35fa08dccdabc644564b00e9edfb4a02",
+      "end_cursor": "010310fd2f7e35fa08dccdabc644564b00e9ed8f4b02",
+      "original_text": "trait SyncCodec<P> {",
+      "context_before": "    signatures: Vec<CommitSignature>,\n}\n",
+      "context_after": "    type Error;\n\n    fn encode_commit(&mut self, commit: SignedCommitRef<'_, P>)",
+      "body": "How does this trait handle the fact that a fragment encoder should be able to take advantage of encoding a bunch of commits together?",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    }
+  ],
+  "comment": ""
+}

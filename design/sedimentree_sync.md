@@ -10,8 +10,8 @@ commits in the fragment are found by walking backwards from the head to the
 boundaries.
 
 For sedimentree we define the head and boundary commits based on hash hardness.
-A depth 2 fragment is one where the head and boundary commits have two
-leading zeroes in the hex encoding of their hash. This means that nodes with
+A depth 2 fragment is one where the head and boundary commits have at least two
+leading zero bytes in their hash. This means that nodes with
 overlapping commit graphs will agree on the fragments in the overlapping
 regions. With some redundancy.
 
