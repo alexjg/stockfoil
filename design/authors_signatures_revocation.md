@@ -32,7 +32,7 @@ Each author has one of three write permissions:
 * **Denied** - none of that author's commits can contribute.
 
 Missing authors are denied. An empty bounded frontier also permits nothing; it
-never means unbounded. Unbounded permission doesn't bypass the POV's
+never means unbounded. Unbounded permission doesn't bypass the viewpoint's
 authentication frontier or causal delivery.
 
 The application supplies the permissions and checks their authority. Stockfoil
@@ -88,14 +88,14 @@ verify this.
 
 For this reason when we receive a signature we need to check if it makes a
 whole set of commits verified. Our own prepared commits can already appear in
-the working POV while their signatures are pending; that doesn't make
+the working viewpoint while their signatures are pending; that doesn't make
 them verified or publishable.
 
 #### Establishing Write Permission
 
 Unbounded authors need no write-frontier proof. Bounded authors need proof that
 their commits are inside the frontier, using only the delivered history captured
-by the POV. Until we have that proof, those commits don't contribute;
+by the viewpoint. Until we have that proof, those commits don't contribute;
 an unresolved bound never means unbounded access. Denied authors can't contribute
 under that permission snapshot.
 
@@ -162,18 +162,18 @@ permissions allow them. For example, in Automerge we can treat revoked commits
 as deleted while still applying allowed descendant operations. The CRDT decides
 what that means for the document.
 
-### POVs
+### Viewpoints
 
-A POV (point of view) captures three things:
+A viewpoint captures three things:
 
 * The delivered heads, identifying the captured causally complete commit history.
   Notably this does not include commits which are not causally ready
 * An immutable snapshot of the per-author write permissions
 * An immutable snapshot of the per-author authentication frontiers: the commits
-  this POV treats as authenticated, not proof that signatures are already
+  this viewpoint treats as authenticated, not proof that signatures are already
   available
 
-Concretely, we can represent a POV as a set of delivered commit hashes,
+Concretely, we can represent a viewpoint as a set of delivered commit hashes,
 a mapping from author keys to their write permissions, and a mapping from author
 keys to their authentication frontier hashes. The delivered hashes are the heads,
 not an enumeration of the whole history. Both mappings are immutable snapshots,
@@ -189,64 +189,64 @@ history captured by the delivered heads, not subsequently received commits or
 commits still awaiting causal delivery. Signatures are outside the commit graph,
 so their arrival can authenticate already-delivered commits without changing the
 delivered heads. Capturing the authenticated frontiers separately preserves the
-meaning of earlier POVs when new signatures arrive.
+meaning of earlier viewpoints when new signatures arrive.
 
-A POV contains enough information to determine the set of contributing
+A viewpoint contains enough information to determine the set of contributing
 commits regardless of future changes to the write permissions, commit graph, or
-available signatures. This means we can define a diff API in terms of POVs.
+available signatures. This means we can define a diff API in terms of viewpoints.
 
 We use `traverse_delivered_since` to incorporate newly delivered commits into
 the CRDT's operation store, independently of whether they contribute under a
-POV. Comparing POVs determines participation changes, including
+viewpoint. Comparing viewpoints determines participation changes, including
 changes to previously delivered commits when new signatures or frontier proofs
 arrive. The CRDT uses that comparison to produce document-level changes.
 
-#### Working and Signed POVs
+#### Working and Signed Viewpoints
 
 We use the same representation for two views:
 
-* The working POV includes signature-backed coverage plus our own local
+* The working viewpoint includes signature-backed coverage plus our own local
   commits whose signatures are pending. Creating a local commit advances its
   author's authentication frontier here immediately.
-* The signed POV advances authentication frontiers only when signatures
+* The signed viewpoint advances authentication frontiers only when signatures
   verify. It can use the same delivered heads and write permissions as the working
-  POV.
+  viewpoint.
 
 Ordinary ingestion doesn't grant this local allowance to incoming commits, even
 if they claim our author key. It comes only from the local commit-creation path.
 The graph keeps actual signature evidence separate from the working frontier.
 
-Local materialization uses the working POV without waiting for signing.
-Comparing it with the signed POV shows the document changes awaiting
+Local materialization uses the working viewpoint without waiting for signing.
+Comparing it with the signed viewpoint shows the document changes awaiting
 signatures. Comparing authentication coverage identifies pending commits even
 when their effects aren't visible, such as an overwritten assignment. The signed
 view needn't be a prefix: different branches may get signed at different times.
 
 When a signature arrives, the signed view can catch up without changing the
-working document. Captured POVs stay unchanged. To preserve historical
-signing status, save both POVs; the working one alone doesn't record
+working document. Captured viewpoints stay unchanged. To preserve historical
+signing status, save both viewpoints; the working one alone doesn't record
 which signatures were available then.
 
-#### Resolving POVs
+#### Resolving Viewpoints
 
-A POV describes which commits contribute to some view of the document.
-Its write permissions are already captured in the POV. To resolve this
+A viewpoint describes which commits contribute to some view of the document.
+Its write permissions are already captured in the viewpoint. To resolve this
 description against signature evidence we additionally need two things:
 
-* The causal graph referenced by the delivered heads in the POV.
+* The causal graph referenced by the delivered heads in the viewpoint.
 * Authentication evidence that causally covers the captured authenticated
   frontier for each author, including any ancestry proofs needed to establish
   that coverage.
 
-Resolution always requires actual signatures. A POV can name a frontier
+Resolution always requires actual signatures. A viewpoint can name a frontier
 whose signatures are pending, but it cannot resolve against signature evidence
 until those signatures, or covering signatures, are available. Its meaning stays
 the same while we wait. Resolution doesn't manage signing requests or return a
 list of pending ones.
 
 Calculating participation is separate from verifying signature evidence. Locally
-created working POVs can drive materialization and diffs before signing;
-that doesn't make them verified. Received POVs must be resolved before
+created working viewpoints can drive materialization and diffs before signing;
+that doesn't make them verified. Received viewpoints must be resolved before
 we use them to drive a view. There is no "trust this frontier" option in resolution.
 
 Coverage is per author and causal, not literal set inclusion: each captured
@@ -254,15 +254,15 @@ frontier hash must be equal to or an ancestor of a commit authenticated by a
 signature from that same author. For example, a later signature on a descendant
 can authenticate an earlier captured frontier even if its original signature has
 been discarded. The ancestry evidence used for this validation may extend beyond
-the POV's delivered history.
+the viewpoint's delivered history.
 
 Such additional evidence validates the captured authenticated frontier; it does
-not expand that frontier or supply new write-frontier proofs for the POV.
+not expand that frontier or supply new write-frontier proofs for the viewpoint.
 Write-frontier membership is still evaluated only within the captured delivered
-history. Missing data or evidence required to resolve the POV means
+history. Missing data or evidence required to resolve the viewpoint means
 resolution is incomplete, not that the affected commits are invisible.
 
-Any process that resolves the same POV obtains the same commit
+Any process that resolves the same viewpoint obtains the same commit
 participation, regardless of arrival order or additional local knowledge. This
 confers process independence without requiring a shared authorization log or DAG.
 
@@ -271,7 +271,7 @@ confers process independence without requiring a shared authorization log or DAG
 The MVR test should hold back a local signature: the edit appears in the working
 view, but not the signed view or an export. Their diff shows the pending edit.
 After signing, the signed view catches up and export is allowed, without another
-change to the working document. Both earlier POVs must still mean the
+change to the working document. Both earlier viewpoints must still mean the
 same thing. Also check batching and that exporting a descendant cannot leak an
 unsigned local ancestor.
 
@@ -281,7 +281,7 @@ See the [implementation sketch](authors_signatures_api.md) for proposed API
 changes and the MVR test plan.
 
 `set_write_permissions` replaces the whole permission map. Omitted authors are
-denied, and existing POVs keep their old snapshots.
+denied, and existing viewpoints keep their old snapshots.
 
 ```rust
 use std::collections::HashMap;
@@ -302,27 +302,27 @@ for commit in commits {
 
 // At this point the graph is loaded and the permissions have been applied.
 
-// This gives us the "current POV" of the graph. A combination of:
+// This gives us the "current viewpoint" of the graph. A combination of:
 // * the delivered heads of the commit graph
 // * an immutable snapshot of the per-author write permissions
 // * an immutable snapshot of the per-author authentication frontiers
-// This is the working POV; signed_pov() uses verified coverage.
-let pov = graph.pov();
+// This is the working viewpoint; signed_view_point() uses verified coverage.
+let view_point = graph.view_point();
 
 // now receive some new changes
 graph.ingest_commit(new_commit)?;
 
 // Now incorporate new commits into the operation log
-let post_pov = graph.pov();
-graph.traverse_delivered_since(pov.delivered_heads(), |commit| {
-    // Newly delivered commits did not contribute under the source POV.
+let post_view_point = graph.view_point();
+graph.traverse_delivered_since(view_point.delivered_heads(), |commit| {
+    // Newly delivered commits did not contribute under the source viewpoint.
     // Store their operations as inactive until we process the participation diff.
     log.add_operations_from(commit, false);
 });
 
 // Ingestion can change participation for previously delivered commits too,
 // for example when a new commit supplies a missing write-frontier proof.
-let ingestion_diff = graph.diff(&pov, &post_pov)?;
+let ingestion_diff = graph.diff(&view_point, &post_view_point)?;
 for commit_diff in ingestion_diff.changed_commits() {
     let visible = match commit_diff.visibility_delta {
         VisDiff::Before => false,
@@ -331,17 +331,17 @@ for commit_diff in ingestion_diff.changed_commits() {
     // CRDT-specific bookkeeping: update participation, not operation storage.
     log.set_commit_visibility(commit_diff.commit_id, visible);
 }
-// The operation log now reflects post_pov. Receiving signatures can
-// also change participation and should be handled by comparing POVs
+// The operation log now reflects post_view_point. Receiving signatures can
+// also change participation and should be handled by comparing viewpoints
 // captured before and after signature ingestion, even without new delivery.
 
-let pre_revocation_pov = graph.pov();
+let pre_revocation_view_point = graph.view_point();
 // Revoke Alice at these heads. Bob stays unbounded.
 permissions.insert(alice, WritePermission::Bounded(revocation_heads));
 graph.set_write_permissions(&permissions);
 
 // Now diff again
-let diff = graph.diff(&pre_revocation_pov, &graph.pov())?;
+let diff = graph.diff(&pre_revocation_view_point, &graph.view_point())?;
 for commit_diff in diff.changed_commits() {
     match commit_diff.visibility_delta {
         VisDiff::Before => {

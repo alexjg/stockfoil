@@ -9,8 +9,8 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use stockfoil::{
-    Author, BlobHash, CommitGraph, CommitHash, CommitMeta, Pov, ResolveError, Signature,
-    SignatureError, Vis, WritePermission,
+    Author, BlobHash, CommitGraph, CommitHash, CommitMeta, ResolveError, Signature, SignatureError,
+    ViewPoint, Vis, WritePermission,
 };
 
 pub struct MvRegisterMap {
@@ -18,9 +18,9 @@ pub struct MvRegisterMap {
     state: State,
     actor: ActorId,
     signing_key: Option<SigningKey>,
-    // Only locally captured working POVs may be read before signature-backed
+    // Only locally captured working viewpoints may be read before signature-backed
     // resolution. This small demo retains them to support historical reads.
-    local_povs: Vec<Pov>,
+    local_view_points: Vec<ViewPoint>,
 }
 
 /// A published assignment's envelope and canonical payload bytes. Signatures
@@ -69,13 +69,13 @@ impl MvRegisterMap {
         let mut graph = CommitGraph::new();
         // An explicit demo grant, not a library default.
         graph.set_write_permissions(&HashMap::from([(author, WritePermission::Unbounded)]));
-        let pov = graph.pov();
+        let view_point = graph.view_point();
         Self {
             graph,
             state: State::default(),
             actor: ActorId(*author.as_array()),
             signing_key: None,
-            local_povs: vec![pov],
+            local_view_points: vec![view_point],
         }
     }
 
@@ -114,21 +114,25 @@ impl MvRegisterMap {
     }
 
     /// Capture the current document view, including local unsigned edits.
-    pub fn pov(&self) -> Pov {
-        self.graph.pov()
+    pub fn view_point(&self) -> ViewPoint {
+        self.graph.view_point()
     }
 
     /// Capture the document view backed by signatures.
-    pub fn signed_pov(&self) -> Pov {
-        self.graph.signed_pov()
+    pub fn signed_view_point(&self) -> ViewPoint {
+        self.graph.signed_view_point()
     }
 
-    pub fn get_at(&self, pov: &Pov, key: &str) -> Result<BTreeSet<String>, ResolveError> {
-        if !self.local_povs.contains(pov) {
+    pub fn get_at(
+        &self,
+        view_point: &ViewPoint,
+        key: &str,
+    ) -> Result<BTreeSet<String>, ResolveError> {
+        if !self.local_view_points.contains(view_point) {
             // Received descriptions are not authority to skip verification.
-            self.graph.resolve(pov)?;
+            self.graph.resolve(view_point)?;
         }
-        Ok(self.state_at(pov)?.get(key))
+        Ok(self.state_at(view_point)?.get(key))
     }
 
     pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
@@ -150,7 +154,7 @@ impl MvRegisterMap {
 
     pub fn fork(&self) -> Self {
         let mut fork = Self::new();
-        fork.set_write_permissions(self.graph.pov().write_permissions());
+        fork.set_write_permissions(self.graph.view_point().write_permissions());
         fork.merge(self);
         fork
     }
@@ -188,18 +192,18 @@ impl MvRegisterMap {
     }
 
     fn refresh(&mut self) {
-        let pov = self.graph.pov();
+        let view_point = self.graph.view_point();
         self.state = self
-            .state_at(&pov)
+            .state_at(&view_point)
             .expect("current working history is available");
-        if !self.local_povs.contains(&pov) {
-            self.local_povs.push(pov);
+        if !self.local_view_points.contains(&view_point) {
+            self.local_view_points.push(view_point);
         }
     }
 
-    fn state_at(&self, pov: &Pov) -> Result<State, ResolveError> {
+    fn state_at(&self, view_point: &ViewPoint) -> Result<State, ResolveError> {
         let graph = &self.graph;
-        let participation = graph.diff(pov, pov)?;
+        let participation = graph.diff(view_point, view_point)?;
         let mut state = State::default();
         graph.traverse_delivered(|meta, assignment| {
             if participation

@@ -22,7 +22,7 @@ impl fmt::Display for SignatureError {
 
 impl Error for SignatureError {}
 
-/// A POV could not be resolved against graph data and signature evidence.
+/// A viewpoint could not be resolved against graph data and signature evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     /// The commit is unknown or still waiting for causal delivery.
@@ -49,7 +49,7 @@ impl fmt::Display for ResolveError {
 
 impl Error for ResolveError {}
 
-/// The graph lacks the data needed to compare two POVs.
+/// The graph lacks the data needed to compare two viewpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffError {
     MissingCommit(CommitHash),

@@ -21,7 +21,7 @@ fn incoming_own_author_claims_are_not_local_and_signing_does_not_grant_access() 
     let author = Author::try_from(signing_key.verifying_key().as_bytes().as_slice()).unwrap();
     let mut local = MvRegisterMap::with_author(author);
     let hash = local.prepare_set("title", "pending");
-    let working = local.pov();
+    let working = local.view_point();
     let fork = local.fork();
     assert!(fork.get("title").is_empty());
     assert!(fork.export_assignments().is_empty());
@@ -96,22 +96,22 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     assert!(local.export_assignments().is_empty());
     assert!(
         local
-            .get_at(&local.signed_pov(), "title")
+            .get_at(&local.signed_view_point(), "title")
             .unwrap()
             .is_empty()
     );
     local
         .ingest_signature(author, base, base_signature)
         .unwrap();
-    let initial_working = local.pov();
-    let initial_signed = local.signed_pov();
+    let initial_working = local.view_point();
+    let initial_signed = local.signed_view_point();
     peer.merge(&local);
     assert_eq!(peer.get("title"), values("before"));
 
     // First edit: visible locally, but no signature has arrived.
     let first = local.prepare_set("title", "pending");
-    let first_working = local.pov();
-    let first_signed = local.signed_pov();
+    let first_working = local.view_point();
+    let first_signed = local.signed_view_point();
     assert_eq!(local.get("title"), values("pending"));
     assert_eq!(
         local.get_at(&first_signed, "title").unwrap(),
@@ -130,7 +130,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     );
     assert_eq!(local.get("title"), values("pending"));
     assert_eq!(
-        local.get_at(&local.signed_pov(), "title").unwrap(),
+        local.get_at(&local.signed_view_point(), "title").unwrap(),
         values("before")
     );
     assert_eq!(local.export_assignments().len(), 1);
@@ -138,8 +138,8 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     // Another keystroke overwrites the pending value. Neither edit may leak.
     let tip = local.prepare_set("title", "after");
     let tip_signature = sign(&signing_key, &tip);
-    let batch_working = local.pov();
-    let batch_signed = local.signed_pov();
+    let batch_working = local.view_point();
+    let batch_signed = local.signed_view_point();
     assert_eq!(local.get("title"), values("after"));
     assert_eq!(
         local.get_at(&batch_signed, "title").unwrap(),
@@ -152,7 +152,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
 
     // Only the tip is signed: it authenticates both pending edits.
     local.ingest_signature(author, tip, tip_signature).unwrap();
-    let published_signed = local.signed_pov();
+    let published_signed = local.signed_view_point();
     assert_eq!(local.get("title"), values("after"));
     assert_eq!(
         local.get_at(&published_signed, "title").unwrap(),
@@ -161,13 +161,13 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     assert_eq!(local.export_assignments().len(), 3);
 
     // Old document views retain their values, including the overwritten draft.
-    for pov in [
+    for view_point in [
         &initial_working,
         &initial_signed,
         &first_signed,
         &batch_signed,
     ] {
-        assert_eq!(local.get_at(pov, "title").unwrap(), values("before"));
+        assert_eq!(local.get_at(view_point, "title").unwrap(), values("before"));
     }
     assert_eq!(
         local.get_at(&first_working, "title").unwrap(),
@@ -200,7 +200,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     assert_eq!(peer.get("title"), values("after"));
     assert_eq!(local.export_assignments().len(), 3);
     assert_eq!(
-        local.get_at(&local.signed_pov(), "title").unwrap(),
+        local.get_at(&local.signed_view_point(), "title").unwrap(),
         values("after")
     );
 }

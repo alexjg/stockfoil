@@ -4,7 +4,7 @@ use std::{collections::HashMap, ops::ControlFlow};
 
 use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
-    Author, CommitGraph, CommitHash, PovDiff, Signature, Vis, VisDiff, WritePermission,
+    Author, CommitGraph, CommitHash, Signature, ViewPointDiff, Vis, VisDiff, WritePermission,
 };
 
 fn author(key: &SigningKey) -> Author {
@@ -43,7 +43,7 @@ fn published(graph: &CommitGraph<u8>) -> Vec<CommitHash> {
     hashes
 }
 
-fn assert_changes(diff: &PovDiff<'_>, removed: &[CommitHash], added: &[CommitHash]) {
+fn assert_changes(diff: &ViewPointDiff<'_>, removed: &[CommitHash], added: &[CommitHash]) {
     let changes = diff.changed_commits().collect::<Vec<_>>();
     assert_eq!(changes.len(), removed.len() + added.len());
     let actual = changes
@@ -76,9 +76,9 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
     bob.merge(&alice);
 
     let bound = append(&mut alice, &alice_key, 1);
-    let alice_branch = alice.pov();
+    let alice_branch = alice.view_point();
     let concurrent = append(&mut bob, &bob_key, 2);
-    let bob_branch = bob.pov();
+    let bob_branch = bob.view_point();
     let revoked_title = append(&mut alice, &alice_key, 3);
     let revoked_key = append(&mut alice, &alice_key, 4);
     bob.merge(&alice);
@@ -93,12 +93,12 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
     assert_eq!(branches.visibility(&revoked_title).unwrap(), Vis::Neither);
     assert_changes(&branches, &[bound], &[concurrent]);
 
-    let before = alice.pov();
+    let before = alice.view_point();
     alice.set_write_permissions(&HashMap::from([
         (alice_id, WritePermission::Bounded(vec![bound])),
         (bob_id, WritePermission::Unbounded),
     ]));
-    let after = alice.pov();
+    let after = alice.view_point();
     assert_eq!(before.delivered_heads(), after.delivered_heads());
     let mut redelivered = 0;
     alice.traverse_delivered_since(before.delivered_heads(), |_, _| {
@@ -130,34 +130,41 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
 
     // Default denial, explicit denial, and empty bounds have equal participation.
     alice.set_write_permissions(&HashMap::from([(bob_id, WritePermission::Unbounded)]));
-    let omitted = alice.pov();
+    let omitted = alice.view_point();
     for permission in [WritePermission::Denied, WritePermission::Bounded(vec![])] {
         alice.set_write_permissions(&HashMap::from([
             (alice_id, permission),
             (bob_id, WritePermission::Unbounded),
         ]));
-        assert_changes(&alice.diff(&omitted, &alice.pov()).unwrap(), &[], &[]);
+        assert_changes(
+            &alice.diff(&omitted, &alice.view_point()).unwrap(),
+            &[],
+            &[],
+        );
     }
     alice.set_write_permissions(&allowed);
-    assert_changes(&alice.diff(&before, &alice.pov()).unwrap(), &[], &[]);
-    assert_eq!(alice.pov().delivered_heads(), before.delivered_heads());
+    assert_changes(&alice.diff(&before, &alice.view_point()).unwrap(), &[], &[]);
+    assert_eq!(
+        alice.view_point().delivered_heads(),
+        before.delivered_heads()
+    );
 }
 
 #[test]
-fn signing_a_frontier_changes_signed_participation_not_captured_working_povs() {
+fn signing_a_frontier_changes_signed_participation_not_captured_working_view_points() {
     let key = SigningKey::from_bytes(&[42; 32]);
     let mut graph = CommitGraph::new();
     graph.set_write_permissions(&HashMap::from([(author(&key), WritePermission::Unbounded)]));
     let base = prepare(&mut graph, &key, 0);
-    assert!(graph.resolve(&graph.pov()).is_err());
+    assert!(graph.resolve(&graph.view_point()).is_err());
     assert!(published(&graph).is_empty());
     sign(&mut graph, &key, base);
-    let initial = graph.pov();
+    let initial = graph.view_point();
     assert!(graph.resolve(&initial).is_ok());
 
     let first = prepare(&mut graph, &key, 1);
-    let first_working = graph.pov();
-    let first_signed = graph.signed_pov();
+    let first_working = graph.view_point();
+    let first_signed = graph.signed_view_point();
     assert_eq!(
         first_working.delivered_heads(),
         first_signed.delivered_heads()
@@ -177,14 +184,16 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_povs() {
     );
     assert!(graph.resolve(&first_working).is_err());
     assert_changes(
-        &graph.diff(&first_signed, &graph.signed_pov()).unwrap(),
+        &graph
+            .diff(&first_signed, &graph.signed_view_point())
+            .unwrap(),
         &[],
         &[],
     );
 
     let tip = prepare(&mut graph, &key, 2);
-    let batch_working = graph.pov();
-    let batch_signed = graph.signed_pov();
+    let batch_working = graph.view_point();
+    let batch_signed = graph.signed_view_point();
     assert!(graph.resolve(&batch_working).is_err());
     assert_changes(
         &graph.diff(&batch_signed, &batch_working).unwrap(),
@@ -197,16 +206,20 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_povs() {
     assert_eq!(peer.delivered_heads().collect::<Vec<_>>(), vec![base]);
 
     sign(&mut graph, &key, tip);
-    let published_signed = graph.signed_pov();
-    assert_changes(&graph.diff(&batch_working, &graph.pov()).unwrap(), &[], &[]);
+    let published_signed = graph.signed_view_point();
     assert_changes(
-        &graph.diff(&published_signed, &graph.pov()).unwrap(),
+        &graph.diff(&batch_working, &graph.view_point()).unwrap(),
+        &[],
+        &[],
+    );
+    assert_changes(
+        &graph.diff(&published_signed, &graph.view_point()).unwrap(),
         &[],
         &[],
     );
     assert_eq!(
         batch_working.delivered_heads(),
-        graph.pov().delivered_heads()
+        graph.view_point().delivered_heads()
     );
     assert_eq!(published(&graph), vec![base, first, tip]);
     assert!(graph.resolve(&first_working).is_ok());
@@ -221,7 +234,9 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_povs() {
     sign(&mut graph, &key, tip);
     peer.merge(&graph);
     assert_changes(
-        &graph.diff(&published_signed, &graph.signed_pov()).unwrap(),
+        &graph
+            .diff(&published_signed, &graph.signed_view_point())
+            .unwrap(),
         &[],
         &[],
     );

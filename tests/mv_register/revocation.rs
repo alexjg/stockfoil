@@ -26,9 +26,9 @@ fn revocation_restores_values_without_losing_history() {
 
     // Concurrent branches, captured as document views rather than graph queries.
     let bound = alice.set("title", "allowed");
-    let alice_branch = alice.pov();
+    let alice_branch = alice.view_point();
     bob.set("title", "concurrent");
-    let bob_branch = bob.pov();
+    let bob_branch = bob.view_point();
     alice.set("title", "revoked");
     alice.set("private", "hidden after revocation");
 
@@ -47,13 +47,13 @@ fn revocation_restores_values_without_losing_history() {
         values(&["concurrent"])
     );
 
-    let before = alice.pov();
+    let before = alice.view_point();
     let restricted = HashMap::from([
         (alice_id, WritePermission::Bounded(vec![bound])),
         (bob_id, WritePermission::Unbounded),
     ]);
     alice.set_write_permissions(&restricted);
-    let after = alice.pov();
+    let after = alice.view_point();
 
     // Restore the overwritten value and remove the new key. Bob's concurrent
     // write and his descendant of Alice's revoked writes still contribute.
@@ -61,7 +61,7 @@ fn revocation_restores_values_without_losing_history() {
     assert!(alice.get("private").is_empty());
     assert_eq!(alice.get("description"), values(&["still here"]));
 
-    // Old POVs don't change. Reading another replica's view doesn't adopt its
+    // Old viewpoints don't change. Reading another replica's view doesn't adopt its
     // permissions as the reader's current policy.
     assert_eq!(
         alice.get_at(&before, "title").unwrap(),

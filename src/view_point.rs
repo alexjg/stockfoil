@@ -5,15 +5,15 @@ use crate::{Author, CommitHash, NodeIdx, QueryError, WritePermission};
 /// An owned snapshot of delivered heads, write permissions, and authentication
 /// frontiers. Describes participation, not the materialized document.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pov {
+pub struct ViewPoint {
     pub(crate) delivered_heads: Vec<CommitHash>,
     pub(crate) write_permissions: HashMap<Author, WritePermission>,
     pub(crate) authentication_frontiers: HashMap<Author, Vec<CommitHash>>,
 }
 
-impl Pov {
+impl ViewPoint {
     /// Reconstruct a description, for example after transport or storage.
-    /// This does not validate its claims; resolve received POVs against signatures
+    /// This does not validate its claims; resolve received viewpoints against signatures
     /// before using them to drive a materialized view.
     pub fn from_parts(
         delivered_heads: Vec<CommitHash>,
@@ -37,21 +37,21 @@ impl Pov {
         &self.write_permissions
     }
 
-    /// Captured authentication coverage. In a working POV this may include
+    /// Captured authentication coverage. In a working viewpoint this may include
     /// pending local signatures; it is not itself signature evidence.
     pub fn authentication_frontiers(&self) -> &HashMap<Author, Vec<CommitHash>> {
         &self.authentication_frontiers
     }
 }
 
-/// A POV resolved against graph data and actual signature evidence.
+/// A viewpoint resolved against graph data and actual signature evidence.
 #[derive(Debug)]
-pub struct ResolvedPov<'graph> {
+pub struct ResolvedViewPoint<'graph> {
     pub(crate) known: &'graph HashMap<CommitHash, NodeIdx>,
     pub(crate) visible: HashSet<CommitHash>,
 }
 
-impl ResolvedPov<'_> {
+impl ResolvedViewPoint<'_> {
     /// Whether a known commit contributes. An unknown hash is an error.
     pub fn visible(&self, commit: &CommitHash) -> Result<bool, QueryError> {
         if !self.known.contains_key(commit) {
@@ -62,16 +62,16 @@ impl ResolvedPov<'_> {
 }
 
 /// A comparison of commit participation, not a document patch stream.
-/// Does not certify the signature evidence for either POV.
+/// Does not certify the signature evidence for either viewpoint.
 #[derive(Debug)]
-pub struct PovDiff<'graph> {
+pub struct ViewPointDiff<'graph> {
     pub(crate) known: &'graph HashMap<CommitHash, NodeIdx>,
     pub(crate) before: HashSet<CommitHash>,
     pub(crate) after: HashSet<CommitHash>,
 }
 
-impl PovDiff<'_> {
-    /// Classify a known commit under the source and destination POVs.
+impl ViewPointDiff<'_> {
+    /// Classify a known commit under the source and destination viewpoints.
     pub fn visibility(&self, commit: &CommitHash) -> Result<Vis, QueryError> {
         if !self.known.contains_key(commit) {
             return Err(QueryError::UnknownCommit(*commit));
@@ -86,7 +86,7 @@ impl PovDiff<'_> {
         )
     }
 
-    /// Each changed commit once. Does not report commits in both or neither POV.
+    /// Each changed commit once. Does not report commits in both or neither viewpoint.
     /// Traversal order is unspecified.
     pub fn changed_commits(&self) -> impl Iterator<Item = CommitDiff> + '_ {
         self.before
@@ -118,7 +118,7 @@ pub enum VisDiff {
     After,
 }
 
-/// A commit whose participation differs between two POVs.
+/// A commit whose participation differs between two viewpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitDiff {
     pub commit_id: CommitHash,

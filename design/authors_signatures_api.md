@@ -60,63 +60,63 @@ when signatures haven't arrived yet.
 Graph tests and the delivery-only OR-set example use authored commits without
 signatures. The MVR demo uses signatures and explicit permission grants.
 
-## POVs and diffs
+## Viewpoints and diffs
 
-`Pov` is an owned, cloneable description containing delivered heads,
+`ViewPoint` is an owned, cloneable description containing delivered heads,
 write permissions, and authentication frontiers. Those frontiers say which commits
-the POV treats as authenticated, not whether signatures are available.
+the viewpoint treats as authenticated, not whether signatures are available.
 Give it a `delivered_heads() -> &[CommitHash]` accessor, plus read-only
-`write_permissions()` and `authentication_frontiers()` maps. `Pov::from_parts`
+`write_permissions()` and `authentication_frontiers()` maps. `ViewPoint::from_parts`
 reconstructs the description after transport or storage; it doesn't validate its
-claims. The POV survives graph mutation and can be resolved elsewhere once enough
+claims. The viewpoint survives graph mutation and can be resolved elsewhere once enough
 signature evidence is available.
 
-Working and signed POVs have the same shape. The working frontier also
+Working and signed viewpoints have the same shape. The working frontier also
 covers our own prepared commits pending signing; the signed frontier uses only
 verified coverage. No extra local-changes field is needed. The graph must keep
 actual signature evidence separate from the working frontier.
 
 Proposed graph methods:
 
-* `pov() -> Pov` captures the current working state.
-* `signed_pov() -> Pov` captures the same delivered history and
+* `view_point() -> ViewPoint` captures the current working state.
+* `signed_view_point() -> ViewPoint` captures the same delivered history and
   write permissions, but with signature-backed authentication frontiers.
-* `resolve(&Pov) -> Result<ResolvedPov, ResolveError>` checks
+* `resolve(&ViewPoint) -> Result<ResolvedViewPoint, ResolveError>` checks
   signature evidence and prepares repeated participation queries. It always
   requires actual signatures; pending ones aren't a substitute. It doesn't
   return a signing-task list or offer a "trust this frontier" flag.
-* `diff(&Pov, &Pov) -> Result<PovDiff, DiffError>`
+* `diff(&ViewPoint, &ViewPoint) -> Result<ViewPointDiff, DiffError>`
   calculates participation under both descriptions, without requiring signatures
   to have arrived. Missing graph data can still prevent the comparison.
 
-Diffing isn't signature verification. Local working POVs can be used
-immediately, but a received POV must pass `resolve` before driving a
+Diffing isn't signature verification. Local working viewpoints can be used
+immediately, but a received viewpoint must pass `resolve` before driving a
 materialized view. Keep participation calculation separate from that check so
 local editing doesn't wait for signing IO.
 
 Queries on the prepared objects:
 
-* `ResolvedPov::visible(&CommitHash) -> Result<bool, QueryError>`.
-* `PovDiff::visibility(&CommitHash) -> Result<Vis, QueryError>`, where
+* `ResolvedViewPoint::visible(&CommitHash) -> Result<bool, QueryError>`.
+* `ViewPointDiff::visibility(&CommitHash) -> Result<Vis, QueryError>`, where
   `Vis` is `Before`, `After`, `Both`, or `Neither`.
-* `PovDiff::changed_commits()` iterates `CommitDiff` values with
+* `ViewPointDiff::changed_commits()` iterates `CommitDiff` values with
   `commit_id` and `visibility_delta`. The latter is `VisDiff::Before` or
   `VisDiff::After`; unchanged commits never appear. Each changed commit appears
   once. Leave traversal order unspecified for now.
 
-A known commit outside a POV's history is invisible there. An unknown
+A known commit outside a viewpoint's history is invisible there. An unknown
 hash is a query error, not proof of invisibility. Newer signatures may validate
 an older captured authentication frontier without expanding it. Missing graph
-or signature evidence is a resolution error, not a change to the POV's
-meaning. A working POV can exist and be used locally before that evidence
+or signature evidence is a resolution error, not a change to the viewpoint's
+meaning. A working viewpoint can exist and be used locally before that evidence
 is available.
 
-Comparing working and signed POVs gives the document changes awaiting
+Comparing working and signed viewpoints gives the document changes awaiting
 signatures. Also allow comparison of their captured per-author authentication
 frontiers: pending commits may have no visible effect, so document patches alone
-aren't enough for signing-status UI. Save both POVs if we need historical
+aren't enough for signing-status UI. Save both viewpoints if we need historical
 signing status. Signature arrival may leave the working state unchanged while the
-signed state catches up; neither captured POV changes.
+signed state catches up; neither captured viewpoint changes.
 
 A commit diff isn't a document patch. A commit can participate in both views
 while its visible value changes because another commit stopped overwriting it.
@@ -129,11 +129,11 @@ both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
 The small demo rebuilds its state from retained assignments. Later we can use
-the commit diff to pick affected keys. It also retains its locally captured POVs
+the commit diff to pick affected keys. It also retains its locally captured viewpoints
 so it can recognize historical local reads that don't yet have signatures.
-In either case, compare POVs after local creation, commit ingestion,
+In either case, compare viewpoints after local creation, commit ingestion,
 signature ingestion, and permission updates, not just after explicit revocation.
-The displayed state uses the working POV; signing status compares it with
+The displayed state uses the working viewpoint; signing status compares it with
 the signed one.
 
 The implementation lives in `tests/mv_register/implementation.rs`. The tests are
@@ -153,19 +153,20 @@ through the MVR API:
   edit is already visible. Callers may still ignore the returned hash.
 * `set_write_permissions(&HashMap<Author, WritePermission>)` updates the graph
   and reevaluates the document.
-* `pov()` and `signed_pov()` capture working and signature-backed document views.
+* `view_point()` and `signed_view_point()` capture working and signature-backed
+  document views.
 * `export_assignments()` returns messages with opaque metadata and encoded MVR
   payloads, withholding unsigned local work. `receive_assignment(message)` checks
   the payload hash, decodes the assignment, and ingests it as received data.
   Signatures travel separately; receipt alone doesn't make an assignment visible.
-* `get_at(&Pov, key) -> Result<BTreeSet<String>, ResolveError>` reads a
-  captured POV without changing the current one. Local captures can be
-  read before signing; imported POVs must be resolved first.
+* `get_at(&ViewPoint, key) -> Result<BTreeSet<String>, ResolveError>` reads a
+  captured viewpoint without changing the current one. Local captures can be
+  read before signing; imported viewpoints must be resolved first.
 
 `new()` generates a signing key and explicitly grants that author unbounded
 access. This is demo setup, not a Stockfoil default. `fork()` creates a new
 signing key, copies the old permission map, and imports only publishable history.
-It doesn't copy unsigned local drafts or the source's local POV exemptions. Tests
+It doesn't copy unsigned local drafts or the source's local viewpoint exemptions. Tests
 must grant the new author on both replicas before expecting its writes to
 contribute. `merge()` transfers publishable commits and signature evidence, and
 leaves local permissions alone.
@@ -180,7 +181,7 @@ concurrent values, allowed descendants of revoked commits, default-deny, explici
 denial, empty bounds, restoring unbounded access, stable historical reads, and
 reading a captured view on another replica.
 
-`tests/pov_diff.rs` tests the graph API directly: bidirectional and cross-branch
+`tests/view_point_diff.rs` tests the graph API directly: bidirectional and cross-branch
 diffs, visibility classification, changed-commit enumeration, unchanged delivery
 under revocation, strict resolution, and working-versus-signed participation.
 Those assertions don't belong in the MVR tests.
@@ -193,7 +194,7 @@ signature fixtures or a second implementation of the commit encoding.
 
 The flow test covers:
 
-1. Capture the initial working and signed POVs.
+1. Capture the initial working and signed viewpoints.
 2. Prepare a local edit without delivering its signature. It appears in the
    working document immediately; the signed view still shows the old value.
 3. Read the working and signed views. Confirm another replica cannot receive the
@@ -215,11 +216,11 @@ The graph-level tests in `tests/auth.rs` deliver commits and signatures separate
 to cover:
 
 * A remote signature arriving without new commits changes participation, not old
-  POVs or delivered heads.
+  viewpoints or delivered heads.
 * A queued frontier commit proves nothing until all its parents are delivered;
   its delivery can activate older assignments without redelivering them.
 * Invalid signatures, wrong signers, signature-before-commit, and duplicates.
-* Resolving old POVs using newer signatures after pruning old ones;
+* Resolving old viewpoints using newer signatures after pruning old ones;
   insufficient evidence reports an error.
 * Multiple heads in both write and authentication frontiers, including branches
   signed by different authors.

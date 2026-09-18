@@ -5,8 +5,8 @@ use std::{
 
 use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
-    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, Pov,
-    QueryError, ResolveError, Signature, SignatureError, Vis, WritePermission,
+    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, QueryError,
+    ResolveError, Signature, SignatureError, ViewPoint, Vis, WritePermission,
 };
 
 fn key(seed: u8) -> SigningKey {
@@ -54,20 +54,20 @@ fn published(graph: &CommitGraph<u8>) -> Vec<u8> {
 }
 
 #[test]
-fn remote_signature_arrival_changes_only_new_povs() {
+fn remote_signature_arrival_changes_only_new_view_points() {
     let alice = key(1);
     let mut graph = CommitGraph::new();
     grant(&mut graph, &[&alice]);
     let c = commit(&alice, 1, &[]);
     let hash = *c.hash();
     graph.ingest_commit(c, 1);
-    let before = graph.pov();
+    let before = graph.view_point();
     assert!(!graph.resolve(&before).unwrap().visible(&hash).unwrap());
     // Incoming unsigned data is forwardable, but has no optimistic allowance.
     assert_eq!(published(&graph), vec![1]);
 
     sign(&mut graph, &alice, hash);
-    let after = graph.pov();
+    let after = graph.view_point();
     assert_eq!(before.delivered_heads(), after.delivered_heads());
     assert_eq!(
         graph
@@ -86,10 +86,10 @@ fn remote_signature_arrival_changes_only_new_povs() {
     });
     assert_eq!(count, 0);
 
-    // Duplicate evidence and commits do not change the POV.
+    // Duplicate evidence and commits do not change the viewpoint.
     sign(&mut graph, &alice, hash);
     graph.ingest_commit(commit(&alice, 1, &[]), 99);
-    assert_eq!(graph.pov(), after);
+    assert_eq!(graph.view_point(), after);
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn signatures_can_arrive_before_commits_and_causal_delivery() {
     grant(&mut graph, &[&alice]);
     sign(&mut graph, &alice, *tip.hash());
     graph.ingest_commit(tip.clone(), 2);
-    let detached = graph.pov();
+    let detached = graph.view_point();
     assert!(detached.delivered_heads().is_empty());
     assert!(detached.authentication_frontiers().is_empty());
     assert_eq!(
@@ -116,12 +116,12 @@ fn signatures_can_arrive_before_commits_and_causal_delivery() {
     peer.ingest_commit(root.clone(), 1);
     graph.ingest_commit(root.clone(), 1);
     for doc in [&graph, &peer] {
-        let pov = doc.pov();
+        let view_point = doc.view_point();
         assert_eq!(
-            pov.authentication_frontiers()[&author(&alice)],
+            view_point.authentication_frontiers()[&author(&alice)],
             vec![*tip.hash()]
         );
-        let resolved = doc.resolve(&pov).unwrap();
+        let resolved = doc.resolve(&view_point).unwrap();
         assert!(resolved.visible(root.hash()).unwrap());
         assert!(resolved.visible(tip.hash()).unwrap());
         assert!(
@@ -147,13 +147,13 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
     )]));
     graph.ingest_commit(c.clone(), 1);
     sign(&mut graph, &alice, *c.hash());
-    let before = graph.pov();
+    let before = graph.view_point();
     assert!(!graph.resolve(&before).unwrap().visible(c.hash()).unwrap());
 
     graph.ingest_commit(frontier.clone(), 3);
-    assert_eq!(graph.pov(), before); // Merely reading its parent link isn't enough.
+    assert_eq!(graph.view_point(), before); // Merely reading its parent link isn't enough.
     graph.ingest_commit(missing, 2);
-    let after = graph.pov();
+    let after = graph.view_point();
     assert!(graph.resolve(&after).unwrap().visible(c.hash()).unwrap());
     assert!(!graph.resolve(&before).unwrap().visible(c.hash()).unwrap());
     assert_eq!(
@@ -180,7 +180,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
 }
 
 #[test]
-fn newer_evidence_resolves_an_old_pov_without_expanding_it() {
+fn newer_evidence_resolves_an_old_view_point_without_expanding_it() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
     let tip = commit(&alice, 2, &[*root.hash()]);
@@ -188,8 +188,8 @@ fn newer_evidence_resolves_an_old_pov_without_expanding_it() {
     grant(&mut source, &[&alice]);
     source.ingest_local_commit(root.clone(), 1);
     sign(&mut source, &alice, *root.hash());
-    let captured = source.signed_pov();
-    let old = Pov::from_parts(
+    let captured = source.signed_view_point();
+    let old = ViewPoint::from_parts(
         captured.delivered_heads().to_vec(),
         captured.write_permissions().clone(),
         captured.authentication_frontiers().clone(),
@@ -212,7 +212,7 @@ fn newer_evidence_resolves_an_old_pov_without_expanding_it() {
         peer.resolve(&old),
         Err(ResolveError::MissingSignature { .. })
     ));
-    // Diff is just calculation; it does not claim to verify a received POV.
+    // Diff is just calculation; it does not claim to verify a received viewpoint.
     assert_eq!(
         peer.diff(&old, &old)
             .unwrap()
@@ -231,10 +231,10 @@ fn newer_evidence_resolves_an_old_pov_without_expanding_it() {
         Err(QueryError::UnknownCommit(CommitHash::from([99; 32])))
     );
     // Resolving somebody else's permissions doesn't adopt them as our own.
-    assert!(peer.pov().write_permissions().is_empty());
+    assert!(peer.view_point().write_permissions().is_empty());
     assert!(
         !peer
-            .resolve(&peer.signed_pov())
+            .resolve(&peer.signed_view_point())
             .unwrap()
             .visible(root.hash())
             .unwrap()
@@ -251,7 +251,7 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_a_commit() {
     grant(&mut graph, &[&alice, &bob]);
     graph.ingest_commit(root.clone(), 1);
     graph.ingest_commit(child.clone(), 2);
-    let before = graph.pov();
+    let before = graph.view_point();
     let wrong_signer = Signature::from(bob.sign(root.hash().as_bytes()).to_bytes());
     assert!(matches!(
         graph.ingest_signature(author(&alice), *root.hash(), wrong_signer),
@@ -264,19 +264,31 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_a_commit() {
             .ingest_signature(author(&alice), *root.hash(), Signature::from(corrupt))
             .is_err()
     );
-    assert_eq!(graph.pov(), before);
+    assert_eq!(graph.view_point(), before);
 
     // Even a genuine signature by Bob over Alice's hash isn't proof by Alice.
     graph
         .ingest_signature(author(&bob), *root.hash(), wrong_signer)
         .unwrap();
     sign(&mut graph, &bob, *child.hash());
-    let pov = graph.signed_pov();
-    assert!(!graph.resolve(&pov).unwrap().visible(root.hash()).unwrap());
-    assert!(graph.resolve(&pov).unwrap().visible(child.hash()).unwrap());
-    let forged = Pov::from_parts(
-        pov.delivered_heads().to_vec(),
-        pov.write_permissions().clone(),
+    let view_point = graph.signed_view_point();
+    assert!(
+        !graph
+            .resolve(&view_point)
+            .unwrap()
+            .visible(root.hash())
+            .unwrap()
+    );
+    assert!(
+        graph
+            .resolve(&view_point)
+            .unwrap()
+            .visible(child.hash())
+            .unwrap()
+    );
+    let forged = ViewPoint::from_parts(
+        view_point.delivered_heads().to_vec(),
+        view_point.write_permissions().clone(),
         HashMap::from([(author(&alice), vec![*child.hash()])]),
     );
     assert!(matches!(
@@ -287,7 +299,7 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_a_commit() {
     graph.ingest_local_commit(root.clone(), 42);
     assert_eq!(
         graph
-            .diff(&graph.pov(), &graph.pov())
+            .diff(&graph.view_point(), &graph.view_point())
             .unwrap()
             .visibility(root.hash())
             .unwrap(),
@@ -296,7 +308,7 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_a_commit() {
     sign(&mut graph, &alice, *root.hash());
     assert!(
         graph
-            .resolve(&graph.signed_pov())
+            .resolve(&graph.signed_view_point())
             .unwrap()
             .visible(root.hash())
             .unwrap()
@@ -315,19 +327,19 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
     source.ingest_local_commit(child.clone(), 2);
     sign(&mut source, &bob, *child.hash());
     assert!(published(&source).is_empty());
-    let working = source.pov();
+    let working = source.view_point();
     assert!(source.resolve(&working).is_err());
     let mut peer = CommitGraph::new();
     peer.merge(&source);
     assert_eq!(peer.delivered_heads().count(), 0);
-    assert!(peer.pov().authentication_frontiers().is_empty());
+    assert!(peer.view_point().authentication_frontiers().is_empty());
 
     // Revoking Alice while signing is pending doesn't stop the graph syncing
     // once signed, nor let the signature grant her write permission again.
     source.set_write_permissions(&HashMap::from([(author(&bob), WritePermission::Unbounded)]));
     sign(&mut source, &alice, *root.hash());
     assert_eq!(published(&source), vec![1, 2]);
-    let current = source.pov();
+    let current = source.view_point();
     assert!(
         !source
             .resolve(&current)
@@ -355,7 +367,7 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
         vec![*child.hash()]
     );
     assert!(peer.resolve(&working).is_ok());
-    assert!(peer.pov().write_permissions().is_empty());
+    assert!(peer.view_point().write_permissions().is_empty());
 
     let mut visits = 0;
     source.traverse_publishable(|_, _| {
@@ -387,8 +399,8 @@ fn authentication_and_write_frontiers_can_have_multiple_heads() {
         WritePermission::Bounded(vec![*left.hash(), *right.hash()]),
     )]);
     graph.set_write_permissions(&permissions);
-    let bounded = graph.pov();
-    permissions.clear(); // Setter and POV both own snapshots.
+    let bounded = graph.view_point();
+    permissions.clear(); // Setter and viewpoint both own snapshots.
     assert_eq!(bounded.authentication_frontiers()[&author(&alice)].len(), 3);
     let resolved = graph.resolve(&bounded).unwrap();
     for meta in [&root, &left, &right] {
@@ -398,7 +410,7 @@ fn authentication_and_write_frontiers_can_have_multiple_heads() {
     graph.set_write_permissions(&permissions);
     assert!(
         !graph
-            .resolve(&graph.pov())
+            .resolve(&graph.view_point())
             .unwrap()
             .visible(root.hash())
             .unwrap()
@@ -426,7 +438,7 @@ fn authentication_and_write_frontiers_can_have_multiple_heads() {
             .unwrap()
     );
     let added = peer
-        .diff(&peer.pov(), &bounded)
+        .diff(&peer.view_point(), &bounded)
         .unwrap()
         .changed_commits()
         .map(|c| c.commit_id)
@@ -476,28 +488,34 @@ fn received_commits_need_their_own_authors_signature_coverage() {
     let signed = graph.commit_by(author(&alice), &[2]);
     graph.ingest_local_commit(signed.clone(), 2);
     sign(&mut graph, &alice, *signed.hash());
-    let pov = graph.signed_pov();
+    let view_point = graph.signed_view_point();
     assert!(
         !graph
-            .resolve(&pov)
+            .resolve(&view_point)
             .unwrap()
             .visible(unsigned.hash())
             .unwrap()
     );
-    assert!(graph.resolve(&pov).unwrap().visible(signed.hash()).unwrap());
+    assert!(
+        graph
+            .resolve(&view_point)
+            .unwrap()
+            .visible(signed.hash())
+            .unwrap()
+    );
     assert_eq!(published(&graph), vec![1, 2]);
 
     sign(&mut graph, &bob, *unsigned.hash());
     assert!(
         graph
-            .resolve(&graph.signed_pov())
+            .resolve(&graph.signed_view_point())
             .unwrap()
             .visible(unsigned.hash())
             .unwrap()
     );
     assert!(
         !graph
-            .resolve(&pov)
+            .resolve(&view_point)
             .unwrap()
             .visible(unsigned.hash())
             .unwrap()

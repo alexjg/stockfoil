@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, Pov, PovDiff,
-    ResolveError, ResolvedPov, Signature, SignatureError, WritePermission,
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ResolveError,
+    ResolvedViewPoint, Signature, SignatureError, ViewPoint, ViewPointDiff, WritePermission,
 };
 
 /// An in-memory commit DAG with causal delivery.
@@ -356,31 +356,32 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Replace the entire permission map. Missing authors are denied; captured
-    /// POVs keep their previous permissions.
+    /// viewpoints keep their previous permissions.
     pub fn set_write_permissions(&mut self, permissions: &HashMap<Author, WritePermission>) {
         self.permissions = permissions.clone();
     }
 
     /// Capture the working state, including our pending-signature local commits.
-    pub fn pov(&self) -> Pov {
-        let mut pov = self.signed_pov();
+    pub fn view_point(&self) -> ViewPoint {
+        let mut view_point = self.signed_view_point();
         for hash in &self.local {
             if let Some(idx) = self.by_hash.get(hash) {
                 let author = *self.nodes[*idx].meta.author();
-                pov.authentication_frontiers
+                view_point
+                    .authentication_frontiers
                     .entry(author)
                     .or_default()
                     .push(*hash);
             }
         }
-        for frontier in pov.authentication_frontiers.values_mut() {
+        for frontier in view_point.authentication_frontiers.values_mut() {
             *frontier = self.frontier(frontier.iter().copied());
         }
-        pov
+        view_point
     }
 
     /// Capture the same history and permissions with signature-backed coverage.
-    pub fn signed_pov(&self) -> Pov {
+    pub fn signed_view_point(&self) -> ViewPoint {
         let authentication_frontiers = self
             .signatures
             .iter()
@@ -394,7 +395,7 @@ impl<P: Clone> CommitGraph<P> {
                 (!heads.is_empty()).then_some((*author, heads))
             })
             .collect();
-        Pov {
+        ViewPoint {
             delivered_heads: self.delivered_heads().collect(),
             write_permissions: self.permissions.clone(),
             authentication_frontiers,
@@ -402,12 +403,12 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Resolve commit metadata against actual signature evidence, not the opaque
-    /// payload values `P`. Pending signatures do not suffice, even for a POV
+    /// payload values `P`. Pending signatures do not suffice, even for a viewpoint
     /// captured locally. Later signatures may validate an
     /// old frontier, but never expand its captured participation.
-    pub fn resolve(&self, pov: &Pov) -> Result<ResolvedPov<'_>, ResolveError> {
-        let visible = self.participation(pov)?;
-        for (author, frontier) in &pov.authentication_frontiers {
+    pub fn resolve(&self, view_point: &ViewPoint) -> Result<ResolvedViewPoint<'_>, ResolveError> {
+        let visible = self.participation(view_point)?;
+        for (author, frontier) in &view_point.authentication_frontiers {
             for hash in frontier {
                 if !self.signature_covers(author, hash) {
                     return Err(ResolveError::MissingSignature {
@@ -417,16 +418,20 @@ impl<P: Clone> CommitGraph<P> {
                 }
             }
         }
-        Ok(ResolvedPov {
+        Ok(ResolvedViewPoint {
             known: &self.by_hash,
             visible,
         })
     }
 
-    /// Compare participation without certifying signature evidence. Received POVs
+    /// Compare participation without certifying signature evidence. Received viewpoints
     /// must be resolved before they drive a materialized view.
-    pub fn diff(&self, before: &Pov, after: &Pov) -> Result<PovDiff<'_>, DiffError> {
-        Ok(PovDiff {
+    pub fn diff(
+        &self,
+        before: &ViewPoint,
+        after: &ViewPoint,
+    ) -> Result<ViewPointDiff<'_>, DiffError> {
+        Ok(ViewPointDiff {
             known: &self.by_hash,
             before: self.participation(before)?,
             after: self.participation(after)?,
@@ -538,17 +543,17 @@ impl<P: Clone> CommitGraph<P> {
         Ok(history)
     }
 
-    fn participation(&self, pov: &Pov) -> Result<HashSet<CommitHash>, DiffError> {
-        let history = self.history(&pov.delivered_heads)?;
+    fn participation(&self, view_point: &ViewPoint) -> Result<HashSet<CommitHash>, DiffError> {
+        let history = self.history(&view_point.delivered_heads)?;
         let mut authenticated = HashMap::new();
-        for (author, frontier) in &pov.authentication_frontiers {
+        for (author, frontier) in &view_point.authentication_frontiers {
             authenticated.insert(*author, self.history(frontier)?);
         }
         let mut bounded = HashMap::new();
-        for (author, permission) in &pov.write_permissions {
+        for (author, permission) in &view_point.write_permissions {
             if let WritePermission::Bounded(frontier) = permission {
                 // A bound outside the captured history supplies no proof in
-                // this POV, even if that commit has since arrived locally.
+                // this viewpoint, even if that commit has since arrived locally.
                 let available = frontier
                     .iter()
                     .copied()
@@ -564,7 +569,7 @@ impl<P: Clone> CommitGraph<P> {
                 let authenticated = authenticated
                     .get(author)
                     .is_some_and(|covered| covered.contains(hash));
-                let permitted = match pov.write_permissions.get(author) {
+                let permitted = match view_point.write_permissions.get(author) {
                     Some(WritePermission::Unbounded) => true,
                     Some(WritePermission::Bounded(_)) => bounded[author].contains(hash),
                     Some(WritePermission::Denied) | None => false,
@@ -651,7 +656,7 @@ mod tests {
                 Signature::from(alice_key.sign(root.hash().as_bytes()).to_bytes()),
             )
             .unwrap();
-        let old_pov = graph.pov();
+        let old_view_point = graph.view_point();
 
         let middle = graph.commit_by(bob, &[2]);
         graph.ingest_local_commit(middle.clone(), 2);
@@ -672,7 +677,7 @@ mod tests {
             vec![*root.hash()]
         );
         assert!(
-            peer.resolve(&old_pov)
+            peer.resolve(&old_view_point)
                 .unwrap()
                 .visible(root.hash())
                 .unwrap()
@@ -689,7 +694,7 @@ mod tests {
         assert!(graph.signatures[&alice].contains_key(tip.hash()));
         assert!(
             graph
-                .resolve(&old_pov)
+                .resolve(&old_view_point)
                 .unwrap()
                 .visible(root.hash())
                 .unwrap()
@@ -697,7 +702,7 @@ mod tests {
         peer.merge(&graph);
         assert_eq!(peer.signatures[&alice].len(), 1);
         assert!(
-            peer.resolve(&old_pov)
+            peer.resolve(&old_view_point)
                 .unwrap()
                 .visible(root.hash())
                 .unwrap()
