@@ -19,5 +19,12 @@ mod view_point;
 pub use view_point::{CommitDiff, ResolvedViewPoint, ViewPoint, ViewPointDiff, Vis, VisDiff};
 mod signature;
 pub use signature::Signature;
+mod sedimentree;
+pub use sedimentree::{
+    BlobMeta, Checkpoint, CommitRef, CommitSignature, DecodedCommit, DecodedFragment,
+    DecodedLooseCommit, EncodedBatch, EncodedItem, Fixup, Fragment, FragmentRange, FragmentRef,
+    IngestReport, ItemId, ItemMeta, ItemRef, LooseCommit, SedimentreeSummary, SedimentreeView,
+    Side, SignedCommitRef, SummaryError, SyncCodec, SyncError, SyncPlan, VerifiedItem, verify_item,
+};
 mod write_permission;
 pub use write_permission::WritePermission;

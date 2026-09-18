@@ -4,8 +4,9 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ResolveError,
-    ResolvedViewPoint, Signature, SignatureError, ViewPoint, ViewPointDiff, WritePermission,
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, IngestReport,
+    ResolveError, ResolvedViewPoint, SedimentreeView, Signature, SignatureError, VerifiedItem,
+    ViewPoint, ViewPointDiff, WritePermission,
 };
 
 /// An in-memory commit DAG with causal delivery.
@@ -189,6 +190,19 @@ impl<P: Clone> CommitGraph<P> {
         self.heads.insert(hash);
         self.nodes.0.push(Node { meta });
         self.by_hash.insert(hash, node_idx);
+    }
+
+    /// Borrow the sedimentree export view. Only sealed items with their own
+    /// author proofs may be exported. The boundary index is not implemented yet.
+    pub fn as_sedimentree(&self) -> SedimentreeView<'_, P> {
+        todo!("sedimentree boundary indexes and export view")
+    }
+
+    /// Accept an independently verified item, retaining permanent fragment proofs.
+    /// External parents can still delay causal delivery. Never grants local trust
+    /// or imports write permissions. No ingestion behavior is implemented yet.
+    pub fn ingest_verified(&mut self, _item: VerifiedItem<P>) -> IngestReport {
+        todo!("verified sedimentree ingestion")
     }
 
     /// Exchange publishable history and signature evidence, never permissions or

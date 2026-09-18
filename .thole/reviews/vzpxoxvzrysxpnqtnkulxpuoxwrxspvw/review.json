@@ -1,0 +1,100 @@
+{
+  "change_id": "vzpxoxvzrysxpnqtnkulxpuoxwrxspvw",
+  "algorithm": "patience",
+  "next_id": 3,
+  "files": {
+    "src/sedimentree.rs": {
+      "shadow_file": "src_sedimentree.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "50b4078ef86703f5",
+      "pre_shadow_file": "src_sedimentree.rs_pre.am"
+    },
+    "src/blob_hash.rs": {
+      "shadow_file": "src_blob_hash.rs.am",
+      "pre_image_hash": "c3dc5fc3d31385fa",
+      "post_image_hash": "4978b89d346cdb29",
+      "pre_shadow_file": "src_blob_hash.rs_pre.am"
+    },
+    "src/signature.rs": {
+      "shadow_file": "src_signature.rs.am",
+      "pre_image_hash": "75b6796d194f4985",
+      "post_image_hash": "c2a48e2aa7a50833",
+      "pre_shadow_file": "src_signature.rs_pre.am"
+    },
+    "tests/sedimentree/codec.rs": {
+      "shadow_file": "tests_sedimentree_codec.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "8b495f39ac37e4c5",
+      "pre_shadow_file": "tests_sedimentree_codec.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "0a3bc313e4b0fa45",
+      "post_image_hash": "46ae30368bea8b02",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "src/commit_meta.rs": {
+      "shadow_file": "src_commit_meta.rs.am",
+      "pre_image_hash": "224e3d9534866cf6",
+      "post_image_hash": "d2026d2c65355d84",
+      "pre_shadow_file": "src_commit_meta.rs_pre.am"
+    },
+    "design/sedimentree_sync_api.md": {
+      "shadow_file": "design_sedimentree_sync_api.md.am",
+      "pre_image_hash": "33dd6511ab4c1d4c",
+      "post_image_hash": "f0e01a1e7ffdf421",
+      "pre_shadow_file": "design_sedimentree_sync_api.md_pre.am"
+    },
+    "src/lib.rs": {
+      "shadow_file": "src_lib.rs.am",
+      "pre_image_hash": "afa00d108917338c",
+      "post_image_hash": "5b1ca8a2833ba017",
+      "pre_shadow_file": "src_lib.rs_pre.am"
+    },
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "da5c5b6a7a27cc2f",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    }
+  },
+  "annotations": [
+    {
+      "file_path": "tests/sedimentree.rs",
+      "start_cursor": "0103109b284c31a498353ed30e285597bce4e7b80802",
+      "end_cursor": "0103109b284c31a498353ed30e285597bce4e7850902",
+      "original_text": "// production depth metric. A depth-2 fixture takes roughly 65K trials, once.",
+      "context_before": "}\n\n// Mine actual commit hashes rather than fabricating metadata or weakening the",
+      "context_after": "fn record(key: &SigningKey, parents: &[CommitHash], depth: usize, value: &str) -> Record {\n    for nonce in 0..2_000_000 {\n        let payload = Write {",
+      "body": "Why 64k? Shouldn't it be 265?",
+      "kind": "review",
+      "state": "resolved",
+      "side": "post"
+    },
+    {
+      "file_path": "tests/sedimentree.rs",
+      "start_cursor": "0103109b284c31a498353ed30e285597bce4e7b41102",
+      "end_cursor": "0103109b284c31a498353ed30e285597bce4e7f51102",
+      "original_text": "fn sign(graph: &mut CommitGraph<Write>, proof: CommitSignature) {",
+      "context_before": "    }\n}\n",
+      "context_after": "    graph\n        .ingest_signature(proof.author, proof.commit, proof.signature)\n        .unwrap();",
+      "body": "We already have a very similar method in tests/auth.rs. Split this into a helper somehwere. In fact, I think we have _two_ `sign` functions in the tests already. We need to consolidate some helpers.",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    },
+    {
+      "file_path": "tests/sedimentree/codec.rs",
+      "start_cursor": "01031087338dd1cda4ee4587d1c3f23f33901bf24902",
+      "end_cursor": "01031087338dd1cda4ee4587d1c3f23f33901bb64a02",
+      "original_text": "    fn proof(key: &SigningKey, record: &Record) -> CommitSignature {",
+      "context_before": "        }\n    }\n",
+      "context_after": "        CommitSignature {\n            author: *record.meta.author(),\n            commit: *record.meta.hash(),",
+      "body": "We already have a function with this name in the parent moduel. DRY it up",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    }
+  ],
+  "comment": ""
+}

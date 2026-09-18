@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlobHash([u8; 32]);
 
 impl BlobHash {
@@ -24,4 +24,3 @@ impl From<BlobHash> for [u8; 32] {
         value.0
     }
 }
-

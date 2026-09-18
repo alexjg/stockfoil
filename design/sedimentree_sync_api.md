@@ -1,7 +1,9 @@
 # Sedimentree sync: API sketch
 
 A starting point for [Sedimentree Sync](sedimentree_sync.md), not a settled API.
-Names and Rust signatures below are sketches. No implementation changes yet.
+The public types are scaffolded in `src/sedimentree.rs`, with two entry points on
+`CommitGraph`. New operations are `todo!()` stubs, not implementations. In
+particular, the existing graph's global signature pruning is unchanged for now.
 
 Decisions so far:
 
@@ -107,6 +109,7 @@ impl<P> CommitGraph<P> {
 impl<P> SedimentreeView<'_, P> {
     fn loose_commits(&self) -> impl Iterator<Item = SignedCommitRef<'_, P>>;
     fn fragments(&self) -> impl Iterator<Item = FragmentRef<'_, P>>;
+    fn fragment(&self, range: &FragmentRange) -> Option<FragmentRef<'_, P>>;
     fn encode<C: SyncCodec<P>>(
         &self, codec: &mut C,
     ) -> Result<EncodedBatch, SyncError<C::Error>>;
@@ -121,6 +124,11 @@ signature. `FragmentRef` provides its range, checkpoints, fragment-local proof
 set, and selected commits in deterministic parent-before-child order. Neither
 lets an encoder accidentally traverse unpublished work. Unsealed candidates stay
 in the local index, not in this export view or its summary.
+
+`fragments()` enumerates the current cover. `fragment(range)` also permits lookup
+of a sealed canonical subfragment inside a covering fragment, so callers can
+save older chunks without a signer. It isn't an arbitrary range slicer or an
+escape hatch for unpublished history.
 
 Proposed range convention: include the head and boundary commits, but don't
 walk through boundaries to their parents. At a head's nonzero depth, stop each
@@ -482,6 +490,36 @@ Remaining details:
 * Try a genuinely batched MVR codec (shared tables or columns), not just a list
   of independently encoded commits. Round trips must preserve individual commit
   identities and all required fragment proofs.
+
+## Compile-ready scaffolding and contract tests
+
+The concrete transport scaffolding adds `ItemMeta::{LooseCommit, Fragment}` and
+`EncodedItem { metadata: ItemMeta, bytes: Vec<u8> }`. `EncodedBatch` is opaque;
+`items()` borrows its items, `summary()` returns an owned summary, and `get(&ItemRef)`
+looks up an exact advertised representation. `VerifiedItem` has no public
+constructor. `IngestReport` has `delivered` and `pending` commit-hash vectors:
+newly delivered commits include older queued commits released by this item;
+pending lists newly accepted commits from this item still awaiting parents.
+Errors are placeholders until the implementation defines their details.
+
+`tests/sedimentree.rs` exercises the graph API directly, not MVR internals. Its
+`contract_*` tests cover loose signing requirements, wants/needs exchange,
+standalone verification, delayed causal delivery, duplicate receipt, permanent
+nested proofs, concurrent same-author branches, invalid items, conditional
+fixups, equivalent encodings, and deterministic covers.
+
+`tests/sedimentree/codec.rs` is a real test codec for map writes: shared author and
+string tables plus columns across an entire batch. It preserves parent order and
+canonical commit identities. It implements no graph, verification, or sync logic.
+Signatures are generated from fixed Ed25519 seeds at runtime; fragment fixtures
+mine real hashes at the required leading-zero-byte depths. Codec roundtrips run
+normally. The new integration contracts compile but deliberately fail on the
+library's `todo!()` calls; they are neither ignored nor marked `should_panic`.
+The existing MVR implementation and its public-API tests are unchanged.
+
+To check compilation, run `cargo test --all-targets --no-run`. To run the existing
+suite and codec tests while the contracts are red, use
+`cargo test --all-targets -- --skip contract_`.
 
 ## Upstream references
 
