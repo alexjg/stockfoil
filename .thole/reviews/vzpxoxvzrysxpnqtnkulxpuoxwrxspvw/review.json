@@ -3,11 +3,11 @@
   "algorithm": "patience",
   "next_id": 3,
   "files": {
-    "src/sedimentree.rs": {
-      "shadow_file": "src_sedimentree.rs.am",
+    "tests/sedimentree/codec.rs": {
+      "shadow_file": "tests_sedimentree_codec.rs.am",
       "pre_image_hash": "af64724c8602eb6e",
-      "post_image_hash": "50b4078ef86703f5",
-      "pre_shadow_file": "src_sedimentree.rs_pre.am"
+      "post_image_hash": "8b495f39ac37e4c5",
+      "pre_shadow_file": "tests_sedimentree_codec.rs_pre.am"
     },
     "src/blob_hash.rs": {
       "shadow_file": "src_blob_hash.rs.am",
@@ -21,17 +21,11 @@
       "post_image_hash": "c2a48e2aa7a50833",
       "pre_shadow_file": "src_signature.rs_pre.am"
     },
-    "tests/sedimentree/codec.rs": {
-      "shadow_file": "tests_sedimentree_codec.rs.am",
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
       "pre_image_hash": "af64724c8602eb6e",
-      "post_image_hash": "8b495f39ac37e4c5",
-      "pre_shadow_file": "tests_sedimentree_codec.rs_pre.am"
-    },
-    "src/commit_graph.rs": {
-      "shadow_file": "src_commit_graph.rs.am",
-      "pre_image_hash": "0a3bc313e4b0fa45",
-      "post_image_hash": "46ae30368bea8b02",
-      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+      "post_image_hash": "da5c5b6a7a27cc2f",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
     },
     "src/commit_meta.rs": {
       "shadow_file": "src_commit_meta.rs.am",
@@ -39,23 +33,29 @@
       "post_image_hash": "d2026d2c65355d84",
       "pre_shadow_file": "src_commit_meta.rs_pre.am"
     },
-    "design/sedimentree_sync_api.md": {
-      "shadow_file": "design_sedimentree_sync_api.md.am",
-      "pre_image_hash": "33dd6511ab4c1d4c",
-      "post_image_hash": "f0e01a1e7ffdf421",
-      "pre_shadow_file": "design_sedimentree_sync_api.md_pre.am"
-    },
     "src/lib.rs": {
       "shadow_file": "src_lib.rs.am",
       "pre_image_hash": "afa00d108917338c",
       "post_image_hash": "5b1ca8a2833ba017",
       "pre_shadow_file": "src_lib.rs_pre.am"
     },
-    "tests/sedimentree.rs": {
-      "shadow_file": "tests_sedimentree.rs.am",
+    "design/sedimentree_sync_api.md": {
+      "shadow_file": "design_sedimentree_sync_api.md.am",
+      "pre_image_hash": "33dd6511ab4c1d4c",
+      "post_image_hash": "f0e01a1e7ffdf421",
+      "pre_shadow_file": "design_sedimentree_sync_api.md_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "0a3bc313e4b0fa45",
+      "post_image_hash": "46ae30368bea8b02",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "src/sedimentree.rs": {
+      "shadow_file": "src_sedimentree.rs.am",
       "pre_image_hash": "af64724c8602eb6e",
-      "post_image_hash": "da5c5b6a7a27cc2f",
-      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+      "post_image_hash": "50b4078ef86703f5",
+      "pre_shadow_file": "src_sedimentree.rs_pre.am"
     }
   },
   "annotations": [

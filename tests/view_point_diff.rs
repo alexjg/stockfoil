@@ -1,31 +1,18 @@
 //! Graph participation and evidence contracts, independent of any CRDT.
 
+mod support;
+
+use support::{author, key, sign, signature};
 use std::{collections::HashMap, ops::ControlFlow};
 
-use ed25519_dalek::{Signer, SigningKey};
-use stockfoil::{
-    Author, CommitGraph, CommitHash, Signature, ViewPointDiff, Vis, VisDiff, WritePermission,
-};
-
-fn author(key: &SigningKey) -> Author {
-    Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap()
-}
-
-fn signature(key: &SigningKey, hash: CommitHash) -> Signature {
-    Signature::from(key.sign(hash.as_bytes()).to_bytes())
-}
+use ed25519_dalek::SigningKey;
+use stockfoil::{CommitGraph, CommitHash, ViewPointDiff, Vis, VisDiff, WritePermission};
 
 fn prepare(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHash {
     let meta = graph.commit_by(author(key), &[value]);
     let hash = *meta.hash();
     graph.ingest_local_commit(meta, value);
     hash
-}
-
-fn sign(graph: &mut CommitGraph<u8>, key: &SigningKey, hash: CommitHash) {
-    graph
-        .ingest_signature(author(key), hash, signature(key, hash))
-        .unwrap();
 }
 
 fn append(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHash {
@@ -60,8 +47,8 @@ fn assert_changes(diff: &ViewPointDiff<'_>, removed: &[CommitHash], added: &[Com
 
 #[test]
 fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
-    let alice_key = SigningKey::from_bytes(&[1; 32]);
-    let bob_key = SigningKey::from_bytes(&[2; 32]);
+    let alice_key = key(1);
+    let bob_key = key(2);
     let alice_id = author(&alice_key);
     let bob_id = author(&bob_key);
     let allowed = HashMap::from([
@@ -152,7 +139,7 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
 
 #[test]
 fn signing_a_frontier_changes_signed_participation_not_captured_working_view_points() {
-    let key = SigningKey::from_bytes(&[42; 32]);
+    let key = key(42);
     let mut graph = CommitGraph::new();
     graph.set_write_permissions(&HashMap::from([(author(&key), WritePermission::Unbounded)]));
     let base = prepare(&mut graph, &key, 0);

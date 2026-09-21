@@ -1,21 +1,17 @@
+mod support;
+
+use support::{author, key, sign, signature};
+
 use std::{
     collections::{BTreeSet, HashMap},
     ops::ControlFlow,
 };
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use stockfoil::{
-    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, QueryError,
+    BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, QueryError,
     ResolveError, Signature, SignatureError, ViewPoint, Vis, WritePermission,
 };
-
-fn key(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
-}
-
-fn author(key: &SigningKey) -> Author {
-    Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap()
-}
 
 fn commit(key: &SigningKey, value: u8, parents: &[CommitHash]) -> CommitMeta {
     CommitMeta::new(CommitContents {
@@ -23,16 +19,6 @@ fn commit(key: &SigningKey, value: u8, parents: &[CommitHash]) -> CommitMeta {
         author: author(key),
         payload: BlobHash::of_contents(&[value]),
     })
-}
-
-fn sign(graph: &mut CommitGraph<u8>, key: &SigningKey, hash: CommitHash) {
-    graph
-        .ingest_signature(
-            author(key),
-            hash,
-            Signature::from(key.sign(hash.as_bytes()).to_bytes()),
-        )
-        .unwrap();
 }
 
 fn grant(graph: &mut CommitGraph<u8>, keys: &[&SigningKey]) {
@@ -252,12 +238,12 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_a_commit() {
     graph.ingest_commit(root.clone(), 1);
     graph.ingest_commit(child.clone(), 2);
     let before = graph.view_point();
-    let wrong_signer = Signature::from(bob.sign(root.hash().as_bytes()).to_bytes());
+    let wrong_signer = signature(&bob, *root.hash());
     assert!(matches!(
         graph.ingest_signature(author(&alice), *root.hash(), wrong_signer),
         Err(SignatureError::InvalidSignature { .. })
     ));
-    let mut corrupt = alice.sign(root.hash().as_bytes()).to_bytes();
+    let mut corrupt: [u8; 64] = signature(&alice, *root.hash()).into();
     corrupt[0] ^= 1;
     assert!(
         graph

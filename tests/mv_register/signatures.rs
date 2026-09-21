@@ -2,14 +2,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use ed25519_dalek::{Signer, SigningKey};
-use stockfoil::{Author, CommitHash, Signature, WritePermission};
+use crate::support::{author, key, signature};
+use stockfoil::WritePermission;
 
 use super::MvRegisterMap;
-
-fn sign(key: &SigningKey, hash: &CommitHash) -> Signature {
-    Signature::from(key.sign(hash.as_bytes()).to_bytes())
-}
 
 fn values(value: &str) -> BTreeSet<String> {
     BTreeSet::from([value.to_owned()])
@@ -17,8 +13,8 @@ fn values(value: &str) -> BTreeSet<String> {
 
 #[test]
 fn incoming_own_author_claims_are_not_local_and_signing_does_not_grant_access() {
-    let signing_key = SigningKey::from_bytes(&[7; 32]);
-    let author = Author::try_from(signing_key.verifying_key().as_bytes().as_slice()).unwrap();
+    let signing_key = key(7);
+    let author = author(&signing_key);
     let mut local = MvRegisterMap::with_author(author);
     let hash = local.prepare_set("title", "pending");
     let working = local.view_point();
@@ -30,7 +26,7 @@ fn incoming_own_author_claims_are_not_local_and_signing_does_not_grant_access() 
     local.set_write_permissions(&HashMap::new());
     assert!(local.get("title").is_empty());
     assert!(local.export_assignments().is_empty());
-    let signature = sign(&signing_key, &hash);
+    let signature = signature(&signing_key, hash);
     local.ingest_signature(author, hash, signature).unwrap();
     assert!(local.get("title").is_empty());
     assert_eq!(local.get_at(&working, "title").unwrap(), values("pending"));
@@ -58,11 +54,11 @@ fn incoming_own_author_claims_are_not_local_and_signing_does_not_grant_access() 
 
 #[test]
 fn received_payload_must_match_the_signed_metadata_before_ingestion() {
-    let key = SigningKey::from_bytes(&[8; 32]);
-    let author = Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap();
+    let key = key(8);
+    let author = author(&key);
     let mut source = MvRegisterMap::with_author(author);
     let hash = source.prepare_set("title", "legitimate");
-    let signature = sign(&key, &hash);
+    let signature = signature(&key, hash);
     source.ingest_signature(author, hash, signature).unwrap();
     let mut peer = MvRegisterMap::with_author(author);
     peer.ingest_signature(author, hash, signature).unwrap();
@@ -82,8 +78,8 @@ fn received_payload_must_match_the_signed_metadata_before_ingestion() {
 fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batch() {
     // Fixed seed for reproducibility. Sign actual commit hashes, then hold back
     // delivery to simulate the application's asynchronous signer.
-    let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let author = Author::try_from(signing_key.verifying_key().as_bytes().as_slice()).unwrap();
+    let signing_key = key(42);
+    let author = author(&signing_key);
     let mut local = MvRegisterMap::with_author(author);
     let mut peer = MvRegisterMap::new();
     let permissions = HashMap::from([(author, WritePermission::Unbounded)]);
@@ -91,7 +87,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
     peer.set_write_permissions(&permissions);
 
     let base = local.prepare_set("title", "before");
-    let base_signature = sign(&signing_key, &base);
+    let base_signature = signature(&signing_key, base);
     assert_eq!(local.get("title"), values("before"));
     assert!(local.export_assignments().is_empty());
     assert!(
@@ -137,7 +133,7 @@ fn local_edits_appear_before_signing_and_a_frontier_signature_publishes_the_batc
 
     // Another keystroke overwrites the pending value. Neither edit may leak.
     let tip = local.prepare_set("title", "after");
-    let tip_signature = sign(&signing_key, &tip);
+    let tip_signature = signature(&signing_key, tip);
     let batch_working = local.view_point();
     let batch_signed = local.signed_view_point();
     assert_eq!(local.get("title"), values("after"));

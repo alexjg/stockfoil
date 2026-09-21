@@ -2,6 +2,7 @@ use std::{collections::{BTreeSet}};
 
 mod mv_register;
 mod orset;
+mod support;
 
 #[test]
 fn test_basic() {

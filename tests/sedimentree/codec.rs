@@ -269,13 +269,14 @@ impl SyncCodec<Write> for BatchCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use crate::support::{author, key, proof};
+    use ed25519_dalek::SigningKey;
     use stockfoil::{CommitHash, CommitRef};
 
     fn record(key: &SigningKey, payload: Write, parents: Vec<CommitHash>) -> Record {
         Record {
             meta: CommitMeta::new(CommitContents {
-                author: Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap(),
+                author: author(key),
                 parents,
                 payload: BlobHash::of_contents(&bcs::to_bytes(&payload).unwrap()),
             }),
@@ -283,18 +284,10 @@ mod tests {
         }
     }
 
-    fn proof(key: &SigningKey, record: &Record) -> CommitSignature {
-        CommitSignature {
-            author: *record.meta.author(),
-            commit: *record.meta.hash(),
-            signature: Signature::from(key.sign(record.meta.hash().as_bytes()).to_bytes()),
-        }
-    }
-
     #[test]
     fn joint_columns_preserve_hashes_payloads_parent_order_and_proofs() {
-        let alice = SigningKey::from_bytes(&[1; 32]);
-        let bob = SigningKey::from_bytes(&[2; 32]);
+        let alice = key(1);
+        let bob = key(2);
         let payload = Write {
             key: "shared".into(),
             value: "shared".into(),
@@ -319,9 +312,9 @@ mod tests {
             vec![*second.meta.hash(), *first.meta.hash(), *second.meta.hash()],
         );
         let proofs = vec![
-            proof(&alice, &third),
-            proof(&bob, &second),
-            proof(&alice, &first),
+            proof(&alice, *third.meta.hash()),
+            proof(&bob, *second.meta.hash()),
+            proof(&alice, *first.meta.hash()),
         ];
         let records = vec![first, second, third];
         let bytes = encode_records(&records, &proofs);
@@ -359,7 +352,7 @@ mod tests {
 
     #[test]
     fn loose_roundtrip_and_counter() {
-        let key = SigningKey::from_bytes(&[3; 32]);
+        let key = key(3);
         let record = record(
             &key,
             Write {
@@ -369,7 +362,7 @@ mod tests {
             },
             vec![],
         );
-        let signature = proof(&key, &record).signature;
+        let signature = proof(&key, *record.meta.hash()).signature;
         let mut codec = BatchCodec::default();
         let bytes = codec
             .encode_commit(SignedCommitRef {
@@ -397,7 +390,7 @@ mod tests {
         let empty = codec.decode_fragment(&encode_records(&[], &[])).unwrap();
         assert!(empty.commits.is_empty());
         assert!(empty.signatures.is_empty());
-        let key = SigningKey::from_bytes(&[4; 32]);
+        let key = key(4);
         let mut record = record(
             &key,
             Write {
@@ -407,20 +400,16 @@ mod tests {
             },
             vec![],
         );
-        let proof = proof(&key, &record);
+        let record_proof = proof(&key, *record.meta.hash());
         record.payload.value = "tampered".into();
         let decoded = codec
-            .decode_fragment(&encode_records(&[record], &[proof]))
+            .decode_fragment(&encode_records(&[record], &[record_proof]))
             .unwrap();
         let canonical = codec
             .canonical_payload(&decoded.commits[0].payload)
             .unwrap();
         assert!(decoded.commits[0].contents.payload != BlobHash::of_contents(&canonical));
-        let proof_only = CommitSignature {
-            author: Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap(),
-            commit: CommitHash::from([99; 32]),
-            signature: Signature::from(key.sign(&[99; 32]).to_bytes()),
-        };
+        let proof_only = proof(&key, CommitHash::from([99; 32]));
         let decoded = codec
             .decode_fragment(&encode_records(&[], &[proof_only]))
             .unwrap();
@@ -430,7 +419,7 @@ mod tests {
 
     #[test]
     fn malformed_wire_data_is_invalid_data() {
-        let key = SigningKey::from_bytes(&[5; 32]);
+        let key = key(5);
         let record = record(
             &key,
             Write {
@@ -440,8 +429,11 @@ mod tests {
             },
             vec![],
         );
-        let signature = proof(&key, &record).signature;
-        let valid = encode_records(std::slice::from_ref(&record), &[proof(&key, &record)]);
+        let signature = proof(&key, *record.meta.hash()).signature;
+        let valid = encode_records(
+            std::slice::from_ref(&record),
+            &[proof(&key, *record.meta.hash())],
+        );
         let mut codec = BatchCodec::default();
         for case in 0..7 {
             let mut wire: BatchWire = bcs::from_bytes(&valid).unwrap();

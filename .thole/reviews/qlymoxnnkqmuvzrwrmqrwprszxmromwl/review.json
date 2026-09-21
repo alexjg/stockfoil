@@ -1,0 +1,51 @@
+{
+  "change_id": "qlymoxnnkqmuvzrwrmqrwprszxmromwl",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "tests/support/mod.rs": {
+      "shadow_file": "tests_support_mod.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "2b6efb5fadf545ff",
+      "pre_shadow_file": "tests_support_mod.rs_pre.am"
+    },
+    "tests/auth.rs": {
+      "shadow_file": "tests_auth.rs.am",
+      "pre_image_hash": "5e5352b98c3fe6fd",
+      "post_image_hash": "96eb3bde45d9e77f",
+      "pre_shadow_file": "tests_auth.rs_pre.am"
+    },
+    "tests/mv_register/signatures.rs": {
+      "shadow_file": "tests_mv_register_signatures.rs.am",
+      "pre_image_hash": "398f889576f2c0dd",
+      "post_image_hash": "4dff21b08b5bf5c4",
+      "pre_shadow_file": "tests_mv_register_signatures.rs_pre.am"
+    },
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "da5c5b6a7a27cc2f",
+      "post_image_hash": "5cc2df515fd33b22",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    },
+    "tests/smoke.rs": {
+      "shadow_file": "tests_smoke.rs.am",
+      "pre_image_hash": "dae988aae897b917",
+      "post_image_hash": "0f4016c1686d3dd3",
+      "pre_shadow_file": "tests_smoke.rs_pre.am"
+    },
+    "tests/view_point_diff.rs": {
+      "shadow_file": "tests_view_point_diff.rs.am",
+      "pre_image_hash": "cad76cfb7f0d6889",
+      "post_image_hash": "6f3d4efe7ed42c5b",
+      "pre_shadow_file": "tests_view_point_diff.rs_pre.am"
+    },
+    "tests/sedimentree/codec.rs": {
+      "shadow_file": "tests_sedimentree_codec.rs.am",
+      "pre_image_hash": "8b495f39ac37e4c5",
+      "post_image_hash": "3fc5fe6883fb7172",
+      "pre_shadow_file": "tests_sedimentree_codec.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}
