@@ -6,7 +6,7 @@ use std::{
     sync::OnceLock,
 };
 
-use rand::{SeedableRng, seq::SliceRandom};
+use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use stockfoil::{
     BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, Fragment,
     FragmentRange, LooseCommit, SedimentreeSummary, WritePermission,
@@ -106,6 +106,99 @@ fn nested() -> &'static Nested {
             tail,
         }
     })
+}
+
+// Rebuild every range by walking parents, then reduce by exhaustive membership
+// comparisons. Deliberately independent of the maintained prefix/cover indexes.
+fn reference_summary(commits: &[CommitMeta]) -> SedimentreeSummary {
+    let known: HashMap<_, _> = commits.iter().map(|meta| (hash(meta), meta)).collect();
+    let depth = |meta: &CommitMeta| {
+        meta.hash()
+            .as_bytes()
+            .iter()
+            .take_while(|b| **b == 0)
+            .count()
+    };
+    let mut ranges = Vec::new();
+    for head in commits {
+        let head_depth = depth(head);
+        if head_depth == 0 {
+            continue;
+        }
+        let mut members = BTreeSet::new();
+        let mut boundary = Vec::new();
+        let mut checkpoints = Vec::new();
+        let mut stack = vec![head];
+        while let Some(meta) = stack.pop() {
+            if !members.insert(hash(meta)) {
+                continue;
+            }
+            if hash(meta) != hash(head) {
+                if depth(meta) >= head_depth {
+                    boundary.push(meta);
+                    continue;
+                }
+                if depth(meta) > 0 {
+                    checkpoints.push(meta);
+                }
+            }
+            stack.extend(meta.parents().iter().map(|parent| known[parent]));
+        }
+        ranges.push((head_depth, fragment(head, &boundary, &checkpoints), members));
+    }
+    let loose: Vec<_> = commits
+        .iter()
+        .filter(|meta| {
+            !ranges
+                .iter()
+                .any(|(_, _, members)| members.contains(&hash(meta)))
+        })
+        .collect();
+    let fragments = ranges
+        .iter()
+        .enumerate()
+        .filter(|(i, (depth, _, members))| {
+            !ranges
+                .iter()
+                .enumerate()
+                .any(|(j, (other_depth, _, other_members))| {
+                    *i != j && depth <= other_depth && members.is_subset(other_members)
+                })
+        })
+        .map(|(_, (_, fragment, _))| fragment.clone())
+        .collect();
+    expected(&loose, fragments)
+}
+
+#[test]
+fn maintained_cover_matches_full_reduction_after_each_insertion() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(23);
+    for case in 0..4 {
+        let mut commits = Vec::new();
+        let mut graph = CommitGraph::new();
+        for node in 0..48 {
+            let parents: Vec<_> = if node == 0 {
+                vec![]
+            } else {
+                (0..rng.random_range(0..=3))
+                    .map(|_| hash(&commits[rng.random_range(0..node)]))
+                    .collect()
+            };
+            let depth = if node == 47 {
+                2
+            } else {
+                usize::from(rng.random_range(0..5) == 0)
+            };
+            let meta = commit(&parents, depth, &format!("oracle {case}:{node}"));
+            graph.ingest_commit(meta.clone(), ());
+            commits.push(meta);
+            assert_eq!(
+                graph.as_sedimentree().summary(),
+                reference_summary(&commits),
+                "case {case}, node {node}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -280,6 +373,67 @@ fn a_merge_can_reach_ancestry_also_hidden_behind_another_paths_boundary() {
             .summary(),
         expected(&[], vec![fragment(&head, &[&boundary], &[])]),
     );
+}
+
+#[test]
+fn fragment_membership_can_have_holes_in_a_causal_chain() {
+    // a -> b -> c -> d -> h, with another edge a -> h. The range at h
+    // includes a through the shortcut but excludes b behind boundary c.
+    let a = commit(&[], 0, "hole a");
+    let b = commit(&[hash(&a)], 0, "hole b");
+    let c = commit(&[hash(&b)], 1, "hole c");
+    let d = commit(&[hash(&c)], 0, "hole d");
+    let h = commit(&[hash(&d), hash(&a)], 1, "hole h");
+    assert_eq!(
+        graph(&[&a, &b, &c, &d, &h]).as_sedimentree().summary(),
+        expected(&[], vec![fragment(&c, &[], &[]), fragment(&h, &[&c], &[])]),
+    );
+}
+
+#[test]
+fn a_late_fork_can_use_a_checkpoint_already_absorbed_by_the_cover() {
+    let f = nested();
+    let mut graph = graph(&[&f.root, &f.left, &f.right, &f.merge, &f.outer]);
+    let branch = commit(&[hash(&f.left)], 0, "late branch");
+    let head = commit(&[hash(&branch)], 1, "late head");
+    graph.ingest_commit(branch, ());
+    graph.ingest_commit(head.clone(), ());
+    assert_eq!(
+        graph.as_sedimentree().summary(),
+        expected(
+            &[],
+            vec![
+                fragment(&f.outer, &[], &[&f.left, &f.right, &f.merge]),
+                fragment(&head, &[&f.left], &[]),
+            ]
+        )
+    );
+}
+
+#[test]
+fn publication_can_fill_an_older_index_hole_without_disturbing_other_branches() {
+    let withheld = commit(&[], 0, "withheld root");
+    let independent = commit(&[], 1, "independent root");
+    let tail = commit(&[hash(&independent)], 0, "independent tail");
+    let child = commit(&[hash(&withheld)], 1, "withheld child");
+    let mut actual = CommitGraph::new();
+    actual.ingest_local_commit(withheld.clone(), ());
+    actual.ingest_commit(independent.clone(), ());
+    actual.ingest_commit(tail.clone(), ());
+    actual.ingest_commit(child.clone(), ());
+    assert_eq!(
+        actual.as_sedimentree().summary(),
+        expected(&[&tail], vec![fragment(&independent, &[], &[])])
+    );
+    let mut fork = actual.clone();
+    sign(&mut actual, &key(1), hash(&withheld));
+    let expected = graph(&[&withheld, &independent, &tail, &child])
+        .as_sedimentree()
+        .summary();
+    assert_eq!(actual.as_sedimentree().summary(), expected);
+    assert_ne!(fork.as_sedimentree().summary(), expected);
+    sign(&mut fork, &key(1), hash(&withheld));
+    assert_eq!(fork.as_sedimentree().summary(), expected);
 }
 
 #[test]

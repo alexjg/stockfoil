@@ -94,35 +94,58 @@ conventions; compatibility with a pinned adapter still needs checking.
 
 ## Maintained indexes and reduced cover
 
-`CommitGraph` owns a cloneable `SedimentreeIndex` with:
+Keep an unfinished prefix at each node and depth `n`:
 
-* A full-hash commit index containing depth and parent hashes.
-* A range index containing exact membership. Contained canonical ranges remain
-  indexed even when no longer in the current cover.
-* Ordered maps of current loose-commit and fragment metadata, including the
-  cover's checkpoints, ready to copy directly into a summary.
+```text
+prefix(n, v) = {v}                              if depth(v) >= n
+               {v} ∪ union(prefix(n, parents))  otherwise
+```
 
-After commit delivery or verified signature arrival, the graph determines which
-commits have become publishable and inserts newly eligible metadata in causal
-order. Permission changes don't update the index. Duplicate ingestion does
-nothing; graph cloning copies the indexes; graph merge updates them through the
-ordinary ingestion paths.
+A depth-`n` head closes `{head} ∪ union(prefix(n, parents))` **before** resetting
+its prefix to `{head}`. Roots need no special case. Merges are set unions, so
+shared ancestors are counted once. Process parents newest-first: a prefix's largest
+local index is its tip, and if that tip is already included, its whole prefix is
+included. This skips redundant ancestor parents without comparing their sets.
+No ancestry walk is needed to build a range.
 
-On insertion, a nonzero-depth head creates its canonical range once. Its members
-cease to be loose. Existing cover fragments wholly contained by the new range
-are removed if their depth is no greater than the new head's depth. Exact full
-hash membership, never truncated checkpoint comparisons, decides containment.
-Adjacent fragments that overlap only at boundaries can both remain necessary.
+These are persistent ordered sets (`im::OrdSet`) of local topological node
+indices, not copied hash sets or ordinary vector clocks. Extending a chain shares
+the old tree and copies only an insertion path. Unions use the set's sharing-aware
+diff and insert only additions, rather than reinserting shared history at merges.
+For a much smaller operand, membership checks avoid scanning the larger set just
+to add a few nodes. Old prefixes stay available for
+late forks, even when their fragments have left the cover. The sets retain holes:
+a merge can include an ancestor through one path while a boundary cuts off other
+commits in the same causal chain.
+
+Each node stores prefixes only through the deepest checkpoint in its ancestry,
+plus one unbounded prefix. That last entry also serves all greater depths. A
+history with no checkpoints therefore needs one entry per node, not 32. The index
+stores no parent links; it borrows graph metadata when constructing a fragment's
+public hashes. Withheld nodes leave holes in the index until publication.
+
+On closing a fragment, visit its members to collect boundaries/checkpoints and
+remove covered loose entries. Only existing fragments whose heads are members
+can be redundant: shallower ones are contained automatically; equal-depth ones
+need an exact subset check. This preserves both adjacent ranges and the case
+where a merge bypasses a boundary and includes its old fragment too. Membership
+sets are retained for current cover fragments, not in a separate historical
+range table. Summary metadata stays sorted by full hashes, independent of local
+node numbering.
 
 "Reduced" means removing individually contained ranges and covered loose
-commits, not solving a global minimum-set-cover problem. The result is
-deterministic regardless of commit or signature arrival order.
+commits, not solving a global minimum-set-cover problem.
 
-This first implementation retains per-range membership sets in unbounded memory.
 Publication eligibility still uses the existing graph-wide computation on
-mutation; only new entries are decomposed. More incremental eligibility tracking
-and indexed-run traversal can improve mutation cost later. Neither is hidden
-inside `summary()`.
+mutation. Only newly eligible nodes extend prefixes, in causal order. Permission
+changes do nothing; cloning shares persistent set storage; merging uses ordinary
+ingestion. `summary()` still just copies the maintained cover.
+
+This trades additional derived state for incremental construction. It is not a
+bounded-memory algorithm or a claim of constant-time insertion: merging sets,
+emitting fragment metadata, and equal-depth subset checks still cost work.
+Persistent integer sets keep this first version simple; compressed bitmap storage
+and incremental publication tracking remain possible follow-ups.
 
 ## Tests
 
@@ -135,9 +158,14 @@ inside `summary()`.
 * Local publication gating, signature arrival before/after commits, and permission
   independence.
 * Owned snapshots and payload-free summary reads.
+* Membership holes, late forks from absorbed checkpoints, and publication gaps.
 
-Fixtures mine real commit hashes at the required depths. A small unit test also
-pins the byte-based depth metric. There are no codec fixtures or deliberately
+Fixtures mine real commit hashes at the required depths. Unit tests pin the
+byte-based metric and compare the prefix recurrence against a boundary-walk
+oracle on generated DAGs, including synthetic depth-32 cases. They also exercise
+shared chain snapshots, repeated fork/merge diamonds, wide merges, and late forks. An integration
+test compares the maintained cover with exhaustive walk-and-subset reduction
+after every insertion in generated real-hash DAGs. There are no codec fixtures or deliberately
 failing `contract_*` tests.
 
 Run `cargo test --all-targets`.

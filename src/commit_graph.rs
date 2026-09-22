@@ -210,7 +210,12 @@ impl<P: Clone> CommitGraph<P> {
         let publishable = self.publishable_nodes();
         for (idx, node) in &self.nodes {
             if publishable[idx.0] {
-                self.sedimentree.insert(&node.meta);
+                self.sedimentree.insert(
+                    idx.0,
+                    &node.meta,
+                    node.meta.parents().iter().map(|hash| self.by_hash[hash].0),
+                    |index| &self.nodes[NodeIdx(index)].meta,
+                );
             }
         }
     }
