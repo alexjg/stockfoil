@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, IngestReport,
-    ResolveError, ResolvedViewPoint, SedimentreeView, Signature, SignatureError, VerifiedItem,
-    ViewPoint, ViewPointDiff, WritePermission,
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ResolveError,
+    ResolvedViewPoint, SedimentreeView, Signature, SignatureError, ViewPoint, ViewPointDiff,
+    WritePermission,
 };
 
 /// An in-memory commit DAG with causal delivery.
@@ -35,6 +35,7 @@ pub struct CommitGraph<P> {
     // Local provenance never travels through merge. Only this path grants
     // optimistic authentication or holds otherwise-delivered data off the wire.
     local: HashSet<CommitHash>,
+    sedimentree: crate::sedimentree::SedimentreeIndex,
 }
 
 #[derive(Clone)]
@@ -61,6 +62,7 @@ impl<P: Clone> CommitGraph<P> {
             permissions: HashMap::new(),
             signatures: HashMap::new(),
             local: HashSet::new(),
+            sedimentree: crate::sedimentree::SedimentreeIndex::default(),
         }
     }
 
@@ -160,6 +162,7 @@ impl<P: Clone> CommitGraph<P> {
             }
         }
         self.prune_signatures();
+        self.refresh_sedimentree();
     }
 
     // Only called once all parents have been inserted into the graph.
@@ -192,17 +195,24 @@ impl<P: Clone> CommitGraph<P> {
         self.by_hash.insert(hash, node_idx);
     }
 
-    /// Borrow the sedimentree export view. Only sealed items with their own
-    /// author proofs may be exported. The boundary index is not implemented yet.
-    pub fn as_sedimentree(&self) -> SedimentreeView<'_, P> {
-        todo!("sedimentree boundary indexes and export view")
+    /// Borrow the structural sedimentree index of publishable delivered history.
+    /// This does not certify independently verifiable or encoded sync items.
+    pub fn as_sedimentree(&self) -> SedimentreeView<'_> {
+        SedimentreeView {
+            index: &self.sedimentree,
+        }
     }
 
-    /// Accept an independently verified item, retaining permanent fragment proofs.
-    /// External parents can still delay causal delivery. Never grants local trust
-    /// or imports write permissions. No ingestion behavior is implemented yet.
-    pub fn ingest_verified(&mut self, _item: VerifiedItem<P>) -> IngestReport {
-        todo!("verified sedimentree ingestion")
+    // Publication is monotonic even when permissions change. Compute eligibility
+    // using the existing graph policy, then index only newly publishable nodes.
+    // All decomposition work happens on mutation, never when reading a summary.
+    fn refresh_sedimentree(&mut self) {
+        let publishable = self.publishable_nodes();
+        for (idx, node) in &self.nodes {
+            if publishable[idx.0] {
+                self.sedimentree.insert(&node.meta);
+            }
+        }
     }
 
     /// Exchange publishable history and signature evidence, never permissions or
@@ -366,6 +376,7 @@ impl<P: Clone> CommitGraph<P> {
             .or_default()
             .insert(hash, signature);
         self.prune_signatures();
+        self.refresh_sedimentree();
         Ok(())
     }
 
