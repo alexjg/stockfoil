@@ -3,23 +3,32 @@
 // Each integration test compiles its own copy and uses a different subset.
 #![allow(dead_code)]
 
-use ed25519_dalek::{Signer, SigningKey};
-use stockfoil::{
-    Author, CommitGraph, CommitHash, CommitMeta, Signature, SignatureEvidence, UnverifiedItem,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
 };
 
-/// Migrate legacy receipts through the public verification/admission boundary.
-/// This is compile-only scaffolding until proof fixtures and verification exist.
-/// In particular, unsigned receipts and missing-parent queues need behavioral
-/// migration; their existing assertions are retained rather than bypassed.
+use ed25519_dalek::{Signer, SigningKey};
+use stockfoil::{
+    Author, CommitGraph, CommitHash, CommitMeta, FragmentRange, Signature, SignatureEvidence,
+    UnverifiedItem,
+};
+
+/// Receive a signed fixture in its canonical item through verification and admission.
+/// Parents must already be verified in the graph; callers buffer early arrivals.
 pub fn receive_commit<P: Clone>(graph: &mut CommitGraph<P>, meta: CommitMeta, payload: P) {
-    let signatures = received_signatures(&meta);
-    let item = UnverifiedItem::Commit { meta, signatures }
-        .verify(&*graph)
+    let hash = *meta.hash();
+    let item = received_item(graph, meta)
+        .verify()
         .expect("received fixture must verify");
     let mut payload = Some(payload);
     graph
-        .ingest(item, |_| {
+        .ingest(item, |meta| {
+            assert_eq!(
+                *meta.hash(),
+                hash,
+                "fragment ancestors must already be present"
+            );
             payload
                 .take()
                 .expect("single-commit payload requested twice")
@@ -27,11 +36,60 @@ pub fn receive_commit<P: Clone>(graph: &mut CommitGraph<P>, meta: CommitMeta, pa
         .expect("verified fixture must be admitted");
 }
 
-fn received_signatures(_meta: &CommitMeta) -> Vec<SignatureEvidence> {
-    // Signing every receipt with a fixture key would change tests that rely on
-    // unsigned receipt or later signature arrival. Adapt those scenarios and
-    // their proof dependencies explicitly, rather than inventing evidence.
-    todo!("prepare legacy fixture proof evidence and adapt signature-timing tests")
+/// Build the canonical transport envelope, including checkpoint ancestors when
+/// needed. This only reads destination metadata: receipt still verifies and
+/// admits the signed envelope through the public trust boundary.
+pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> UnverifiedItem {
+    let depth = |hash: &CommitHash| hash.as_bytes().iter().take_while(|b| **b == 0).count();
+    let head = *meta.hash();
+    let head_depth = depth(&head);
+    if head_depth == 0 {
+        let signatures = received_signatures(&meta);
+        return UnverifiedItem::Commit { meta, signatures };
+    }
+    let mut known = BTreeMap::new();
+    graph.traverse_delivered(|meta, _| {
+        known.insert(*meta.hash(), meta.clone());
+        ControlFlow::Continue(())
+    });
+    known.insert(head, meta);
+    let mut pending = vec![head];
+    let mut visited = BTreeSet::new();
+    let mut boundary = BTreeSet::new();
+    let mut commits = Vec::new();
+    let mut signatures = Vec::new();
+    while let Some(hash) = pending.pop() {
+        if !visited.insert(hash) {
+            continue;
+        }
+        let meta = known
+            .get(&hash)
+            .expect("fixture fragment ancestor must be delivered");
+        if hash != head && depth(&hash) >= head_depth {
+            boundary.insert(hash);
+        } else {
+            pending.extend(meta.parents().iter().copied());
+            signatures.extend(received_signatures(meta));
+        }
+        commits.push(meta.clone());
+    }
+    UnverifiedItem::Fragment {
+        range: FragmentRange { head, boundary },
+        commits,
+        signatures,
+    }
+}
+
+fn received_signatures(meta: &CommitMeta) -> Vec<SignatureEvidence> {
+    let key = (0..=255)
+        .map(key)
+        .find(|key| &author(key) == meta.author())
+        .expect("received fixture author must use a repeated-byte signing key (0..=255)");
+    vec![SignatureEvidence {
+        author: author(&key),
+        commit: *meta.hash(),
+        signature: signature(&key, *meta.hash()),
+    }]
 }
 
 pub fn key(seed: u8) -> SigningKey {

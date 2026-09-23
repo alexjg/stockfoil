@@ -1,31 +1,26 @@
-//! Delivery-only OR-set example. The MVR demo exercises authentication and permissions.
-//! Local signing and signature-backed export remain deferred; local edits use the
-//! local ingestion path, not received-history admission.
+//! Signed, delivery-only OR-set example. Merges exchange verified history;
+//! the MVR demo additionally exercises document participation and permissions.
 
 use std::{
     collections::{BTreeSet, HashMap},
     ops::ControlFlow,
 };
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
-use stockfoil::{Author, CommitGraph, CommitHash, CommitMeta};
+use stockfoil::{Author, CommitGraph, CommitHash, CommitMeta, Signature};
 
 pub struct OrSet {
     graph: CommitGraph<OrSetCommit>,
     state: State,
     actor: ActorId,
+    signing_key: SigningKey,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ActorId([u8; 32]);
 
 impl ActorId {
-    pub fn generate() -> Self {
-        let key = SigningKey::from_bytes(&rand::random());
-        Self(key.verifying_key().to_bytes())
-    }
-
     fn author(&self) -> Author {
         Author::try_from(self.0.as_slice()).unwrap()
     }
@@ -33,13 +28,15 @@ impl ActorId {
 
 impl OrSet {
     pub fn new() -> Self {
+        let signing_key = SigningKey::from_bytes(&rand::random());
         Self {
             graph: CommitGraph::new(),
             state: State {
                 adds: HashMap::new(),
                 removes: BTreeSet::new(),
             },
-            actor: ActorId::generate(),
+            actor: ActorId(signing_key.verifying_key().to_bytes()),
+            signing_key,
         }
     }
 
@@ -80,14 +77,9 @@ impl OrSet {
     }
 
     pub fn fork(&self) -> Self {
-        Self {
-            graph: self.graph.clone(),
-            state: State {
-                adds: self.state.adds.clone(),
-                removes: self.state.removes.clone(),
-            },
-            actor: ActorId::generate(),
-        }
+        let mut fork = Self::new();
+        fork.merge(self);
+        fork
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -98,7 +90,12 @@ impl OrSet {
 
     fn ingest_local_commit(&mut self, meta: CommitMeta, commit: OrSetCommit) {
         let heads_before = self.graph.delivered_heads().collect::<Vec<_>>();
+        let hash = *meta.hash();
+        let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
         self.graph.ingest_local_commit(meta, commit);
+        self.graph
+            .ingest_signature(self.actor.author(), hash, signature)
+            .expect("signature from our own signing key");
         self.evaluate(&heads_before);
     }
 
@@ -184,4 +181,32 @@ mod commit_hashes {
 pub struct State {
     adds: HashMap<String, BTreeSet<CommitHash>>,
     removes: BTreeSet<CommitHash>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_forks_keep_distinct_actors_and_converge_after_repeated_merges() {
+        let mut left = OrSet::new();
+        let mut right = left.fork();
+        assert_ne!(left.actor.author(), right.actor.author());
+        left.add("shared".to_owned());
+        right.add("shared".to_owned());
+        left.remove("shared".to_owned());
+
+        // The removal observed only the left actor's independently signed add.
+        right.merge(&left);
+        left.merge(&right);
+        left.merge(&right);
+        assert_eq!(left.value(), BTreeSet::from(["shared".to_owned()]));
+        assert_eq!(right.value(), left.value());
+
+        right.remove("shared".to_owned());
+        left.merge(&right);
+        right.merge(&left);
+        assert!(left.value().is_empty());
+        assert!(right.value().is_empty());
+    }
 }

@@ -1,9 +1,8 @@
 //! Public-API properties for summaries, canonical fragment exports, and borrowed reads.
-//! The oracle knows only envelopes, arrival/local flags, and signature events;
-//! it never asks the graph for delivery, ancestry, depth, or fragment membership.
-//! TODO: migrate legacy unsigned receipts, queue schedules, and the publication
-//! model to proof-bearing admission. Assertions remain intact in this compile-only
-//! migration; merge transport is also awaiting verified-item support.
+//! The oracle knows only accepted verified members, local edits, and signature
+//! events; it never asks the graph for delivery, ancestry, depth, or membership.
+//! Out-of-order transport verifies statelessly on arrival; certificates and
+//! payloads then wait in a test-side receiver, never the graph's local-edit queue.
 mod support;
 
 use std::{
@@ -14,8 +13,9 @@ use std::{
 
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use stockfoil::{
-    Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, Fragment,
-    FragmentRange, FragmentReadError, LooseCommit, SedimentreeSummary,
+    Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
+    Fragment, FragmentRange, FragmentReadError, IngestError, ItemId, LooseCommit,
+    SedimentreeSummary, SignatureEvidence, UnverifiedItem, VerifiedItem,
 };
 use support::{author, key, sign};
 
@@ -148,24 +148,158 @@ fn cases() -> &'static [Case] {
     })
 }
 
+fn evidence(meta: &CommitMeta) -> SignatureEvidence {
+    let key = (1..=255)
+        .map(key)
+        .find(|key| &author(key) == meta.author())
+        .expect("fixture signing key");
+    SignatureEvidence {
+        author: author(&key),
+        commit: hash(meta),
+        signature: support::signature(&key, hash(meta)),
+    }
+}
+
+fn envelope(meta: &CommitMeta) -> UnverifiedItem {
+    UnverifiedItem::Commit {
+        meta: meta.clone(),
+        signatures: vec![evidence(meta)],
+    }
+}
+
+// Nonzero heads travel as canonical certificates with inclusive membership,
+// not as commit items. Sign every member so mixed-author fixtures are valid too.
+fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
+    if depth(hash(meta)) == 0 {
+        return envelope(meta);
+    }
+    let all = commits.iter().map(hash).collect();
+    let (summary, memberships) = oracle(commits, &all);
+    let range = summary
+        .fragments
+        .into_iter()
+        .find(|f| f.range.head == hash(meta))
+        .unwrap()
+        .range;
+    let members: Vec<_> = commits
+        .iter()
+        .filter(|m| memberships[&range.head].contains(m.hash()))
+        .cloned()
+        .collect();
+    let signatures = members.iter().map(evidence).collect();
+    UnverifiedItem::Fragment {
+        range,
+        commits: members,
+        signatures,
+    }
+}
+
+// Verification is stateless and happens on receipt. Only admission waits for
+// dependencies; even payloads that panic on Clone can wait without being cloned.
+#[derive(Clone)]
+struct Receiver<P> {
+    commits: Vec<CommitMeta>,
+    payload: fn(CommitHash) -> P,
+    pending: Vec<(VerifiedItem, HashMap<CommitHash, P>)>,
+}
+
+impl<P: Clone> Receiver<P> {
+    fn new(commits: &[CommitMeta], payload: fn(CommitHash) -> P) -> Self {
+        Self {
+            commits: commits.to_vec(),
+            payload,
+            pending: Vec::new(),
+        }
+    }
+
+    fn receive(
+        &mut self,
+        graph: &mut CommitGraph<P>,
+        meta: &CommitMeta,
+        payload: P,
+    ) -> Vec<CommitMeta> {
+        let verified = fixture_item(&self.commits, meta).verify().unwrap();
+        let mut payloads: HashMap<_, _> = verified
+            .commits()
+            .filter(|m| hash(m) != hash(meta))
+            .map(|m| (hash(m), (self.payload)(hash(m))))
+            .collect();
+        payloads.insert(hash(meta), payload);
+        self.pending.push((verified, payloads));
+        self.retry(graph)
+    }
+
+    fn retry(&mut self, graph: &mut CommitGraph<P>) -> Vec<CommitMeta> {
+        let mut accepted = Vec::new();
+        loop {
+            let before = self.pending.len();
+            let mut waiting = Vec::new();
+            for (item, mut payloads) in self.pending.drain(..) {
+                match graph.ingest(item.clone(), |meta| payloads.remove(meta.hash()).unwrap()) {
+                    Ok(()) => accepted.extend(item.commits().cloned()),
+                    Err(IngestError::MissingDependency(h)) => {
+                        assert!(!graph.has_admitted_commit(&h));
+                        assert_eq!(payloads.len(), item.commits().count());
+                        waiting.push((item, payloads));
+                    }
+                    Err(error) => panic!("invalid fixture receipt: {error:?}"),
+                }
+            }
+            self.pending = waiting;
+            if self.pending.len() == before {
+                return accepted;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct Model {
     arrived: BTreeSet<CommitHash>,
     local: BTreeSet<CommitHash>,
+    verified: BTreeSet<CommitHash>,
     signatures: BTreeSet<(Author, CommitHash)>,
 }
 
 impl Model {
     fn ingest(&mut self, meta: &CommitMeta, local: bool) {
-        // Duplicate received envelopes do not promote existing local work.
+        // Only call this after admission, never merely on network arrival.
         if self.arrived.insert(hash(meta)) && local {
             self.local.insert(hash(meta));
+        }
+        if !local {
+            // Every test receipt carries its author's real signature. This
+            // evidence can also authenticate earlier same-author local edits.
+            self.verified.insert(hash(meta));
+            self.signatures.insert((*meta.author(), hash(meta)));
+        }
+    }
+
+    fn verified_members(&mut self, members: &[CommitMeta], signatures: &[SignatureEvidence]) {
+        self.arrived.extend(members.iter().map(hash));
+        self.verified.extend(members.iter().map(hash));
+        self.signatures
+            .extend(signatures.iter().map(|s| (s.author, s.commit)));
+    }
+
+    fn accepted(&mut self, commits: Vec<CommitMeta>) {
+        for meta in commits {
+            self.ingest(&meta, false);
+        }
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        Self {
+            arrived: self.arrived.union(&other.arrived).copied().collect(),
+            local: self.local.union(&other.local).copied().collect(),
+            verified: self.verified.union(&other.verified).copied().collect(),
+            signatures: self.signatures.union(&other.signatures).copied().collect(),
         }
     }
 
     fn published(&self, commits: &[CommitMeta]) -> BTreeSet<CommitHash> {
-        // Fixed point of received envelopes with all parents delivered: no use
-        // of traversal APIs, insertion indices, or the production pending queue.
+        // Fixed point of admitted receipts and local edits with all parents
+        // delivered: no traversal API, insertion index, or production queue.
         let mut delivered = BTreeSet::new();
         loop {
             let before = delivered.len();
@@ -181,33 +315,57 @@ impl Model {
             }
         }
         let known: HashMap<_, _> = commits.iter().map(|meta| (hash(meta), meta)).collect();
-        let mut authenticated = BTreeSet::new();
-        for (signer, tip) in &self.signatures {
-            if !delivered.contains(tip) {
-                continue;
-            }
-            let mut seen = BTreeSet::new();
-            let mut stack = vec![*tip];
-            while let Some(h) = stack.pop() {
-                if seen.insert(h) {
-                    let meta = known[&h];
-                    if meta.author() == signer {
-                        authenticated.insert(h);
-                    }
-                    stack.extend(meta.parents());
-                }
-            }
-        }
         let mut published = BTreeSet::new();
         loop {
             let before = published.len();
             for meta in commits {
                 let h = hash(meta);
-                if delivered.contains(&h)
-                    && (!self.local.contains(&h) || authenticated.contains(&h))
+                if !delivered.contains(&h) || published.contains(&h) {
+                    continue;
+                }
+                if self.verified.contains(&h)
                     && meta.parents().iter().all(|p| published.contains(p))
                 {
                     published.insert(h);
+                    continue;
+                }
+                if !self.local.contains(&h) || !self.signatures.contains(&(*meta.author(), h)) {
+                    continue;
+                }
+                let mut members = BTreeSet::new();
+                let mut dependencies = BTreeSet::new();
+                let mut stack = vec![h];
+                while let Some(next) = stack.pop() {
+                    if !members.insert(next) {
+                        continue;
+                    }
+                    if depth(h) == 0 {
+                        dependencies.extend(known[&next].parents());
+                    } else if next != h && depth(next) >= depth(h) {
+                        dependencies.insert(next);
+                    } else {
+                        stack.extend(known[&next].parents());
+                    }
+                }
+                if !dependencies.is_subset(&published) {
+                    continue;
+                }
+                let mut covered = dependencies;
+                for (signer, target) in &self.signatures {
+                    let mut seen = BTreeSet::new();
+                    let mut stack = vec![*target];
+                    while let Some(next) = stack.pop() {
+                        if !members.contains(&next) || !seen.insert(next) {
+                            continue;
+                        }
+                        if known[&next].author() == signer {
+                            covered.insert(next);
+                        }
+                        stack.extend(known[&next].parents());
+                    }
+                }
+                if members.is_subset(&covered) {
+                    published.extend(members);
                 }
             }
             if published.len() == before {
@@ -329,6 +487,67 @@ fn minimized_oracle(
     minimized
 }
 
+fn cover_ids<'a>(
+    loose: &'a [LooseCommit],
+    fragments: &'a [Fragment],
+) -> impl Iterator<Item = ItemId> + 'a {
+    loose
+        .iter()
+        .map(|c| ItemId::Commit(c.commit))
+        .chain(fragments.iter().map(|f| ItemId::Fragment(f.range.clone())))
+}
+
+fn assert_structural_cover(graph: &CommitGraph<CommitHash>, expected: SedimentreeSummary) {
+    let cover = graph.minimal_cover();
+    assert_eq!(cover.loose_commits, expected.loose_commits);
+    assert_eq!(cover.fragments, expected.fragments);
+}
+
+// The cached cover may lag authenticated structure after certificate pruning or
+// partial signature schedules. It must still be a complete, parent-closed old
+// structural cover, with every advertised certificate independently verifiable.
+fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: &Case) {
+    let published = model.published(&case.commits);
+    let (_, memberships) = oracle(&case.commits, &published);
+    let inventory = graph.minimal_cover();
+    let mut covered = BTreeSet::new();
+    let mut dependencies = BTreeSet::new();
+    for id in cover_ids(&inventory.loose_commits, &inventory.fragments) {
+        let expected = match &id {
+            ItemId::Commit(h) => {
+                assert_eq!(depth(*h), 0);
+                BTreeSet::from([*h])
+            }
+            ItemId::Fragment(range) => memberships[&range.head].clone(),
+        };
+        let verified = graph.export(&id).unwrap().verify().unwrap();
+        assert_eq!(verified.id(), &id);
+        let actual: Vec<_> = verified.commits().map(hash).collect();
+        assert_eq!(actual, export_order(&case.commits, &expected));
+        dependencies.extend(verified.dependencies().copied());
+        covered.extend(actual);
+    }
+    assert!(covered.is_subset(&published));
+    assert!(dependencies.is_subset(&covered));
+    for meta in case.commits.iter().filter(|m| covered.contains(m.hash())) {
+        assert!(meta.parents().iter().all(|p| covered.contains(p)));
+    }
+    let (canonical, memberships) = oracle(&case.commits, &covered);
+    assert_structural_cover(graph, minimized_oracle(&canonical, &memberships));
+    let mut destination = CommitGraph::new();
+    destination.merge(graph);
+    let mut received = BTreeSet::new();
+    destination.traverse_publishable(|meta, _| {
+        received.insert(hash(meta));
+        ControlFlow::Continue(())
+    });
+    assert_eq!(
+        received, covered,
+        "seed={:#x}, closed cover merges from empty",
+        case.seed
+    );
+}
+
 fn summaries(graph: &CommitGraph<CommitHash>) -> (SedimentreeSummary, SedimentreeSummary) {
     let view = graph.as_sedimentree();
     (view.summary(), view.minimized_summary())
@@ -358,7 +577,7 @@ fn check(graph: &CommitGraph<CommitHash>, model: &Model, case: &Case, event: &st
         }
     }
     // Use oracle ranges, not ranges obtained from the implementation. Every
-    // signature/arrival/clone/merge check also verifies every public export.
+    // signature/arrival/clone/merge check also verifies every borrowed fragment read.
     for fragment in &expected.fragments {
         let mut actual = Vec::new();
         graph
@@ -490,21 +709,23 @@ fn every_arrival_matches_the_walk_in_causal_reverse_and_shuffled_orders() {
                 _ => order.shuffle(&mut rng),
             }
             let mut graph = CommitGraph::new();
+            let mut receiver = Receiver::new(&case.commits, |h| h);
             let mut model = Model::default();
             check(&graph, &model, case, "empty");
             for (step, node) in order.into_iter().enumerate() {
                 let meta = &case.commits[node];
-                support::receive_commit(&mut graph, meta.clone(), hash(meta));
-                model.ingest(meta, false);
+                model.accepted(receiver.receive(&mut graph, meta, hash(meta)));
                 let event = format!("schedule={schedule}, step={step}, node={node}");
                 check(&graph, &model, case, &event);
-                // Both queued and delivered duplicates are exercised, including
-                // parent arrivals that release multiple queued descendants.
+                // Both externally buffered and admitted duplicates are exercised,
+                // including parents that release multiple waiting descendants.
                 let snapshot = summaries(&graph);
-                support::receive_commit(&mut graph, meta.clone(), hash(meta));
+                model.accepted(receiver.receive(&mut graph, meta, hash(meta)));
                 check(&graph, &model, case, &format!("{event}, duplicate"));
                 assert_eq!(summaries(&graph), snapshot, "{event}");
             }
+            assert!(receiver.pending.is_empty());
+            check_direct_inventory(&graph, &model, case);
             let all = case.commits.iter().map(hash).collect();
             assert_eq!(model.published(&case.commits), all, "seed={:#x}", case.seed);
         }
@@ -517,6 +738,10 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
         let mut rng = StdRng::seed_from_u64(case.seed ^ 0xc10e_0e42);
         for round in 0..3 {
             let mut graphs = [CommitGraph::new(), CommitGraph::new()];
+            let mut receivers = [
+                Receiver::new(&case.commits, |h| h),
+                Receiver::new(&case.commits, |h| h),
+            ];
             let mut models = [Model::default(), Model::default()];
             let mut order: Vec<_> = (0..case.commits.len()).collect();
             order.shuffle(&mut rng);
@@ -525,12 +750,11 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                 let mask = rng.random_range(1..=3);
                 for replica in 0..2 {
                     if mask & (1 << replica) != 0 {
-                        support::receive_commit(
+                        models[replica].accepted(receivers[replica].receive(
                             &mut graphs[replica],
-                            case.commits[node].clone(),
+                            &case.commits[node],
                             hash(&case.commits[node]),
-                        );
-                        models[replica].ingest(&case.commits[node], false);
+                        ));
                         check(
                             &graphs[replica],
                             &models[replica],
@@ -539,6 +763,9 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                         );
                     }
                 }
+            }
+            for replica in 0..2 {
+                check_direct_inventory(&graphs[replica], &models[replica], case);
             }
             let snapshots = graphs.each_ref().map(summaries);
             let mut left = graphs[0].clone();
@@ -555,20 +782,37 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                 case,
                 &format!("round={round}, clone right"),
             );
-            // All inputs here are received, so merge exchanges even detached
-            // queued envelopes. Model their union, not the graph's delivery API.
-            let union = Model {
-                arrived: models[0]
-                    .arrived
-                    .union(&models[1].arrived)
-                    .copied()
-                    .collect(),
-                ..Model::default()
-            };
+            // Every admitted member here is directly signed, so the inventory
+            // transports all publishable history, but not external network queues.
+            // Each admitted set is parent-closed.
+            let mut union = models[0].union(&models[1]);
             left.merge(&graphs[1]);
             right.merge(&graphs[0]);
             check(&left, &union, case, &format!("round={round}, left merge"));
             check(&right, &union, case, &format!("round={round}, right merge"));
+            // Explicitly exchange the application-owned receiver buffers, then
+            // retry against the merged verified prerequisites in each clone.
+            let mut exchanged = receivers[0].clone();
+            exchanged.pending.extend(receivers[1].pending.clone());
+            let mut other_queue = exchanged.clone();
+            let mut right_model = union.clone();
+            union.accepted(exchanged.retry(&mut left));
+            right_model.accepted(other_queue.retry(&mut right));
+            assert!(exchanged.pending.is_empty());
+            assert!(other_queue.pending.is_empty());
+            assert_eq!(union.published(&case.commits).len(), case.commits.len());
+            check(
+                &left,
+                &union,
+                case,
+                &format!("round={round}, left buffer exchange"),
+            );
+            check(
+                &right,
+                &right_model,
+                case,
+                &format!("round={round}, right buffer exchange"),
+            );
             left.merge(&right);
             right.merge(&left);
             check(
@@ -608,8 +852,17 @@ fn add_signature(
     meta: &CommitMeta,
 ) {
     let key = key(signer);
-    sign(graph, &key, hash(meta));
-    model.signatures.insert((author(&key), hash(meta)));
+    let result = graph.ingest_signature(
+        author(&key),
+        hash(meta),
+        support::signature(&key, hash(meta)),
+    );
+    if result == Err(stockfoil::SignatureError::NotPendingLocalCommit(hash(meta))) {
+        assert!(!model.local.contains(meta.hash()) || graph.has_admitted_commit(meta.hash()));
+    } else {
+        result.unwrap();
+        model.signatures.insert((author(&key), hash(meta)));
+    }
 }
 
 #[test]
@@ -617,19 +870,21 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
     for case in cases() {
         let mut rng = StdRng::seed_from_u64(case.seed ^ 0x519a_7e42);
         let mut graph = CommitGraph::new();
+        let mut receiver = Receiver::new(&case.commits, |h| h);
         let mut model = Model::default();
         // Explicit witness: 7 is a published depth-0 tail. The delivered but
         // unsigned depth-2 fragment at 8 must NOT remove it from loose commits;
-        // received descendants 9 and 10 must also remain unpublished.
+        // received descendants 9 and 10 verify immediately but wait outside the
+        // graph: admission requires their unsigned prerequisite to authenticate.
         for node in 0..=10 {
             let local = node == 8;
             let meta = &case.commits[node];
             if local {
                 graph.ingest_local_commit(meta.clone(), hash(meta));
+                model.ingest(meta, true);
             } else {
-                support::receive_commit(&mut graph, meta.clone(), hash(meta));
+                model.accepted(receiver.receive(&mut graph, meta, hash(meta)));
             }
-            model.ingest(meta, local);
             check(
                 &graph,
                 &model,
@@ -651,8 +906,8 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
         add_signature(&mut graph, &mut model, 2, &case.commits[10]);
         check(&graph, &model, case, "wrong author signature");
         assert_eq!(summaries(&graph), withheld, "seed={:#x}", case.seed);
-        // A signature targeting a not-yet-delivered descendant cannot cover
-        // anything yet, but must become usable when its causal queue drains.
+        assert_eq!(receiver.pending.len(), 2);
+        // An unknown target is rejected, not buffered as future evidence.
         add_signature(&mut graph, &mut model, 1, &case.commits[13]);
         check(&graph, &model, case, "signature before target arrival");
         assert_eq!(summaries(&graph), withheld, "seed={:#x}", case.seed);
@@ -664,31 +919,39 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             let meta = &case.commits[node];
             if local {
                 graph.ingest_local_commit(meta.clone(), hash(meta));
+                model.ingest(meta, true);
+                model.accepted(receiver.retry(&mut graph));
             } else {
-                support::receive_commit(&mut graph, meta.clone(), hash(meta));
+                model.accepted(receiver.receive(&mut graph, meta, hash(meta)));
             }
-            model.ingest(meta, local);
             let event = format!("publication step={step}, node={node}, local={local}");
             check(&graph, &model, case, &event);
-            support::receive_commit(&mut graph, meta.clone(), hash(meta));
+            check_direct_inventory(&graph, &model, case);
+            model.accepted(receiver.receive(&mut graph, meta, hash(meta)));
             check(
                 &graph,
                 &model,
                 case,
                 &format!("{event}, received duplicate"),
             );
-            graph.ingest_local_commit(meta.clone(), hash(meta));
-            check(&graph, &model, case, &format!("{event}, local duplicate"));
+            if local {
+                // Only genuinely local work is eligible for this API. A
+                // buffered receipt must never be impersonated as a local edit.
+                graph.ingest_local_commit(meta.clone(), hash(meta));
+                check(&graph, &model, case, &format!("{event}, local duplicate"));
+            }
             if rng.random_bool(0.5) {
                 let target = rng.random_range(0..case.commits.len());
                 let signer = if rng.random_bool(0.75) { 1 } else { 2 };
                 add_signature(&mut graph, &mut model, signer, &case.commits[target]);
+                model.accepted(receiver.retry(&mut graph));
                 check(
                     &graph,
                     &model,
                     case,
                     &format!("{event}, signature signer={signer}, target={target}"),
                 );
+                check_direct_inventory(&graph, &model, case);
             }
         }
         let frozen = graph.clone();
@@ -697,6 +960,7 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
         signing_order.shuffle(&mut rng);
         for node in signing_order {
             add_signature(&mut graph, &mut model, 1, &case.commits[node]);
+            model.accepted(receiver.retry(&mut graph));
             check(&graph, &model, case, &format!("final signing node={node}"));
             check(
                 &frozen,
@@ -711,6 +975,7 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             "seed={:#x}, signatures must eventually publish all history",
             case.seed
         );
+        assert!(receiver.pending.is_empty());
         let mut received = CommitGraph::new();
         received.merge(&graph);
         check(
@@ -720,6 +985,426 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             "fully published history exported by merge",
         );
     }
+}
+
+#[test]
+fn signed_received_duplicate_authenticates_local_head_but_child_waits_outside_graph() {
+    let case = &cases()[0];
+    let mut graph = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits[..8] {
+        support::receive_commit(&mut graph, meta.clone(), hash(meta));
+        model.ingest(meta, false);
+    }
+    let head = &case.commits[8];
+    graph.ingest_local_commit(head.clone(), hash(head));
+    model.ingest(head, true);
+    let mut receiver = Receiver::new(&case.commits, |h| h);
+    let child = &case.commits[9];
+    assert!(receiver.receive(&mut graph, child, hash(child)).is_empty());
+    check(
+        &graph,
+        &model,
+        case,
+        "signed child blocked by unsigned local parent",
+    );
+    let verified = envelope(child).verify().unwrap();
+    assert_eq!(
+        verified.dependencies().copied().collect::<Vec<_>>(),
+        [hash(head)]
+    );
+    assert!(!graph.has_admitted_commit(head.hash()));
+    assert_eq!(
+        graph.ingest(verified, |_| panic!("blocked item requests no payload")),
+        Err(IngestError::MissingDependency(hash(head)))
+    );
+    for meta in [head, child] {
+        let id = ItemId::Commit(hash(meta));
+        assert_eq!(
+            graph.export(&id).unwrap_err(),
+            ExportError::NotInMinimalCover(id)
+        );
+    }
+    // A valid received duplicate is real evidence, unlike a bare envelope or
+    // a signature by somebody other than the author. It can publish local work.
+    support::receive_commit(&mut graph, head.clone(), hash(head));
+    model.ingest(head, false);
+    model.accepted(receiver.retry(&mut graph));
+    assert!(receiver.pending.is_empty());
+    check(
+        &graph,
+        &model,
+        case,
+        "verified duplicate unlocks buffered child",
+    );
+}
+
+#[test]
+fn verified_fragment_authenticates_local_members_without_waiting_for_internal_parents() {
+    let case = &cases()[0];
+    let range = case_range(case, 8);
+    assert!(range.boundary.is_empty());
+    let members = &case.commits[..=8];
+    let signatures = vec![evidence(&case.commits[8])];
+    for local_first in [false, true] {
+        let mut graph = CommitGraph::new();
+        let mut model = Model::default();
+        if local_first {
+            // These are genuine edits by our fixture author, not received data.
+            for meta in members.iter().rev() {
+                graph.ingest_local_commit(meta.clone(), hash(meta));
+                model.ingest(meta, true);
+            }
+            check(&graph, &model, case, "unsigned local fragment");
+        }
+        // Unlike individual child envelopes, the fragment authenticates its
+        // internal ancestors as members. Only its boundaries are prerequisites.
+        let item = UnverifiedItem::Fragment {
+            range: range.clone(),
+            commits: members.iter().rev().cloned().collect(),
+            signatures: signatures.clone(),
+        }
+        .verify()
+        .unwrap();
+        let mut callbacks = 0;
+        graph
+            .ingest(item, |meta| {
+                callbacks += 1;
+                hash(meta)
+            })
+            .unwrap();
+        assert_eq!(callbacks, if local_first { 0 } else { members.len() });
+        model.verified_members(members, &signatures);
+        check(
+            &graph,
+            &model,
+            case,
+            "fragment receipt authenticates same-author local ancestry",
+        );
+        // Authentication by the fragment head does not make its unsigned
+        // ancestors independently transportable. Relay the whole available item.
+        for meta in &members[..8] {
+            assert_eq!(
+                graph.export(&ItemId::Commit(hash(meta))).unwrap_err(),
+                ExportError::NotInMinimalCover(ItemId::Commit(hash(meta))),
+            );
+        }
+        let head_id = ItemId::Commit(range.head);
+        assert_eq!(
+            graph.export(&head_id).unwrap_err(),
+            ExportError::NotInMinimalCover(head_id)
+        );
+        graph
+            .export(&ItemId::Fragment(range.clone()))
+            .unwrap()
+            .verify()
+            .unwrap();
+        assert_eq!(graph.minimal_cover().fragments.len(), 1);
+        assert_eq!(graph.minimal_cover().fragments[0].range, range);
+        assert!(graph.minimal_cover().loose_commits.is_empty());
+        let mut destination = CommitGraph::new();
+        destination.merge(&graph);
+        check(
+            &destination,
+            &model,
+            case,
+            "whole received fragment relayed",
+        );
+    }
+}
+
+#[test]
+fn signed_canonical_fragment_relays_whole_but_unsigned_subfragment_is_not_advertised() {
+    let case = &cases()[0];
+    let range = case_range(case, 8);
+    let smaller = case_range(case, 6);
+    let mut source = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits[..=8] {
+        source.ingest_local_commit(meta.clone(), hash(meta));
+        model.ingest(meta, true);
+    }
+    add_signature(&mut source, &mut model, 1, &case.commits[8]);
+    check(&source, &model, case, "signed larger canonical fragment");
+    // Structural summaries still describe authenticated subfragments, even
+    // though their only signature target lies outside their own membership.
+    assert!(
+        source
+            .as_sedimentree()
+            .summary()
+            .fragments
+            .iter()
+            .any(|f| f.range == smaller)
+    );
+    // Valid independently signed envelopes do not grant arbitrary export rights.
+    fixture_item(&case.commits, &case.commits[6])
+        .verify()
+        .unwrap();
+    envelope(&case.commits[3]).verify().unwrap();
+    for id in [
+        ItemId::Fragment(smaller.clone()),
+        ItemId::Commit(smaller.head),
+        ItemId::Commit(hash(&case.commits[3])),
+    ] {
+        assert_eq!(
+            source.export(&id).unwrap_err(),
+            ExportError::NotInMinimalCover(id)
+        );
+    }
+    let inventory = source.minimal_cover();
+    assert_eq!(inventory.fragments.len(), 1);
+    assert_eq!(inventory.fragments[0].range, range);
+    assert!(inventory.loose_commits.is_empty());
+    assert!(!inventory.fragments.iter().any(|f| f.range == smaller));
+
+    let id = ItemId::Fragment(range.clone());
+    let mut destination = CommitGraph::new();
+    let verified = source.export(&id).unwrap().verify().unwrap();
+    let mut supplied = Vec::new();
+    destination
+        .ingest(verified, |meta| {
+            supplied.push(hash(meta));
+            hash(meta)
+        })
+        .unwrap();
+    let members: BTreeSet<_> = case.commits[..=8].iter().map(hash).collect();
+    assert_eq!(supplied, export_order(&case.commits, &members));
+    check(
+        &destination,
+        &model,
+        case,
+        "self-contained fragment transport",
+    );
+    assert_eq!(destination.minimal_cover(), inventory);
+    let stale = ItemId::Fragment(smaller);
+    assert_eq!(
+        destination.export(&stale).unwrap_err(),
+        ExportError::NotInMinimalCover(stale)
+    );
+    // The retained internal signature supports another whole-fragment relay.
+    let mut third = CommitGraph::new();
+    third.merge(&destination);
+    check(
+        &third,
+        &model,
+        case,
+        "re-export retained internal signature",
+    );
+    assert_eq!(third.minimal_cover(), inventory);
+}
+
+#[test]
+fn pending_local_items_do_not_enter_the_index_until_their_certificates_exist() {
+    let case = &cases()[0];
+    let mut source = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits[..8] {
+        support::receive_commit(&mut source, meta.clone(), hash(meta));
+        model.ingest(meta, false);
+    }
+    let old_model = model.clone();
+    let old = source.minimal_cover();
+    assert!(!old.fragments.is_empty());
+    for meta in &case.commits[8..=9] {
+        source.ingest_local_commit(meta.clone(), hash(meta));
+        model.ingest(meta, true);
+    }
+    // Signing a shallow descendant does not admit its pending prerequisite.
+    add_signature(&mut source, &mut model, 1, &case.commits[9]);
+    check(
+        &source,
+        &model,
+        case,
+        "pending checkpoint lacks its certificate",
+    );
+    assert_eq!(model.published(&case.commits).len(), 8);
+    assert_eq!(source.minimal_cover(), old);
+    check_direct_inventory(&source, &model, case);
+    for id in [
+        ItemId::Fragment(case_range(case, 8)),
+        ItemId::Commit(hash(&case.commits[9])),
+    ] {
+        assert_eq!(
+            source.export(&id).unwrap_err(),
+            ExportError::NotInMinimalCover(id)
+        );
+    }
+    // Historical signature ingestion is rejected without affecting the cover.
+    add_signature(&mut source, &mut model, 1, &case.commits[6]);
+    assert_eq!(source.minimal_cover(), old);
+    let mut destination = CommitGraph::new();
+    destination.merge(&source);
+    check(
+        &destination,
+        &old_model,
+        case,
+        "old closed cover still merges",
+    );
+
+    add_signature(&mut source, &mut model, 1, &case.commits[8]);
+    assert_structural_cover(&source, summaries(&source).1);
+    assert_ne!(source.minimal_cover(), old);
+    check_direct_inventory(&source, &model, case);
+    // Snapshots do not pin their superseded certificates, even though the old
+    // ranges and commits remain valid and readable in the structural graph.
+    for id in cover_ids(&old.loose_commits, &old.fragments) {
+        assert_eq!(
+            source.export(&id).unwrap_err(),
+            ExportError::NotInMinimalCover(id)
+        );
+    }
+    destination.merge(&source);
+    check(
+        &destination,
+        &model,
+        case,
+        "checkpoint admission unlocks its signed child",
+    );
+}
+
+#[test]
+fn pending_local_fragment_does_not_block_an_independent_certified_fragment() {
+    let seed = 0xb0_0d;
+    let alice = author(&key(1));
+    let bob = author(&key(2));
+    let root = mine_as(vec![], 0, seed, 0, alice);
+    let boundary = mine_as(vec![hash(&root)], 1, seed, 1, bob);
+    let descendant = mine_as(vec![hash(&boundary)], 0, seed, 2, alice);
+    let head = mine_as(vec![hash(&boundary)], 1, seed, 3, bob);
+    let sibling = mine_as(vec![hash(&root)], 1, seed, 4, alice);
+    let case = Case {
+        seed,
+        commits: vec![root, boundary, descendant, head, sibling],
+    };
+    let [_root, boundary, descendant, head, sibling] = case.commits.as_slice() else {
+        unreachable!()
+    };
+    let mut source = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits {
+        source.ingest_local_commit(meta.clone(), hash(meta));
+        model.ingest(meta, true);
+    }
+    for (signer, meta) in [(2, boundary), (1, descendant), (2, head), (1, sibling)] {
+        add_signature(&mut source, &mut model, signer, meta);
+        check(&source, &model, &case, "partial mixed-author signatures");
+        assert!(source.minimal_cover().loose_commits.is_empty());
+        assert_eq!(
+            source.minimal_cover().fragments.len(),
+            usize::from(hash(meta) == hash(sibling))
+        );
+        check_direct_inventory(&source, &model, &case);
+    }
+    assert_eq!(model.published(&case.commits).len(), 2);
+    // The independent sibling publishes immediately. B and its descendants
+    // remain pending, and cannot borrow Alice's certificate from another range.
+    for id in [
+        ItemId::Commit(hash(boundary)),
+        ItemId::Fragment(case_range(&case, 1)),
+        ItemId::Fragment(case_range(&case, 3)),
+    ] {
+        assert_eq!(
+            source.export(&id).unwrap_err(),
+            ExportError::NotInMinimalCover(id)
+        );
+    }
+    let mut destination = CommitGraph::new();
+    destination.merge(&source);
+    check(
+        &destination,
+        &model,
+        &case,
+        "independent certified history transfers",
+    );
+    add_signature(&mut source, &mut model, 1, boundary);
+    assert_structural_cover(&source, summaries(&source).1);
+    check_direct_inventory(&source, &model, &case);
+    let item = source
+        .export(&ItemId::Fragment(case_range(&case, 3)))
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert_eq!(
+        item.dependencies().copied().collect::<Vec<_>>(),
+        [hash(boundary)]
+    );
+    assert_eq!(
+        destination.ingest(item, |_| panic!("dependency admission precedes payloads")),
+        Err(IngestError::MissingDependency(hash(boundary)))
+    );
+    destination.merge(&source);
+    check(
+        &destination,
+        &model,
+        &case,
+        "complete mixed-author cover merges",
+    );
+    let mut relay = CommitGraph::new();
+    relay.merge(&destination);
+    check(&relay, &model, &case, "complete mixed-author cover relays");
+}
+
+#[test]
+fn late_other_author_fork_requires_fresh_evidence_after_certificate_replacement() {
+    let seed = 0xce47;
+    let root = mine_as(vec![], 0, seed, 0, author(&key(1)));
+    let head = mine_as(vec![hash(&root)], 1, seed, 1, author(&key(1)));
+    let fork = mine_as(vec![hash(&root)], 1, seed, 2, author(&key(2)));
+    let case = Case {
+        seed,
+        commits: vec![root, head, fork],
+    };
+    let [root, head, fork] = case.commits.as_slice() else {
+        unreachable!()
+    };
+    let mut source = CommitGraph::new();
+    let mut model = Model::default();
+    support::receive_commit(&mut source, root.clone(), hash(root));
+    model.ingest(root, false);
+    let stale = ItemId::Commit(hash(root));
+    source.export(&stale).unwrap().verify().unwrap();
+    support::receive_commit(&mut source, head.clone(), hash(head));
+    model.ingest(head, false);
+    let old = source.minimal_cover();
+    assert_eq!(old.fragments.len(), 1);
+    assert!(old.loose_commits.is_empty());
+    assert_eq!(
+        source.export(&stale).unwrap_err(),
+        ExportError::NotInMinimalCover(stale.clone())
+    );
+    assert!(source.has_admitted_commit(root.hash()));
+
+    // The old loose certificate is no longer available to a new local fork.
+    model.signatures.remove(&(*root.author(), hash(root)));
+    // Bob's signature alone cannot admit an Alice-authored interior ancestor.
+    source.ingest_local_commit(fork.clone(), hash(fork));
+    model.ingest(fork, true);
+    add_signature(&mut source, &mut model, 2, fork);
+    check(
+        &source,
+        &model,
+        &case,
+        "late fork with pruned ancestor certificate",
+    );
+    assert_eq!(model.published(&case.commits).len(), 2);
+    assert_eq!(source.minimal_cover(), old);
+    let fork_id = ItemId::Fragment(case_range(&case, 2));
+    assert_eq!(
+        source.export(&fork_id).unwrap_err(),
+        ExportError::NotInMinimalCover(fork_id)
+    );
+    check_direct_inventory(&source, &model, &case);
+
+    // Alice co-signs the pending local head, not the historical root.
+    add_signature(&mut source, &mut model, 1, fork);
+    assert_structural_cover(&source, summaries(&source).1);
+    assert_eq!(source.minimal_cover().fragments.len(), 2);
+    // The old covered commit still cannot be exported on its own.
+    assert_eq!(
+        source.export(&stale).unwrap_err(),
+        ExportError::NotInMinimalCover(stale)
+    );
+    check_direct_inventory(&source, &model, &case);
 }
 
 fn case_range(case: &Case, node: usize) -> FragmentRange {
@@ -738,6 +1423,12 @@ fn assert_read_error<P: Clone>(
     range: &FragmentRange,
     expected: FragmentReadError,
 ) {
+    let id = ItemId::Fragment(range.clone());
+    assert_eq!(
+        graph.export(&id).unwrap_err(),
+        ExportError::NotInMinimalCover(id),
+        "transport exposes only current cached entries, not borrowed-read errors"
+    );
     // Returning Break must not let an invalid range evade preflight validation.
     for stop in [false, true] {
         let mut callbacks = 0;
@@ -763,12 +1454,19 @@ fn fragment_reads_validate_heads_and_exact_max_level_boundaries_before_callbacks
     assert!(graph.publishable_commit(&head).is_none());
     assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
 
-    support::receive_commit(&mut graph, case.commits[6].clone(), head);
+    let mut receiver = Receiver::new(&case.commits, |h| h);
+    assert!(
+        receiver
+            .receive(&mut graph, &case.commits[6], head)
+            .is_empty()
+    );
+    assert_eq!(receiver.pending.len(), 1);
     assert!(graph.publishable_commit(&head).is_none());
     assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
     for meta in &case.commits {
-        support::receive_commit(&mut graph, meta.clone(), hash(meta));
+        receiver.receive(&mut graph, meta, hash(meta));
     }
+    assert!(receiver.pending.is_empty());
     let shallow = hash(&case.commits[0]);
     assert_read_error(
         &graph,
@@ -879,16 +1577,16 @@ fn boundary_bypass_edges_order_parents_before_lower_hash_boundaries_and_break_is
 }
 
 #[test]
-fn local_fragment_reads_wait_for_signatures_before_or_after_arrival() {
+fn local_fragment_reads_wait_for_signatures_before_or_after_causal_delivery() {
     let case = &cases()[0];
     let range = case_range(case, 8);
     for signature_first in [false, true] {
         let mut graph = CommitGraph::new();
+        graph.ingest_local_commit(case.commits[8].clone(), range.head);
         if signature_first {
             sign(&mut graph, &key(1), range.head);
         }
         // Even a correctly signed queued head cannot be read.
-        graph.ingest_local_commit(case.commits[8].clone(), range.head);
         assert!(graph.publishable_commit(&range.head).is_none());
         assert_read_error(&graph, &range, FragmentReadError::MissingCommit(range.head));
         for meta in &case.commits[..8] {
@@ -901,8 +1599,7 @@ fn local_fragment_reads_wait_for_signatures_before_or_after_arrival() {
                 &range,
                 FragmentReadError::NotPublishable(range.head),
             );
-            // A received duplicate cannot launder local provenance.
-            support::receive_commit(&mut graph, case.commits[8].clone(), range.head);
+            // Another author's valid signature does not authenticate this head.
             sign(&mut graph, &key(2), range.head);
             assert_read_error(
                 &graph,
@@ -943,12 +1640,17 @@ fn signed_descendant_stays_withheld_behind_another_authors_local_ancestor() {
         }
         graph.ingest_local_commit(ancestor.clone(), hash(ancestor));
         if signature_first {
-            sign(&mut graph, &key(2), range.head);
+            assert_eq!(
+                graph.ingest_signature(
+                    author(&key(2)),
+                    range.head,
+                    support::signature(&key(2), range.head)
+                ),
+                Err(stockfoil::SignatureError::NotPendingLocalCommit(range.head))
+            );
         }
         graph.ingest_local_commit(descendant.clone(), hash(&descendant));
-        if !signature_first {
-            sign(&mut graph, &key(2), range.head);
-        }
+        sign(&mut graph, &key(2), range.head);
         assert!(graph.publishable_commit(ancestor.hash()).is_none());
         assert!(graph.publishable_commit(&range.head).is_none());
         assert_read_error(
@@ -995,9 +1697,11 @@ fn repeated_parent_edges_export_each_member_once() {
         if reverse {
             order.reverse();
         }
+        let mut receiver = Receiver::new(&commits, |h| h);
         for meta in order {
-            support::receive_commit(&mut graph, meta.clone(), hash(meta));
+            receiver.receive(&mut graph, meta, hash(meta));
         }
+        assert!(receiver.pending.is_empty());
         let mut seen = Vec::new();
         graph
             .traverse_fragment(range, |meta, payload| {
@@ -1020,10 +1724,12 @@ fn fragment_and_covered_commit_reads_borrow_without_cloning_payloads() {
     }
     let case = &cases()[0];
     let mut graph = CommitGraph::new();
-    // Reverse order exercises queue drainage with these payloads as well.
+    // Reverse transport order exercises external buffering without payload clones.
+    let mut receiver = Receiver::new(&case.commits, NoClone);
     for meta in case.commits[..7].iter().rev() {
-        support::receive_commit(&mut graph, meta.clone(), NoClone(hash(meta)));
+        receiver.receive(&mut graph, meta, NoClone(hash(meta)));
     }
+    assert!(receiver.pending.is_empty());
     let read = |graph: &CommitGraph<NoClone>| {
         let range = case_range(case, 6);
         let all = case.commits.iter().map(hash).collect();

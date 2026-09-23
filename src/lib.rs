@@ -6,14 +6,11 @@ mod author;
 pub use author::Author;
 mod errors;
 pub use errors::{
-    DiffError, FragmentReadError, IngestError, QueryError, ResolveError, SignatureError,
-    VerificationError,
+    DiffError, ExportError, FragmentReadError, IngestError, QueryError, ResolveError,
+    SignatureError, VerificationError,
 };
 mod ingest;
-pub use ingest::{
-    DependencyId, SignatureEvidence, UnverifiedItem, VerifiedDependencies, VerifiedDependency,
-    VerifiedItem,
-};
+pub use ingest::{ItemId, SignatureEvidence, UnverifiedItem, VerifiedItem};
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;
@@ -29,7 +26,8 @@ mod signature;
 pub use signature::Signature;
 mod sedimentree;
 pub use sedimentree::{
-    Checkpoint, Fragment, FragmentRange, LooseCommit, SedimentreeSummary, SedimentreeView,
+    Checkpoint, Fragment, FragmentRange, LooseCommit, MinimalCover, SedimentreeSummary,
+    SedimentreeView,
 };
 mod write_permission;
 pub use write_permission::WritePermission;

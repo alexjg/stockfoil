@@ -1,17 +1,23 @@
 use std::{error::Error, fmt};
 
-use crate::{Author, CommitHash, DependencyId};
+use crate::{Author, CommitHash, ItemId};
 
 /// Signature verification failed. Rejected signatures do not change the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureError {
+    /// Separate signatures are accepted only for known, unadmitted local work.
+    NotPendingLocalCommit(CommitHash),
     InvalidPublicKey(Author),
-    InvalidSignature { author: Author, commit: CommitHash },
+    InvalidSignature {
+        author: Author,
+        commit: CommitHash,
+    },
 }
 
 impl fmt::Display for SignatureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotPendingLocalCommit(hash) => write!(f, "not a pending local commit: {hash:?}"),
             Self::InvalidPublicKey(author) => write!(f, "invalid Ed25519 public key: {author:?}"),
             Self::InvalidSignature { author, commit } => {
                 write!(f, "invalid signature by {author:?} for {commit:?}")
@@ -121,8 +127,6 @@ impl Error for FragmentReadError {}
 /// An untrusted sedimentree item could not be verified in isolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationError {
-    /// Retry verification after obtaining this already-verified prerequisite.
-    MissingDependency(DependencyId),
     /// The reconstructed metadata does not match the declared item identity or
     /// canonical structure. The serialization-specific details are still deferred.
     InvalidItem,
@@ -136,7 +140,6 @@ pub enum VerificationError {
 impl fmt::Display for VerificationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingDependency(id) => write!(f, "missing verified dependency: {id:?}"),
             Self::InvalidItem => write!(f, "invalid sedimentree item identity or structure"),
             Self::InvalidSignature(error) => write!(f, "invalid item signature: {error}"),
             Self::MissingSignature { author, commit } => {
@@ -158,16 +161,16 @@ impl Error for VerificationError {
 /// A verified item's dependencies or contents do not fit the destination graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestError {
-    /// The item was verified elsewhere, but its dependency is not verified here.
-    MissingDependency(DependencyId),
+    /// The dependency is not authenticated and causally admitted here.
+    MissingDependency(CommitHash),
     ConflictingCommit(CommitHash),
 }
 
 impl fmt::Display for IngestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingDependency(id) => {
-                write!(f, "missing verified destination dependency: {id:?}")
+            Self::MissingDependency(hash) => {
+                write!(f, "missing admitted destination dependency: {hash:?}")
             }
             Self::ConflictingCommit(hash) => write!(f, "conflicting commit metadata: {hash:?}"),
         }
@@ -175,3 +178,19 @@ impl fmt::Display for IngestError {
 }
 
 impl Error for IngestError {}
+
+/// The requested item is not in the current published minimal cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportError {
+    NotInMinimalCover(ItemId),
+}
+
+impl fmt::Display for ExportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInMinimalCover(id) => write!(f, "item is not in the minimal cover: {id:?}"),
+        }
+    }
+}
+
+impl Error for ExportError {}

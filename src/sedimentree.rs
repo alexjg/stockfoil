@@ -1,7 +1,6 @@
-//! A structural sedimentree summary of publishable history.
+//! Certified transport inventories and local structural sedimentree inspection.
 //!
-//! This is not an inventory of encoded blobs or a proof of fragment-local author
-//! coverage. Encoding, blob metadata, sealing, and reconciliation are out of scope.
+//! Encoding, blob metadata, sealing, and reconciliation are out of scope.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -41,11 +40,21 @@ pub struct Fragment {
 /// fragment, and are the same in both representations.
 ///
 /// Independent of write permissions and viewpoints. Uses the graph's existing
-/// publication rules, not the stronger proof requirements that independently
-/// verifiable blobs will eventually need. Entries are sorted by full commit hash
+/// publication rules, not item-local signature availability. Use
+/// [`crate::CommitGraph::minimal_cover`] for the maintained transport inventory.
+/// Entries are sorted by full commit hash
 /// / fragment range; checkpoint identifiers are truncated only in metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SedimentreeSummary {
+    pub loose_commits: Vec<LooseCommit>,
+    pub fragments: Vec<Fragment>,
+}
+
+/// An owned inventory of the current certified structural minimal cover.
+/// Every entry is exportable while it remains in the graph's current cover.
+/// This snapshot does not retain replaced entries or their certificates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MinimalCover {
     pub loose_commits: Vec<LooseCommit>,
     pub fragments: Vec<Fragment>,
 }
@@ -69,8 +78,13 @@ impl SedimentreeView<'_> {
     /// to identify covered commits. Boundaries are read from the maintained
     /// index. No payload access, encoding, or IO is performed.
     pub fn summary(&self) -> SedimentreeSummary {
-        self.fragments
-            .summary(self.nodes, self.by_hash, &self.publishable, false)
+        self.fragments.summary(
+            self.nodes,
+            self.by_hash,
+            &self.publishable,
+            &self.publishable,
+            false,
+        )
     }
 
     /// Return the minimal cover under structural containment: recursively,
@@ -81,7 +95,12 @@ impl SedimentreeView<'_> {
     /// This is not minimum set cover or exhaustive commit-set containment
     /// reduction. Uses the same metadata-only traversals as [`Self::summary`].
     pub fn minimized_summary(&self) -> SedimentreeSummary {
-        self.fragments
-            .summary(self.nodes, self.by_hash, &self.publishable, true)
+        self.fragments.summary(
+            self.nodes,
+            self.by_hash,
+            &self.publishable,
+            &self.publishable,
+            true,
+        )
     }
 }

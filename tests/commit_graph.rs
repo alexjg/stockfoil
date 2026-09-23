@@ -1,30 +1,38 @@
-//! Compile-only receipt migration: reverse-order and missing-parent cases retain
-//! legacy queue assertions pending verified dependency/transport adaptation.
+//! Graph topology tests built from local signed commit fixtures.
+//!
+//! Arbitrary and reverse insertion orders exercise the local causal queue, not
+//! verified receipt: remote admission requires already-authenticated parents.
+//! Delivered fixtures are fully signed and can be exchanged by graph merges.
 mod support;
 
 use std::ops::ControlFlow;
 
-use ed25519_dalek::SigningKey;
-use stockfoil::{Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta};
+use stockfoil::{BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta};
+use support::{key, sign};
 
 fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
     CommitMeta::new(CommitContents {
         parents: parents.to_vec(),
-        author: Author::try_from(
-            SigningKey::from_bytes(&[1; 32])
-                .verifying_key()
-                .as_bytes()
-                .as_slice(),
-        )
-        .unwrap(),
+        author: support::author(&key(1)),
         payload: BlobHash::of_contents(&[value]),
     })
 }
 
+/// Sign known local work, including when parents are still missing.
+/// These topology fixtures deliberately use the retained local causal queue.
+fn ingest_local_signed(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) {
+    let hash = *meta.hash();
+    graph.ingest_local_commit(meta, value);
+    if !graph.has_admitted_commit(&hash) {
+        sign(graph, &key(1), hash);
+    }
+}
+
+/// Insert a local signed graph topology fixture, not a received verified item.
 fn insert(graph: &mut CommitGraph<u8>, value: u8, parents: &[CommitHash]) -> CommitHash {
     let meta = meta(value, parents);
     let hash = *meta.hash();
-    support::receive_commit(graph, meta, value);
+    ingest_local_signed(graph, meta, value);
     hash
 }
 
@@ -85,7 +93,7 @@ fn heads_follow_chains_forks_merges_and_disconnected_roots() {
 }
 
 #[test]
-fn heads_change_only_when_queued_commits_become_ready() {
+fn heads_change_only_when_local_queued_commits_become_ready() {
     let mut graph = CommitGraph::new();
     let first = *meta(1, &[]).hash();
     let second = *meta(2, &[]).hash();
@@ -100,8 +108,8 @@ fn heads_change_only_when_queued_commits_become_ready() {
     let unrelated = insert(&mut graph, 5, &[]);
     assert_heads(&graph, &[first, unrelated]);
 
-    // This releases the merge and its descendant, even though the descendant
-    // arrived first. Neither intermediate commit should remain a head.
+    // This releases the local merge and its descendant, even though the
+    // descendant was queued first. Neither intermediate commit remains a head.
     insert(&mut graph, 2, &[]);
     assert_heads(&graph, &[tip, unrelated]);
 }
@@ -187,8 +195,8 @@ fn duplicate_ingestion_preserves_original_payload_and_edges() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);
-    support::receive_commit(&mut graph, meta(1, &[]), 99);
-    support::receive_commit(&mut graph, meta(2, &[root]), 99);
+    ingest_local_signed(&mut graph, meta(1, &[]), 99);
+    ingest_local_signed(&mut graph, meta(2, &[root]), 99);
     insert(&mut graph, 3, &[child]);
 
     assert_eq!(graph.roots().count(), 1);
@@ -232,18 +240,18 @@ fn merge_waits_for_all_parents_then_releases_descendants() {
 }
 
 #[test]
-fn reverse_order_chain_is_delivered_causally() {
+fn reverse_order_local_signed_chain_is_delivered_causally() {
     let mut graph = CommitGraph::new();
     let root = meta(1, &[]);
     let child = meta(2, &[*root.hash()]);
     let grandchild = meta(3, &[*child.hash()]);
 
-    support::receive_commit(&mut graph, grandchild, 3);
-    support::receive_commit(&mut graph, child, 2);
+    ingest_local_signed(&mut graph, grandchild, 3);
+    ingest_local_signed(&mut graph, child, 2);
     assert!(visited(&graph).is_empty());
     assert_eq!(graph.roots().count(), 0);
 
-    support::receive_commit(&mut graph, root, 1);
+    ingest_local_signed(&mut graph, root, 1);
     assert_eq!(visited(&graph), vec![1, 2, 3]);
     let root = graph.roots().next().unwrap();
     let child = graph.children(root).next().unwrap();
@@ -253,15 +261,15 @@ fn reverse_order_chain_is_delivered_causally() {
 }
 
 #[test]
-fn queued_duplicates_preserve_first_payload() {
+fn local_signed_queued_duplicates_preserve_first_payload() {
     let mut graph = CommitGraph::new();
     let root = *meta(1, &[]).hash();
     insert(&mut graph, 2, &[root, root]);
-    support::receive_commit(&mut graph, meta(2, &[root, root]), 99);
+    ingest_local_signed(&mut graph, meta(2, &[root, root]), 99);
     assert!(visited(&graph).is_empty());
 
     insert(&mut graph, 1, &[]);
-    support::receive_commit(&mut graph, meta(2, &[root, root]), 100);
+    ingest_local_signed(&mut graph, meta(2, &[root, root]), 100);
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 1);
 }
@@ -387,7 +395,13 @@ fn traverse_delivered_since_delivers_only_new_history_after_merge() {
     insert(&mut other, 5, &[]);
 
     graph.merge(&other);
-    assert_eq!(visited_since(&graph, &before), vec![3, 4, 5]);
+    let visited = visited_since(&graph, &before);
+    // Transport order may differ from the sender's insertion order for
+    // concurrent branches, but parents still precede their children.
+    assert!(visited.iter().position(|&n| n == 3) < visited.iter().position(|&n| n == 4));
+    let mut contents = visited;
+    contents.sort_unstable();
+    assert_eq!(contents, vec![3, 4, 5]);
     assert!(visited_since(&graph, &graph.delivered_heads().collect::<Vec<_>>()).is_empty());
 }
 

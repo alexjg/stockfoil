@@ -2,8 +2,8 @@
 
 mod support;
 
-use support::{author, key, sign, signature};
 use std::{collections::HashMap, ops::ControlFlow};
+use support::{author, key, sign, signature};
 
 use ed25519_dalek::SigningKey;
 use stockfoil::{CommitGraph, CommitHash, ViewPointDiff, Vis, VisDiff, WritePermission};
@@ -193,6 +193,9 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     assert_eq!(peer.delivered_heads().collect::<Vec<_>>(), vec![base]);
 
     sign(&mut graph, &key, tip);
+    assert!(!graph.has_admitted_commit(&tip));
+    assert!(graph.resolve(&batch_working).is_err());
+    sign(&mut graph, &key, first);
     let published_signed = graph.signed_view_point();
     assert_changes(
         &graph.diff(&batch_working, &graph.view_point()).unwrap(),
@@ -218,7 +221,10 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     peer.merge(&graph);
     assert!(peer.resolve(&batch_working).is_ok());
 
-    sign(&mut graph, &key, tip);
+    assert_eq!(
+        graph.ingest_signature(author(&key), tip, signature(&key, tip)),
+        Err(stockfoil::SignatureError::NotPendingLocalCommit(tip))
+    );
     peer.merge(&graph);
     assert_changes(
         &graph
