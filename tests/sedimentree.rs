@@ -1,17 +1,18 @@
-//! Public-API properties for canonical and structurally minimized summaries.
+//! Public-API properties for summaries, canonical fragment exports, and borrowed reads.
 //! The oracle knows only envelopes, arrival/local flags, and signature events;
 //! it never asks the graph for delivery, ancestry, depth, or fragment membership.
 mod support;
 
 use std::{
     collections::{BTreeSet, HashMap},
+    ops::ControlFlow,
     sync::OnceLock,
 };
 
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use stockfoil::{
     Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, Fragment,
-    FragmentRange, LooseCommit, SedimentreeSummary,
+    FragmentRange, FragmentReadError, LooseCommit, SedimentreeSummary,
 };
 use support::{author, key, sign};
 
@@ -48,7 +49,16 @@ fn depth(hash: CommitHash) -> usize {
 // Mine real commit hashes, including parent and author fields. Only three
 // depth-2 hashes per case; all test schedules share the resulting fixtures.
 fn mine(parents: Vec<CommitHash>, target: usize, seed: u64, node: usize) -> CommitMeta {
-    let author = author(&key(1));
+    mine_as(parents, target, seed, node, author(&key(1)))
+}
+
+fn mine_as(
+    parents: Vec<CommitHash>,
+    target: usize,
+    seed: u64,
+    node: usize,
+    author: Author,
+) -> CommitMeta {
     for nonce in 0..2_000_000u64 {
         let meta = CommitMeta::new(CommitContents {
             parents: parents.clone(),
@@ -270,6 +280,33 @@ fn oracle(
     )
 }
 
+// Independent lexicographically smallest topological order: repeatedly scan
+// remaining membership for the smallest commit with no remaining parent. No
+// indegrees, adjacency index, ready queue, or production traversal are used.
+fn export_order(commits: &[CommitMeta], members: &BTreeSet<CommitHash>) -> Vec<CommitHash> {
+    let known: HashMap<_, _> = commits.iter().map(|meta| (hash(meta), meta)).collect();
+    let mut remaining = members.clone();
+    let mut result = Vec::new();
+    while !remaining.is_empty() {
+        let next = remaining
+            .iter()
+            .copied()
+            .filter(|h| known[h].parents().iter().all(|p| !remaining.contains(p)))
+            .min()
+            .expect("fixture must be acyclic");
+        remaining.remove(&next);
+        result.push(next);
+    }
+    result
+}
+
+fn assert_meta(actual: &CommitMeta, expected: &CommitMeta) {
+    assert_eq!(actual.hash(), expected.hash());
+    assert_eq!(actual.parents(), expected.parents());
+    assert_eq!(actual.author(), expected.author());
+    assert_eq!(actual.payload_hash(), expected.payload_hash());
+}
+
 fn minimized_oracle(
     canonical: &SedimentreeSummary,
     memberships: &HashMap<CommitHash, BTreeSet<CommitHash>>,
@@ -289,15 +326,57 @@ fn minimized_oracle(
     minimized
 }
 
-fn summaries(graph: &CommitGraph<()>) -> (SedimentreeSummary, SedimentreeSummary) {
+fn summaries(graph: &CommitGraph<CommitHash>) -> (SedimentreeSummary, SedimentreeSummary) {
     let view = graph.as_sedimentree();
     (view.summary(), view.minimized_summary())
 }
 
-fn check(graph: &CommitGraph<()>, model: &Model, case: &Case, event: &str) {
+fn check(graph: &CommitGraph<CommitHash>, model: &Model, case: &Case, event: &str) {
     let published = model.published(&case.commits);
     let (expected, memberships) = oracle(&case.commits, &published);
     let (canonical, minimized) = summaries(graph);
+    let known: HashMap<_, _> = case.commits.iter().map(|meta| (hash(meta), meta)).collect();
+    for meta in &case.commits {
+        match graph.publishable_commit(meta.hash()) {
+            Some((actual, payload)) => {
+                assert!(
+                    published.contains(meta.hash()),
+                    "seed={:#x}, {event}",
+                    case.seed
+                );
+                assert_meta(actual, meta);
+                assert_eq!(payload, meta.hash(), "seed={:#x}, {event}", case.seed);
+            }
+            None => assert!(
+                !published.contains(meta.hash()),
+                "seed={:#x}, {event}",
+                case.seed
+            ),
+        }
+    }
+    // Use oracle ranges, not ranges obtained from the implementation. Every
+    // signature/arrival/clone/merge check also verifies every public export.
+    for fragment in &expected.fragments {
+        let mut actual = Vec::new();
+        graph
+            .traverse_fragment(&fragment.range, |meta, payload| {
+                assert_meta(meta, known[meta.hash()]);
+                assert_eq!(payload, meta.hash(), "seed={:#x}, {event}", case.seed);
+                let (read_meta, read_payload) = graph.publishable_commit(meta.hash()).unwrap();
+                assert_meta(read_meta, meta);
+                assert!(std::ptr::eq(payload, read_payload));
+                actual.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap_or_else(|err| panic!("seed={:#x}, {event}: {err:?}", case.seed));
+        assert_eq!(
+            actual,
+            export_order(&case.commits, &memberships[&fragment.range.head]),
+            "seed={:#x}, {event}, head={:?}",
+            case.seed,
+            fragment.range.head,
+        );
+    }
     assert_eq!(
         canonical,
         expected,
@@ -328,7 +407,7 @@ fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_c
         let mut model = Model::default();
         for node in 0..=13 {
             let meta = &case.commits[node];
-            graph.ingest_commit(meta.clone(), ());
+            graph.ingest_commit(meta.clone(), hash(meta));
             model.ingest(meta, false);
             check(&graph, &model, case, &format!("backbone node={node}"));
             let (canonical, minimized) = summaries(&graph);
@@ -412,14 +491,14 @@ fn every_arrival_matches_the_walk_in_causal_reverse_and_shuffled_orders() {
             check(&graph, &model, case, "empty");
             for (step, node) in order.into_iter().enumerate() {
                 let meta = &case.commits[node];
-                graph.ingest_commit(meta.clone(), ());
+                graph.ingest_commit(meta.clone(), hash(meta));
                 model.ingest(meta, false);
                 let event = format!("schedule={schedule}, step={step}, node={node}");
                 check(&graph, &model, case, &event);
                 // Both queued and delivered duplicates are exercised, including
                 // parent arrivals that release multiple queued descendants.
                 let snapshot = summaries(&graph);
-                graph.ingest_commit(meta.clone(), ());
+                graph.ingest_commit(meta.clone(), hash(meta));
                 check(&graph, &model, case, &format!("{event}, duplicate"));
                 assert_eq!(summaries(&graph), snapshot, "{event}");
             }
@@ -443,7 +522,8 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                 let mask = rng.random_range(1..=3);
                 for replica in 0..2 {
                     if mask & (1 << replica) != 0 {
-                        graphs[replica].ingest_commit(case.commits[node].clone(), ());
+                        graphs[replica]
+                            .ingest_commit(case.commits[node].clone(), hash(&case.commits[node]));
                         models[replica].ingest(&case.commits[node], false);
                         check(
                             &graphs[replica],
@@ -515,7 +595,12 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
     }
 }
 
-fn add_signature(graph: &mut CommitGraph<()>, model: &mut Model, signer: u8, meta: &CommitMeta) {
+fn add_signature(
+    graph: &mut CommitGraph<CommitHash>,
+    model: &mut Model,
+    signer: u8,
+    meta: &CommitMeta,
+) {
     let key = key(signer);
     sign(graph, &key, hash(meta));
     model.signatures.insert((author(&key), hash(meta)));
@@ -534,9 +619,9 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             let local = node == 8;
             let meta = &case.commits[node];
             if local {
-                graph.ingest_local_commit(meta.clone(), ());
+                graph.ingest_local_commit(meta.clone(), hash(meta));
             } else {
-                graph.ingest_commit(meta.clone(), ());
+                graph.ingest_commit(meta.clone(), hash(meta));
             }
             model.ingest(meta, local);
             check(
@@ -572,21 +657,21 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             let local = rng.random_bool(0.6);
             let meta = &case.commits[node];
             if local {
-                graph.ingest_local_commit(meta.clone(), ());
+                graph.ingest_local_commit(meta.clone(), hash(meta));
             } else {
-                graph.ingest_commit(meta.clone(), ());
+                graph.ingest_commit(meta.clone(), hash(meta));
             }
             model.ingest(meta, local);
             let event = format!("publication step={step}, node={node}, local={local}");
             check(&graph, &model, case, &event);
-            graph.ingest_commit(meta.clone(), ());
+            graph.ingest_commit(meta.clone(), hash(meta));
             check(
                 &graph,
                 &model,
                 case,
                 &format!("{event}, received duplicate"),
             );
-            graph.ingest_local_commit(meta.clone(), ());
+            graph.ingest_local_commit(meta.clone(), hash(meta));
             check(&graph, &model, case, &format!("{event}, local duplicate"));
             if rng.random_bool(0.5) {
                 let target = rng.random_range(0..case.commits.len());
@@ -629,4 +714,359 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             "fully published history exported by merge",
         );
     }
+}
+
+fn case_range(case: &Case, node: usize) -> FragmentRange {
+    let all = case.commits.iter().map(hash).collect();
+    oracle(&case.commits, &all)
+        .0
+        .fragments
+        .into_iter()
+        .find(|fragment| fragment.range.head == hash(&case.commits[node]))
+        .unwrap()
+        .range
+}
+
+fn assert_read_error<P: Clone>(
+    graph: &CommitGraph<P>,
+    range: &FragmentRange,
+    expected: FragmentReadError,
+) {
+    // Returning Break must not let an invalid range evade preflight validation.
+    for stop in [false, true] {
+        let mut callbacks = 0;
+        let result = graph.traverse_fragment(range, |_, _| {
+            callbacks += 1;
+            if stop {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert_eq!(callbacks, 0, "invalid ranges must not expose a prefix");
+        assert_eq!(result.as_ref().unwrap_err(), &expected);
+    }
+}
+
+#[test]
+fn fragment_reads_validate_heads_and_exact_max_level_boundaries_before_callbacks() {
+    let case = &cases()[0];
+    let mut graph = CommitGraph::new();
+    let range = case_range(case, 6);
+    let head = range.head;
+    assert!(graph.publishable_commit(&head).is_none());
+    assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
+
+    graph.ingest_commit(case.commits[6].clone(), head);
+    assert!(graph.publishable_commit(&head).is_none());
+    assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
+    for meta in &case.commits {
+        graph.ingest_commit(meta.clone(), hash(meta));
+    }
+    let shallow = hash(&case.commits[0]);
+    assert_read_error(
+        &graph,
+        &FragmentRange {
+            head: shallow,
+            boundary: BTreeSet::new(),
+        },
+        FragmentReadError::NotFragment(shallow),
+    );
+    assert!(graph.publishable_commit(&shallow).is_some());
+
+    let unknown = CommitHash::from([0xff; 32]);
+    assert!(case.commits.iter().all(|meta| hash(meta) != unknown));
+    assert!(graph.publishable_commit(&unknown).is_none());
+    assert_read_error(
+        &graph,
+        &FragmentRange {
+            head: unknown,
+            boundary: BTreeSet::new(),
+        },
+        FragmentReadError::MissingCommit(unknown),
+    );
+    let mut missing = range.clone();
+    missing.boundary.remove(&hash(&case.commits[4]));
+    assert_read_error(&graph, &missing, FragmentReadError::BoundaryMismatch(head));
+    for extra in [
+        unknown,
+        head,
+        hash(&case.commits[2]),
+        hash(&case.commits[3]),
+    ] {
+        let mut extra_boundary = range.clone();
+        extra_boundary.boundary.insert(extra);
+        assert_read_error(
+            &graph,
+            &extra_boundary,
+            FragmentReadError::BoundaryMismatch(head),
+        );
+    }
+    // Head 8 has depth 2, whose canonical boundary is empty. Its level-1
+    // closure stops at 6 and 2 instead, and is not an accepted public range.
+    let max_range = case_range(case, 8);
+    assert!(max_range.boundary.is_empty());
+    let lower_level = FragmentRange {
+        head: max_range.head,
+        boundary: [2, 6].map(|i| hash(&case.commits[i])).into(),
+    };
+    assert_read_error(
+        &graph,
+        &lower_level,
+        FragmentReadError::BoundaryMismatch(max_range.head),
+    );
+    graph
+        .traverse_fragment(&range, |_, _| ControlFlow::Continue(()))
+        .unwrap();
+    graph
+        .traverse_fragment(&max_range, |_, _| ControlFlow::Continue(()))
+        .unwrap();
+}
+
+#[test]
+fn boundary_bypass_edges_order_parents_before_lower_hash_boundaries_and_break_is_global() {
+    for case in cases() {
+        let mut graph = CommitGraph::new();
+        for meta in &case.commits {
+            graph.ingest_commit(meta.clone(), hash(meta));
+        }
+        let range = case_range(case, 6);
+        let mut actual = Vec::new();
+        graph
+            .traverse_fragment(&range, |meta, _| {
+                actual.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        let parent = hash(&case.commits[3]);
+        for node in [4, 5] {
+            let boundary = hash(&case.commits[node]);
+            assert!(range.boundary.contains(&boundary));
+            assert!(
+                boundary < parent,
+                "fixture must defeat hash-only boundary scheduling"
+            );
+            assert!(
+                actual.iter().position(|h| *h == parent).unwrap()
+                    < actual.iter().position(|h| *h == boundary).unwrap()
+            );
+        }
+        // Parent 1 of boundary 5 is outside the range: it is neither exported
+        // nor a prerequisite, unlike bypass-reachable parent 3.
+        assert!(!actual.contains(&hash(&case.commits[1])));
+        assert_eq!(actual.len(), 5);
+        for stop_after in 1..=actual.len() {
+            let mut prefix = Vec::new();
+            graph
+                .traverse_fragment(&range, |meta, _| {
+                    prefix.push(hash(meta));
+                    if prefix.len() == stop_after {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })
+                .unwrap();
+            assert_eq!(prefix, actual[..stop_after], "seed={:#x}", case.seed);
+        }
+    }
+}
+
+#[test]
+fn local_fragment_reads_wait_for_signatures_before_or_after_arrival() {
+    let case = &cases()[0];
+    let range = case_range(case, 8);
+    for signature_first in [false, true] {
+        let mut graph = CommitGraph::new();
+        if signature_first {
+            sign(&mut graph, &key(1), range.head);
+        }
+        // Even a correctly signed queued head cannot be read.
+        graph.ingest_local_commit(case.commits[8].clone(), range.head);
+        assert!(graph.publishable_commit(&range.head).is_none());
+        assert_read_error(&graph, &range, FragmentReadError::MissingCommit(range.head));
+        for meta in &case.commits[..8] {
+            graph.ingest_commit(meta.clone(), hash(meta));
+        }
+        if !signature_first {
+            assert!(graph.publishable_commit(&range.head).is_none());
+            assert_read_error(
+                &graph,
+                &range,
+                FragmentReadError::NotPublishable(range.head),
+            );
+            // A received duplicate cannot launder local provenance.
+            graph.ingest_commit(case.commits[8].clone(), range.head);
+            sign(&mut graph, &key(2), range.head);
+            assert_read_error(
+                &graph,
+                &range,
+                FragmentReadError::NotPublishable(range.head),
+            );
+            sign(&mut graph, &key(1), range.head);
+        }
+        let (meta, payload) = graph.publishable_commit(&range.head).unwrap();
+        assert_meta(meta, &case.commits[8]);
+        assert_eq!(*payload, range.head);
+        let mut seen = Vec::new();
+        graph
+            .traverse_fragment(&range, |meta, _| {
+                seen.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        let all = case.commits.iter().map(hash).collect();
+        let (_, memberships) = oracle(&case.commits, &all);
+        assert_eq!(seen, export_order(&case.commits, &memberships[&range.head]));
+    }
+}
+
+#[test]
+fn signed_descendant_stays_withheld_behind_another_authors_local_ancestor() {
+    let case = &cases()[0];
+    let ancestor = &case.commits[8];
+    let descendant = mine_as(vec![hash(ancestor)], 1, case.seed, 40, author(&key(2)));
+    let range = FragmentRange {
+        head: hash(&descendant),
+        boundary: [hash(ancestor)].into(),
+    };
+    for signature_first in [false, true] {
+        let mut graph = CommitGraph::new();
+        for meta in &case.commits[..8] {
+            graph.ingest_commit(meta.clone(), hash(meta));
+        }
+        graph.ingest_local_commit(ancestor.clone(), hash(ancestor));
+        if signature_first {
+            sign(&mut graph, &key(2), range.head);
+        }
+        graph.ingest_local_commit(descendant.clone(), hash(&descendant));
+        if !signature_first {
+            sign(&mut graph, &key(2), range.head);
+        }
+        assert!(graph.publishable_commit(ancestor.hash()).is_none());
+        assert!(graph.publishable_commit(&range.head).is_none());
+        assert_read_error(
+            &graph,
+            &range,
+            FragmentReadError::NotPublishable(range.head),
+        );
+        sign(&mut graph, &key(1), hash(ancestor));
+        let mut seen = Vec::new();
+        graph
+            .traverse_fragment(&range, |meta, payload| {
+                assert_eq!(payload, meta.hash());
+                seen.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(seen, [hash(ancestor), range.head]);
+        assert_meta(
+            graph.publishable_commit(&range.head).unwrap().0,
+            &descendant,
+        );
+    }
+}
+
+#[test]
+fn repeated_parent_edges_export_each_member_once() {
+    let case = &cases()[0];
+    let parents = [4, 4, 3, 3, 0, 0].map(|i| hash(&case.commits[i])).to_vec();
+    let head = mine(parents, 1, case.seed, 41);
+    let mut commits = case.commits[..5].to_vec();
+    commits.push(head.clone());
+    let all = commits.iter().map(hash).collect();
+    let (summary, memberships) = oracle(&commits, &all);
+    let range = &summary
+        .fragments
+        .iter()
+        .find(|f| f.range.head == hash(&head))
+        .unwrap()
+        .range;
+    assert_eq!(memberships[&hash(&head)].len(), 4);
+    for reverse in [false, true] {
+        let mut graph = CommitGraph::new();
+        let mut order: Vec<_> = commits.iter().collect();
+        if reverse {
+            order.reverse();
+        }
+        for meta in order {
+            graph.ingest_commit(meta.clone(), hash(meta));
+        }
+        let mut seen = Vec::new();
+        graph
+            .traverse_fragment(range, |meta, payload| {
+                assert_eq!(payload, meta.hash());
+                seen.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(seen, export_order(&commits, &memberships[&hash(&head)]));
+    }
+}
+
+#[test]
+fn fragment_and_covered_commit_reads_borrow_without_cloning_payloads() {
+    struct NoClone(CommitHash);
+    impl Clone for NoClone {
+        fn clone(&self) -> Self {
+            panic!("read APIs must not clone payloads")
+        }
+    }
+    let case = &cases()[0];
+    let mut graph = CommitGraph::new();
+    // Reverse order exercises queue drainage with these payloads as well.
+    for meta in case.commits[..7].iter().rev() {
+        graph.ingest_commit(meta.clone(), NoClone(hash(meta)));
+    }
+    let read = |graph: &CommitGraph<NoClone>| {
+        let range = case_range(case, 6);
+        let all = case.commits.iter().map(hash).collect();
+        let (_, memberships) = oracle(&case.commits, &all);
+        let mut seen = Vec::new();
+        let mut borrowed = Vec::new();
+        graph
+            .traverse_fragment(&range, |meta, payload| {
+                borrowed.push((meta, payload));
+                let expected = case
+                    .commits
+                    .iter()
+                    .find(|m| m.hash() == meta.hash())
+                    .unwrap();
+                assert_meta(meta, expected);
+                assert_eq!(payload.0, hash(meta));
+                let (read_meta, read_payload) = graph.publishable_commit(meta.hash()).unwrap();
+                assert_meta(read_meta, meta);
+                assert!(std::ptr::eq(payload, read_payload));
+                seen.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(seen, export_order(&case.commits, &memberships[&range.head]));
+        // References can be retained after the callback, tied to the graph borrow.
+        for (meta, payload) in borrowed {
+            let (stored_meta, stored_payload) = graph.publishable_commit(meta.hash()).unwrap();
+            assert!(std::ptr::eq(meta, stored_meta));
+            assert!(std::ptr::eq(payload, stored_payload));
+        }
+        for meta in &case.commits[..7] {
+            let (actual, payload) = graph.publishable_commit(meta.hash()).unwrap();
+            assert_meta(actual, meta);
+            assert_eq!(payload.0, hash(meta));
+        }
+    };
+    read(&graph);
+    for meta in &case.commits[7..=8] {
+        graph.ingest_commit(meta.clone(), NoClone(hash(meta)));
+    }
+    // The fragment at 6 is now nested inside 8 and omitted by minimization;
+    // neither its range nor any covered commit loses read access.
+    assert!(
+        !graph
+            .as_sedimentree()
+            .minimized_summary()
+            .fragments
+            .iter()
+            .any(|f| f.range.head == hash(&case.commits[6]))
+    );
+    read(&graph);
 }

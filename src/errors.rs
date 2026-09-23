@@ -88,3 +88,32 @@ impl fmt::Display for QueryError {
 }
 
 impl Error for QueryError {}
+
+/// A canonical fragment could not be read. No traversal callbacks are invoked
+/// when validation fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentReadError {
+    /// The head is unknown or still waiting for causal delivery.
+    MissingCommit(CommitHash),
+    /// The head has depth zero and therefore heads no fragment.
+    NotFragment(CommitHash),
+    /// The head or its ancestors are withheld by publication policy.
+    NotPublishable(CommitHash),
+    /// The supplied boundaries differ from the head's canonical range.
+    BoundaryMismatch(CommitHash),
+}
+
+impl fmt::Display for FragmentReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingCommit(hash) => write!(f, "missing delivered fragment head: {hash:?}"),
+            Self::NotFragment(hash) => write!(f, "commit does not head a fragment: {hash:?}"),
+            Self::NotPublishable(hash) => write!(f, "fragment is not publishable: {hash:?}"),
+            Self::BoundaryMismatch(hash) => {
+                write!(f, "non-canonical fragment boundaries: {hash:?}")
+            }
+        }
+    }
+}
+
+impl Error for FragmentReadError {}

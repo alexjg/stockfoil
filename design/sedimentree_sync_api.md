@@ -59,6 +59,12 @@ struct SedimentreeSummary {
 
 impl<P: Clone> CommitGraph<P> {
     fn as_sedimentree(&self) -> SedimentreeView<'_>;
+    fn traverse_fragment<'graph>(
+        &'graph self,
+        range: &FragmentRange,
+        visit: impl FnMut(&'graph CommitMeta, &'graph P) -> ControlFlow<()>,
+    ) -> Result<(), FragmentReadError>;
+    fn publishable_commit(&self, hash: &CommitHash) -> Option<(&CommitMeta, &P)>;
 }
 
 impl SedimentreeView<'_> {
@@ -159,6 +165,42 @@ truncation is never used to make coverage decisions. Only publishable fragments
 contribute to coverage, so withheld descendants cannot suppress published loose
 commits.
 
+## Reading contents for export
+
+`CommitGraph::traverse_fragment` resolves an existing canonical maximum-level
+range, validates its boundaries and publication eligibility, then borrows each
+included commit's metadata and payload. It includes the head and boundaries,
+visits every member once, and does not clone or encode payloads. The callback
+may retain references for the duration of the graph borrow. `Break(())` stops
+the entire traversal; both normal completion and an early break return `Ok(())`.
+
+`FragmentReadError` distinguishes an unknown or queued head (`MissingCommit`),
+a depth-zero head (`NotFragment`), withheld history (`NotPublishable`), and a
+range differing from the canonical boundaries (`BoundaryMismatch`). All
+validation happens before invoking any callback. These are not arbitrary
+head/boundary walks; internal lower-level ranges are not separately exported.
+
+Ordering is the lexicographically smallest topological order by full commit
+hash. Membership is derived through lower-level fragments down to level-one
+commit walks. Kahn's algorithm then operates on all parent edges between members,
+with a hash-ordered ready set and distinct-parent counts. Parents outside the
+fragment do not constrain ordering. Crucially, a boundary's parent reached by
+another merge path *does* constrain ordering: stopping membership discovery at
+that boundary does not remove edges from the induced graph used for sorting.
+The order is independent of arrival order, local node IDs, or hash-map iteration.
+The sorting stage uses temporary per-fragment state and costs approximately
+`O(E + V log V)`, in addition to publication and membership discovery.
+
+`publishable_commit` reads an individual commit, returning `None` for unknown,
+queued, or withheld commits. It does not require that the commit remain loose.
+Previously advertised loose entries and fragments remain readable after later
+fragments cover them or minimization omits them.
+
+These APIs select contents only: no signature evidence, independent fragment-local
+verification proofs, codecs, blob hashes, or encoded representations are supplied.
+A canonical commit sequence alone does not make payload or signature encoding
+canonical; those formats still need separate definitions.
+
 ## Tests
 
 `tests/sedimentree.rs` replaces the old reduced-cover examples with seeded,
@@ -187,6 +229,11 @@ The tests compare both summary forms after operations, covering:
   arriving before their targets, and signatures from the wrong author.
 * Every canonical fragment, including contained fragments; checkpoints, loose
   coverage, boundary sets, and deterministic output ordering.
+* Fragment contents and canonical visit order, checked by an independent oracle
+  that repeatedly scans remaining members and picks the smallest eligible hash.
+* Exact range validation before callbacks, queued/withheld reads, duplicate parent
+  edges, boundary bypass ordering, global early termination, and borrowed reads
+  with payloads whose `Clone` implementation panics.
 
 Run `cargo test --test sedimentree`, or `cargo test --all-targets` for the entire
 project. Assertion messages include the seed and operation for reproduction.

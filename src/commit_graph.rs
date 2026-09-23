@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ResolveError,
-    ResolvedViewPoint, SedimentreeView, Signature, SignatureError, ViewPoint, ViewPointDiff,
-    WritePermission,
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, FragmentRange,
+    FragmentReadError, ResolveError, ResolvedViewPoint, SedimentreeView, Signature, SignatureError,
+    ViewPoint, ViewPointDiff, WritePermission,
 };
 
 /// An in-memory commit DAG with causal delivery.
@@ -242,6 +242,96 @@ impl<P: Clone> CommitGraph<P> {
             by_hash: &self.by_hash,
             publishable: self.publishable_nodes(),
         }
+    }
+
+    /// Visit a canonical fragment's commits, including its head and boundaries,
+    /// exactly once. Parents within the fragment precede their children; among
+    /// currently eligible commits, the smallest full commit hash is visited first.
+    /// This order is independent of ingestion order and local node indices.
+    ///
+    /// Validates the range and publication eligibility before any callback.
+    /// Metadata and payloads are borrowed, not cloned or encoded. Returning
+    /// `ControlFlow::Break(())` stops the entire traversal and returns `Ok(())`.
+    /// No signatures or independent fragment-local verification proofs are supplied.
+    pub fn traverse_fragment<'graph>(
+        &'graph self,
+        range: &FragmentRange,
+        mut visit: impl FnMut(&'graph CommitMeta, &'graph P) -> ControlFlow<()>,
+    ) -> Result<(), FragmentReadError> {
+        let head = *self
+            .by_hash
+            .get(&range.head)
+            .ok_or(FragmentReadError::MissingCommit(range.head))?;
+        let fragment_idx = *self.nodes[head]
+            .headed_fragments
+            .last()
+            .ok_or(FragmentReadError::NotFragment(range.head))?;
+        if !self.publishable_nodes()[head.0] {
+            return Err(FragmentReadError::NotPublishable(range.head));
+        }
+        let boundary: BTreeSet<_> = self.fragments[fragment_idx]
+            .boundary
+            .iter()
+            .map(|&idx| *self.nodes[idx].meta.hash())
+            .collect();
+        if boundary != range.boundary {
+            return Err(FragmentReadError::BoundaryMismatch(range.head));
+        }
+
+        // Derive membership through the fragment hierarchy, not from the caller's
+        // boundary set. A publishable head guarantees publishable ancestors.
+        let members = self
+            .fragments
+            .members(&self.nodes, &self.by_hash, fragment_idx);
+        let mut remaining = HashMap::new();
+        let mut children: HashMap<NodeIdx, Vec<NodeIdx>> = HashMap::new();
+        let mut ready = BTreeSet::new();
+        for &idx in &members {
+            // Use ALL edges between members, even outgoing parent edges of a
+            // boundary reached through another path. Repeated parents count once.
+            let parents: HashSet<_> = self
+                .parents(idx)
+                .filter(|parent| members.contains(parent))
+                .collect();
+            remaining.insert(idx, parents.len());
+            if parents.is_empty() {
+                ready.insert(*self.nodes[idx].meta.hash());
+            }
+            for parent in parents {
+                children.entry(parent).or_default().push(idx);
+            }
+        }
+
+        // Kahn's algorithm with a full-hash ready queue gives the lexicographically
+        // smallest topological order, without dependence on hash-map iteration.
+        let mut emitted = 0;
+        while let Some(hash) = ready.pop_first() {
+            let idx = self.by_hash[&hash];
+            if visit(&self.nodes[idx].meta, &self.store[&idx]).is_break() {
+                return Ok(());
+            }
+            emitted += 1;
+            if let Some(children) = children.get(&idx) {
+                for &child in children {
+                    let count = remaining.get_mut(&child).unwrap();
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.insert(*self.nodes[child].meta.hash());
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(emitted, members.len(), "delivered history must be acyclic");
+        Ok(())
+    }
+
+    /// Borrow a publishable delivered commit's metadata and payload.
+    /// Returns `None` for unknown, queued, or withheld commits. The commit need
+    /// not still be loose: a previously advertised entry remains readable after
+    /// a fragment covers it. Does not clone payloads or supply signature evidence.
+    pub fn publishable_commit(&self, hash: &CommitHash) -> Option<(&CommitMeta, &P)> {
+        let idx = *self.by_hash.get(hash)?;
+        self.publishable_nodes()[idx.0].then(|| (&self.nodes[idx].meta, &self.store[&idx]))
     }
 
     /// Exchange publishable history and signature evidence, never permissions or
@@ -641,10 +731,9 @@ pub struct NodeIdx(usize);
 pub(crate) struct NodeStore(Vec<Node>);
 
 impl NodeStore {
-    // Return all the commits which are reachable from `head` by traversing
-    // parent edges without crossing a fragment boundary. I.e. if `head` is a 
-    // level one commit then this returns the members of the fragment headed
-    // by `head`.
+    // Inclusive membership of the level-one fragment at `head`, even when the
+    // head's hash depth is greater than one. Other nonzero-depth commits stop
+    // traversal; shallow roots are included without becoming boundaries.
     fn level_one_members(
         &self,
         by_hash: &HashMap<CommitHash, NodeIdx>,
@@ -728,12 +817,37 @@ struct Fragment {
 pub(crate) struct FragmentStore(Vec<Fragment>);
 
 impl FragmentStore {
+    // Expand constituent links to level zero. Inclusive boundary commits may
+    // appear in multiple level-one fragments; union their membership by node ID.
+    fn members(
+        &self,
+        nodes: &NodeStore,
+        by_hash: &HashMap<CommitHash, NodeIdx>,
+        fragment: FragmentIdx,
+    ) -> HashSet<NodeIdx> {
+        let mut members = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut stack = vec![fragment];
+        while let Some(idx) = stack.pop() {
+            if !visited.insert(idx) {
+                continue;
+            }
+            let fragment = &self[idx];
+            if fragment.level == 1 {
+                members.extend(nodes.level_one_members(by_hash, fragment.head));
+            } else {
+                stack.extend(self.lower_fragments(nodes, fragment.head, fragment.level));
+            }
+        }
+        members
+    }
+
     // Derive the immediate constituents of a level > 1 fragment. Stop at
     // boundaries of that level, following only level-(n-1) fragment links.
     // No contents are stored, and overlapping paths are visited just once.
     //
-    // I.e. if `head` is a level-n commit, return the level-(n-1) fragments headed by its
-    // level-(n-1) ancestors, stopping at any level-(n-1) boundaries.
+    // Includes the same head's level-(n-1) fragment, then follows ancestors at
+    // that level, stopping at boundaries of depth at least n.
     fn lower_fragments(&self, nodes: &NodeStore, head: NodeIdx, level: usize) -> Vec<FragmentIdx> {
         debug_assert!(level > 1);
         let mut result = Vec::new();

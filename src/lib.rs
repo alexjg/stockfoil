@@ -5,7 +5,7 @@
 mod author;
 pub use author::Author;
 mod errors;
-pub use errors::{DiffError, QueryError, ResolveError, SignatureError};
+pub use errors::{DiffError, FragmentReadError, QueryError, ResolveError, SignatureError};
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;
