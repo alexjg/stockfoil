@@ -24,6 +24,7 @@ use crate::{
 pub struct CommitGraph<P> {
     nodes: NodeStore,
     edges: EdgeStore,
+    fragments: FragmentStore,
     parents: Vec<Option<EdgeIdx>>,
     store: HashMap<NodeIdx, P>,
     by_hash: HashMap<CommitHash, NodeIdx>,
@@ -35,7 +36,6 @@ pub struct CommitGraph<P> {
     // Local provenance never travels through merge. Only this path grants
     // optimistic authentication or holds otherwise-delivered data off the wire.
     local: HashSet<CommitHash>,
-    sedimentree: crate::sedimentree::SedimentreeIndex,
 }
 
 #[derive(Clone)]
@@ -54,6 +54,7 @@ impl<P: Clone> CommitGraph<P> {
         Self {
             nodes: NodeStore(Vec::new()),
             edges: EdgeStore(Vec::new()),
+            fragments: FragmentStore(Vec::new()),
             store: HashMap::new(),
             parents: Vec::new(),
             by_hash: HashMap::new(),
@@ -62,7 +63,6 @@ impl<P: Clone> CommitGraph<P> {
             permissions: HashMap::new(),
             signatures: HashMap::new(),
             local: HashSet::new(),
-            sedimentree: crate::sedimentree::SedimentreeIndex::default(),
         }
     }
 
@@ -162,7 +162,6 @@ impl<P: Clone> CommitGraph<P> {
             }
         }
         self.prune_signatures();
-        self.refresh_sedimentree();
     }
 
     // Only called once all parents have been inserted into the graph.
@@ -193,31 +192,45 @@ impl<P: Clone> CommitGraph<P> {
         self.heads.insert(hash);
         self.nodes.0.push(Node { meta });
         self.by_hash.insert(hash, node_idx);
+
+        self.maybe_insert_fragment(hash);
+    }
+
+    fn maybe_insert_fragment(&mut self, head: CommitHash) {
+        let depth = sedimentree_depth(&head);
+
+        let mut boundary = Vec::new();
+        let mut stack = vec![self.by_hash[&head]];
+        while let Some(idx) = stack.pop() {
+            let node = &self.nodes[idx];
+            let node_depth = sedimentree_depth(&node.meta.hash());
+
+            if node_depth == depth {
+                // This is a boundary commit
+                boundary.push(idx);
+            } else if node_depth > 0 {
+                // This isn't a boundary commit, but it is a lower level fragment head, so we can
+                // use it to skip to the boundaries of this fragment
+                //
+                // (Note that we rely on this routine being run after every commit insertion which
+                // means we can assume that any lower level fragment heads have already been
+                // inserted into the fragment store)
+                let fragment = self.fragments.0.iter().find(|fragment| fragment.head ==
+                    idx).expect("previously inserted fragments must be present");
+                stack.extend(fragment.boundary.iter().copied());
+            } else {
+                // This is neither a boundary commit nor a lower level fragment head so we traverse
+                // as normal
+                stack.extend(self.parents(idx));
+            }
+        }
+
     }
 
     /// Borrow the structural sedimentree index of publishable delivered history.
     /// This does not certify independently verifiable or encoded sync items.
     pub fn as_sedimentree(&self) -> SedimentreeView<'_> {
-        SedimentreeView {
-            index: &self.sedimentree,
-        }
-    }
-
-    // Publication is monotonic even when permissions change. Compute eligibility
-    // using the existing graph policy, then index only newly publishable nodes.
-    // All decomposition work happens on mutation, never when reading a summary.
-    fn refresh_sedimentree(&mut self) {
-        let publishable = self.publishable_nodes();
-        for (idx, node) in &self.nodes {
-            if publishable[idx.0] {
-                self.sedimentree.insert(
-                    idx.0,
-                    &node.meta,
-                    node.meta.parents().iter().map(|hash| self.by_hash[hash].0),
-                    |index| &self.nodes[NodeIdx(index)].meta,
-                );
-            }
-        }
+        todo!()
     }
 
     /// Exchange publishable history and signature evidence, never permissions or
@@ -381,7 +394,6 @@ impl<P: Clone> CommitGraph<P> {
             .or_default()
             .insert(hash, signature);
         self.prune_signatures();
-        self.refresh_sedimentree();
         Ok(())
     }
 
@@ -663,6 +675,35 @@ impl Index<EdgeIdx> for EdgeStore {
         &self.0[index.0]
     }
 }
+
+#[derive(Clone)]
+struct Fragment {
+    head: NodeIdx,
+    boundary: Vec<NodeIdx>,
+}
+
+#[derive(Clone)]
+struct FragmentStore(Vec<Fragment>);
+
+struct FragmentIdx(usize);
+
+impl Index<FragmentIdx> for FragmentStore {
+    type Output = Fragment;
+
+    fn index(&self, index: FragmentIdx) -> &Self::Output {
+        &self.0[index.0]
+    }
+}
+
+
+fn sedimentree_depth(hash: &CommitHash) -> usize {
+    hash
+        .as_bytes()
+        .iter()
+        .take_while(|b| **b == 0)
+        .count()
+}
+
 
 #[cfg(test)]
 mod tests {
