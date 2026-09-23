@@ -1,3 +1,7 @@
+//! Compile-only receipt migration: assertions below still describe legacy
+//! unsigned receipt, delayed authentication, and missing-parent queue behavior.
+//! TODO: adapt these scenarios to explicit proof evidence and verified admission;
+//! automatically signing receipts would invalidate the signature-timing tests.
 mod support;
 
 use support::{author, key, sign, signature};
@@ -46,7 +50,7 @@ fn remote_signature_arrival_changes_only_new_view_points() {
     grant(&mut graph, &[&alice]);
     let c = commit(&alice, 1, &[]);
     let hash = *c.hash();
-    graph.ingest_commit(c, 1);
+    support::receive_commit(&mut graph, c, 1);
     let before = graph.view_point();
     assert!(!graph.resolve(&before).unwrap().visible(&hash).unwrap());
     // Incoming unsigned data is forwardable, but has no optimistic allowance.
@@ -74,7 +78,7 @@ fn remote_signature_arrival_changes_only_new_view_points() {
 
     // Duplicate evidence and commits do not change the viewpoint.
     sign(&mut graph, &alice, hash);
-    graph.ingest_commit(commit(&alice, 1, &[]), 99);
+    support::receive_commit(&mut graph, commit(&alice, 1, &[]), 99);
     assert_eq!(graph.view_point(), after);
 }
 
@@ -86,7 +90,7 @@ fn signatures_can_arrive_before_commits_and_causal_delivery() {
     let mut graph = CommitGraph::new();
     grant(&mut graph, &[&alice]);
     sign(&mut graph, &alice, *tip.hash());
-    graph.ingest_commit(tip.clone(), 2);
+    support::receive_commit(&mut graph, tip.clone(), 2);
     let detached = graph.view_point();
     assert!(detached.delivered_heads().is_empty());
     assert!(detached.authentication_frontiers().is_empty());
@@ -99,8 +103,8 @@ fn signatures_can_arrive_before_commits_and_causal_delivery() {
     let mut peer = CommitGraph::new();
     grant(&mut peer, &[&alice]);
     peer.merge(&graph);
-    peer.ingest_commit(root.clone(), 1);
-    graph.ingest_commit(root.clone(), 1);
+    support::receive_commit(&mut peer, root.clone(), 1);
+    support::receive_commit(&mut graph, root.clone(), 1);
     for doc in [&graph, &peer] {
         let view_point = doc.view_point();
         assert_eq!(
@@ -131,14 +135,14 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
         author(&alice),
         WritePermission::Bounded(vec![*frontier.hash()]),
     )]));
-    graph.ingest_commit(c.clone(), 1);
+    support::receive_commit(&mut graph, c.clone(), 1);
     sign(&mut graph, &alice, *c.hash());
     let before = graph.view_point();
     assert!(!graph.resolve(&before).unwrap().visible(c.hash()).unwrap());
 
-    graph.ingest_commit(frontier.clone(), 3);
+    support::receive_commit(&mut graph, frontier.clone(), 3);
     assert_eq!(graph.view_point(), before); // Merely reading its parent link isn't enough.
-    graph.ingest_commit(missing, 2);
+    support::receive_commit(&mut graph, missing, 2);
     let after = graph.view_point();
     assert!(graph.resolve(&after).unwrap().visible(c.hash()).unwrap());
     assert!(!graph.resolve(&before).unwrap().visible(c.hash()).unwrap());
@@ -193,7 +197,7 @@ fn newer_evidence_resolves_an_old_view_point_without_expanding_it() {
         peer.diff(&old, &old),
         Err(DiffError::MissingCommit(_))
     ));
-    peer.ingest_commit(root.clone(), 1);
+    support::receive_commit(&mut peer, root.clone(), 1);
     assert!(matches!(
         peer.resolve(&old),
         Err(ResolveError::MissingSignature { .. })
@@ -208,7 +212,7 @@ fn newer_evidence_resolves_an_old_view_point_without_expanding_it() {
     );
     sign(&mut peer, &alice, *tip.hash());
     assert!(peer.resolve(&old).is_err()); // Still missing the ancestry evidence.
-    peer.ingest_commit(tip.clone(), 2);
+    support::receive_commit(&mut peer, tip.clone(), 2);
     let resolved = peer.resolve(&old).unwrap();
     assert!(resolved.visible(root.hash()).unwrap());
     assert!(!resolved.visible(tip.hash()).unwrap());
@@ -235,8 +239,8 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_a_commit() {
     let child = commit(&bob, 2, &[*root.hash()]);
     let mut graph = CommitGraph::new();
     grant(&mut graph, &[&alice, &bob]);
-    graph.ingest_commit(root.clone(), 1);
-    graph.ingest_commit(child.clone(), 2);
+    support::receive_commit(&mut graph, root.clone(), 1);
+    support::receive_commit(&mut graph, child.clone(), 2);
     let before = graph.view_point();
     let wrong_signer = signature(&bob, *root.hash());
     assert!(matches!(
@@ -375,7 +379,7 @@ fn authentication_and_write_frontiers_can_have_multiple_heads() {
         .into_iter()
         .enumerate()
     {
-        graph.ingest_commit(meta, value as u8);
+        support::receive_commit(&mut graph, meta, value as u8);
     }
     sign(&mut graph, &alice, *left.hash());
     sign(&mut graph, &alice, *right.hash());
@@ -445,13 +449,13 @@ fn merge_withholds_queued_descendants_of_local_work() {
     let tip = commit(&bob, 4, &[*queued.hash()]);
     let mut source = CommitGraph::new();
     source.ingest_local_commit(root.clone(), 1);
-    source.ingest_commit(tip.clone(), 4);
-    source.ingest_commit(queued.clone(), 3);
+    support::receive_commit(&mut source, tip.clone(), 4);
+    support::receive_commit(&mut source, queued.clone(), 3);
     let mut peer = CommitGraph::new();
     peer.merge(&source);
     // If the queued descendants leaked, these two commits would release them.
-    peer.ingest_commit(root.clone(), 1);
-    peer.ingest_commit(missing.clone(), 2);
+    support::receive_commit(&mut peer, root.clone(), 1);
+    support::receive_commit(&mut peer, missing.clone(), 2);
     assert_eq!(peer.delivered_heads().count(), 2);
 
     sign(&mut source, &alice, *root.hash());
@@ -470,7 +474,7 @@ fn received_commits_need_their_own_authors_signature_coverage() {
     let mut graph = CommitGraph::new();
     grant(&mut graph, &[&alice, &bob]);
     let unsigned = graph.commit_by(author(&bob), &[1]);
-    graph.ingest_commit(unsigned.clone(), 1);
+    support::receive_commit(&mut graph, unsigned.clone(), 1);
     let signed = graph.commit_by(author(&alice), &[2]);
     graph.ingest_local_commit(signed.clone(), 2);
     sign(&mut graph, &alice, *signed.hash());

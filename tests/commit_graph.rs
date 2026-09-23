@@ -1,3 +1,7 @@
+//! Compile-only receipt migration: reverse-order and missing-parent cases retain
+//! legacy queue assertions pending verified dependency/transport adaptation.
+mod support;
+
 use std::ops::ControlFlow;
 
 use ed25519_dalek::SigningKey;
@@ -20,7 +24,7 @@ fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
 fn insert(graph: &mut CommitGraph<u8>, value: u8, parents: &[CommitHash]) -> CommitHash {
     let meta = meta(value, parents);
     let hash = *meta.hash();
-    graph.ingest_commit(meta, value);
+    support::receive_commit(graph, meta, value);
     hash
 }
 
@@ -183,8 +187,8 @@ fn duplicate_ingestion_preserves_original_payload_and_edges() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);
-    graph.ingest_commit(meta(1, &[]), 99);
-    graph.ingest_commit(meta(2, &[root]), 99);
+    support::receive_commit(&mut graph, meta(1, &[]), 99);
+    support::receive_commit(&mut graph, meta(2, &[root]), 99);
     insert(&mut graph, 3, &[child]);
 
     assert_eq!(graph.roots().count(), 1);
@@ -234,12 +238,12 @@ fn reverse_order_chain_is_delivered_causally() {
     let child = meta(2, &[*root.hash()]);
     let grandchild = meta(3, &[*child.hash()]);
 
-    graph.ingest_commit(grandchild, 3);
-    graph.ingest_commit(child, 2);
+    support::receive_commit(&mut graph, grandchild, 3);
+    support::receive_commit(&mut graph, child, 2);
     assert!(visited(&graph).is_empty());
     assert_eq!(graph.roots().count(), 0);
 
-    graph.ingest_commit(root, 1);
+    support::receive_commit(&mut graph, root, 1);
     assert_eq!(visited(&graph), vec![1, 2, 3]);
     let root = graph.roots().next().unwrap();
     let child = graph.children(root).next().unwrap();
@@ -253,11 +257,11 @@ fn queued_duplicates_preserve_first_payload() {
     let mut graph = CommitGraph::new();
     let root = *meta(1, &[]).hash();
     insert(&mut graph, 2, &[root, root]);
-    graph.ingest_commit(meta(2, &[root, root]), 99);
+    support::receive_commit(&mut graph, meta(2, &[root, root]), 99);
     assert!(visited(&graph).is_empty());
 
     insert(&mut graph, 1, &[]);
-    graph.ingest_commit(meta(2, &[root, root]), 100);
+    support::receive_commit(&mut graph, meta(2, &[root, root]), 100);
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 1);
 }

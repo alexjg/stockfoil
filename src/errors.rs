@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use crate::{Author, CommitHash};
+use crate::{Author, CommitHash, DependencyId};
 
 /// Signature verification failed. Rejected signatures do not change the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,3 +117,61 @@ impl fmt::Display for FragmentReadError {
 }
 
 impl Error for FragmentReadError {}
+
+/// An untrusted sedimentree item could not be verified in isolation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationError {
+    /// Retry verification after obtaining this already-verified prerequisite.
+    MissingDependency(DependencyId),
+    /// The reconstructed metadata does not match the declared item identity or
+    /// canonical structure. The serialization-specific details are still deferred.
+    InvalidItem,
+    InvalidSignature(SignatureError),
+    MissingSignature {
+        author: Author,
+        commit: CommitHash,
+    },
+}
+
+impl fmt::Display for VerificationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingDependency(id) => write!(f, "missing verified dependency: {id:?}"),
+            Self::InvalidItem => write!(f, "invalid sedimentree item identity or structure"),
+            Self::InvalidSignature(error) => write!(f, "invalid item signature: {error}"),
+            Self::MissingSignature { author, commit } => {
+                write!(f, "missing signature coverage by {author:?} for {commit:?}")
+            }
+        }
+    }
+}
+
+impl Error for VerificationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidSignature(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// A verified item's dependencies or contents do not fit the destination graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestError {
+    /// The item was verified elsewhere, but its dependency is not verified here.
+    MissingDependency(DependencyId),
+    ConflictingCommit(CommitHash),
+}
+
+impl fmt::Display for IngestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingDependency(id) => {
+                write!(f, "missing verified destination dependency: {id:?}")
+            }
+            Self::ConflictingCommit(hash) => write!(f, "conflicting commit metadata: {hash:?}"),
+        }
+    }
+}
+
+impl Error for IngestError {}

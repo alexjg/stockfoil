@@ -7,7 +7,9 @@ is in `src/commit_graph.rs`. The entry point is
 
 No codecs, blob preparation, standalone item verification, reconciliation,
 wants/needs/fixups, persistence, or transport are implemented.
-Those belong to later slices, not prerequisites for testing the decomposition.
+[Verified ingestion](verified_ingestion_api.md) now has API-only stubs; received
+history enters through `ingest(VerifiedItem, ...)`, not raw commit insertion.
+Transport-dependent tests currently compile but do not run through those stubs.
 
 ## What this summary means
 
@@ -22,11 +24,12 @@ loose commits. Neither exposes the auxiliary lower-level fragments at a head.
 Publication uses the graph's existing rules, independently of write permissions
 and `ViewPoint` participation. Revoking an author doesn't change the sedimentree.
 Queued commits are absent until all their parents arrive. Unsigned local work
-and descendants depending on it are withheld until publishable. Existing graph
-policy permits received commits without direct signatures and permits an
-author's later signature to cover that author's earlier commits. The structural
-summary follows that policy; it does **not** certify fragment-local proofs or
-claim that every loose commit has a direct signature.
+and descendants depending on it are withheld until publishable. An author's
+later signature may cover that author's earlier commits. Received history must
+now pass the verified-ingestion boundary (currently stubbed). Summary metadata
+alone still does **not** supply fragment-local proofs or claim that every loose
+commit has a direct signature; exportable evidence is part of the new admission
+contract.
 
 This is not an inventory of independently verifiable encoded items. Blob hashes,
 sizes, encoding, and retained representations belong to a later slice. A
@@ -59,6 +62,11 @@ struct SedimentreeSummary {
 
 impl<P: Clone> CommitGraph<P> {
     fn as_sedimentree(&self) -> SedimentreeView<'_>;
+    fn ingest(
+        &mut self,
+        item: VerifiedItem,
+        payload: impl FnMut(&CommitMeta) -> P,
+    ) -> Result<(), IngestError>;
     fn traverse_fragment<'graph>(
         &'graph self,
         range: &FragmentRange,
@@ -235,8 +243,10 @@ The tests compare both summary forms after operations, covering:
   edges, boundary bypass ordering, global early termination, and borrowed reads
   with payloads whose `Clone` implementation panics.
 
-Run `cargo test --test sedimentree`, or `cargo test --all-targets` for the entire
-project. Assertion messages include the seed and operation for reproduction.
+The verification/admission API migration currently stubs legacy received-item
+fixtures, so use `cargo test --no-run` to check compilation. Once transport is
+implemented, run `cargo test --test sedimentree` or `cargo test --all-targets`.
+Assertion messages include the seed and operation for reproduction.
 The default is eight DAGs; increase `SEDIMENTREE_TEST_CASES` for longer runs.
 Reproduce an individual case with, for example:
 

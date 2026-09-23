@@ -1,6 +1,9 @@
 //! Public-API properties for summaries, canonical fragment exports, and borrowed reads.
 //! The oracle knows only envelopes, arrival/local flags, and signature events;
 //! it never asks the graph for delivery, ancestry, depth, or fragment membership.
+//! TODO: migrate legacy unsigned receipts, queue schedules, and the publication
+//! model to proof-bearing admission. Assertions remain intact in this compile-only
+//! migration; merge transport is also awaiting verified-item support.
 mod support;
 
 use std::{
@@ -407,7 +410,7 @@ fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_c
         let mut model = Model::default();
         for node in 0..=13 {
             let meta = &case.commits[node];
-            graph.ingest_commit(meta.clone(), hash(meta));
+            support::receive_commit(&mut graph, meta.clone(), hash(meta));
             model.ingest(meta, false);
             check(&graph, &model, case, &format!("backbone node={node}"));
             let (canonical, minimized) = summaries(&graph);
@@ -491,14 +494,14 @@ fn every_arrival_matches_the_walk_in_causal_reverse_and_shuffled_orders() {
             check(&graph, &model, case, "empty");
             for (step, node) in order.into_iter().enumerate() {
                 let meta = &case.commits[node];
-                graph.ingest_commit(meta.clone(), hash(meta));
+                support::receive_commit(&mut graph, meta.clone(), hash(meta));
                 model.ingest(meta, false);
                 let event = format!("schedule={schedule}, step={step}, node={node}");
                 check(&graph, &model, case, &event);
                 // Both queued and delivered duplicates are exercised, including
                 // parent arrivals that release multiple queued descendants.
                 let snapshot = summaries(&graph);
-                graph.ingest_commit(meta.clone(), hash(meta));
+                support::receive_commit(&mut graph, meta.clone(), hash(meta));
                 check(&graph, &model, case, &format!("{event}, duplicate"));
                 assert_eq!(summaries(&graph), snapshot, "{event}");
             }
@@ -522,8 +525,11 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                 let mask = rng.random_range(1..=3);
                 for replica in 0..2 {
                     if mask & (1 << replica) != 0 {
-                        graphs[replica]
-                            .ingest_commit(case.commits[node].clone(), hash(&case.commits[node]));
+                        support::receive_commit(
+                            &mut graphs[replica],
+                            case.commits[node].clone(),
+                            hash(&case.commits[node]),
+                        );
                         models[replica].ingest(&case.commits[node], false);
                         check(
                             &graphs[replica],
@@ -621,7 +627,7 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             if local {
                 graph.ingest_local_commit(meta.clone(), hash(meta));
             } else {
-                graph.ingest_commit(meta.clone(), hash(meta));
+                support::receive_commit(&mut graph, meta.clone(), hash(meta));
             }
             model.ingest(meta, local);
             check(
@@ -659,12 +665,12 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             if local {
                 graph.ingest_local_commit(meta.clone(), hash(meta));
             } else {
-                graph.ingest_commit(meta.clone(), hash(meta));
+                support::receive_commit(&mut graph, meta.clone(), hash(meta));
             }
             model.ingest(meta, local);
             let event = format!("publication step={step}, node={node}, local={local}");
             check(&graph, &model, case, &event);
-            graph.ingest_commit(meta.clone(), hash(meta));
+            support::receive_commit(&mut graph, meta.clone(), hash(meta));
             check(
                 &graph,
                 &model,
@@ -757,11 +763,11 @@ fn fragment_reads_validate_heads_and_exact_max_level_boundaries_before_callbacks
     assert!(graph.publishable_commit(&head).is_none());
     assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
 
-    graph.ingest_commit(case.commits[6].clone(), head);
+    support::receive_commit(&mut graph, case.commits[6].clone(), head);
     assert!(graph.publishable_commit(&head).is_none());
     assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
     for meta in &case.commits {
-        graph.ingest_commit(meta.clone(), hash(meta));
+        support::receive_commit(&mut graph, meta.clone(), hash(meta));
     }
     let shallow = hash(&case.commits[0]);
     assert_read_error(
@@ -828,7 +834,7 @@ fn boundary_bypass_edges_order_parents_before_lower_hash_boundaries_and_break_is
     for case in cases() {
         let mut graph = CommitGraph::new();
         for meta in &case.commits {
-            graph.ingest_commit(meta.clone(), hash(meta));
+            support::receive_commit(&mut graph, meta.clone(), hash(meta));
         }
         let range = case_range(case, 6);
         let mut actual = Vec::new();
@@ -886,7 +892,7 @@ fn local_fragment_reads_wait_for_signatures_before_or_after_arrival() {
         assert!(graph.publishable_commit(&range.head).is_none());
         assert_read_error(&graph, &range, FragmentReadError::MissingCommit(range.head));
         for meta in &case.commits[..8] {
-            graph.ingest_commit(meta.clone(), hash(meta));
+            support::receive_commit(&mut graph, meta.clone(), hash(meta));
         }
         if !signature_first {
             assert!(graph.publishable_commit(&range.head).is_none());
@@ -896,7 +902,7 @@ fn local_fragment_reads_wait_for_signatures_before_or_after_arrival() {
                 FragmentReadError::NotPublishable(range.head),
             );
             // A received duplicate cannot launder local provenance.
-            graph.ingest_commit(case.commits[8].clone(), range.head);
+            support::receive_commit(&mut graph, case.commits[8].clone(), range.head);
             sign(&mut graph, &key(2), range.head);
             assert_read_error(
                 &graph,
@@ -933,7 +939,7 @@ fn signed_descendant_stays_withheld_behind_another_authors_local_ancestor() {
     for signature_first in [false, true] {
         let mut graph = CommitGraph::new();
         for meta in &case.commits[..8] {
-            graph.ingest_commit(meta.clone(), hash(meta));
+            support::receive_commit(&mut graph, meta.clone(), hash(meta));
         }
         graph.ingest_local_commit(ancestor.clone(), hash(ancestor));
         if signature_first {
@@ -990,7 +996,7 @@ fn repeated_parent_edges_export_each_member_once() {
             order.reverse();
         }
         for meta in order {
-            graph.ingest_commit(meta.clone(), hash(meta));
+            support::receive_commit(&mut graph, meta.clone(), hash(meta));
         }
         let mut seen = Vec::new();
         graph
@@ -1016,7 +1022,7 @@ fn fragment_and_covered_commit_reads_borrow_without_cloning_payloads() {
     let mut graph = CommitGraph::new();
     // Reverse order exercises queue drainage with these payloads as well.
     for meta in case.commits[..7].iter().rev() {
-        graph.ingest_commit(meta.clone(), NoClone(hash(meta)));
+        support::receive_commit(&mut graph, meta.clone(), NoClone(hash(meta)));
     }
     let read = |graph: &CommitGraph<NoClone>| {
         let range = case_range(case, 6);
@@ -1056,7 +1062,7 @@ fn fragment_and_covered_commit_reads_borrow_without_cloning_payloads() {
     };
     read(&graph);
     for meta in &case.commits[7..=8] {
-        graph.ingest_commit(meta.clone(), NoClone(hash(meta)));
+        support::receive_commit(&mut graph, meta.clone(), NoClone(hash(meta)));
     }
     // The fragment at 6 is now nested inside 8 and omitted by minimization;
     // neither its range nor any covered commit loses read access.

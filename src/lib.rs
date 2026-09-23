@@ -5,7 +5,15 @@
 mod author;
 pub use author::Author;
 mod errors;
-pub use errors::{DiffError, FragmentReadError, QueryError, ResolveError, SignatureError};
+pub use errors::{
+    DiffError, FragmentReadError, IngestError, QueryError, ResolveError, SignatureError,
+    VerificationError,
+};
+mod ingest;
+pub use ingest::{
+    DependencyId, SignatureEvidence, UnverifiedItem, VerifiedDependencies, VerifiedDependency,
+    VerifiedItem,
+};
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;

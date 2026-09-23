@@ -1,4 +1,6 @@
 //! Delivery-only OR-set example. The MVR demo exercises authentication and permissions.
+//! Local signing and signature-backed export remain deferred; local edits use the
+//! local ingestion path, not received-history admission.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -46,7 +48,7 @@ impl OrSet {
             actor: self.actor.clone(),
             ops: vec![Op::Add { value }],
         };
-        self.ingest_commit(
+        self.ingest_local_commit(
             self.graph.commit_by(self.actor.author(), &commit.encode()),
             commit,
         );
@@ -71,7 +73,7 @@ impl OrSet {
             actor: self.actor.clone(),
             ops: vec![Op::Remove { predecessors }],
         };
-        self.ingest_commit(
+        self.ingest_local_commit(
             self.graph.commit_by(self.actor.author(), &commit.encode()),
             commit,
         );
@@ -94,9 +96,9 @@ impl OrSet {
         self.evaluate(&heads_before);
     }
 
-    pub fn ingest_commit(&mut self, meta: CommitMeta, commit: OrSetCommit) {
+    fn ingest_local_commit(&mut self, meta: CommitMeta, commit: OrSetCommit) {
         let heads_before = self.graph.delivered_heads().collect::<Vec<_>>();
-        self.graph.ingest_commit(meta, commit);
+        self.graph.ingest_local_commit(meta, commit);
         self.evaluate(&heads_before);
     }
 

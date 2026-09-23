@@ -18,8 +18,9 @@ use crate::{
 /// not an arbitrary `P`. Callers must validate received payload bytes against
 /// [`CommitMeta::payload_hash`] before ingestion or use.
 ///
-/// Cloning preserves local provenance. To create another replica without sharing
-/// unsigned local trust, create a fresh graph and use [`Self::merge`].
+/// Cloning preserves local provenance. Received history must pass sedimentree
+/// verification and enter through [`Self::ingest`], never raw commit insertion.
+/// Verification, admission, and peer merging are currently API-only stubs.
 #[derive(Clone)]
 pub struct CommitGraph<P> {
     nodes: NodeStore,
@@ -127,13 +128,36 @@ impl<P: Clone> CommitGraph<P> {
         false
     }
 
-    /// Ingest a commit, queuing it if any parents are missing.
-    /// The caller must bind `data` to [`CommitMeta::payload_hash`]; this generic
-    /// container has no way to encode or verify an arbitrary `P`.
-    /// Also inserts any queued commits made ready by this commit, recursively.
-    /// Duplicates (including queued commits) keep their original payload.
-    /// Commits whose dependencies never arrive remain queued indefinitely.
-    pub fn ingest_commit(&mut self, meta: CommitMeta, data: P) {
+    /// Admit verified sedimentree history. The destination must already have the
+    /// item's verified dependencies; verification against another provider does
+    /// not imply that those dependencies are present here.
+    ///
+    /// Checks dependencies and conflicts before graph mutation or payload
+    /// callbacks. For each newly admitted commit, `payload` supplies application
+    /// data or a storage handle; duplicates preserve existing data. Neither this
+    /// method nor metadata verification checks the bytes of an opaque `P`.
+    /// Retains the item's verification evidence for later exports.
+    ///
+    /// Currently unimplemented.
+    ///
+    /// ```compile_fail
+    /// use stockfoil::{CommitGraph, UnverifiedItem};
+    /// fn bypass(graph: &mut CommitGraph<()>, item: UnverifiedItem) {
+    ///     graph.ingest(item, |_| ()).unwrap();
+    /// }
+    /// ```
+    pub fn ingest(
+        &mut self,
+        _item: crate::VerifiedItem,
+        _payload: impl FnMut(&CommitMeta) -> P,
+    ) -> Result<(), crate::IngestError> {
+        todo!("admit a verified sedimentree item with its evidence")
+    }
+
+    // Internal delivery machinery for local edits and, eventually, successfully
+    // admitted items. This is not a public received-history entry point.
+    // Queues missing parents and preserves the first payload for duplicates.
+    fn insert_commit(&mut self, meta: CommitMeta, data: P) {
         if self.by_hash.contains_key(meta.hash())
             || self
                 .pending
@@ -334,54 +358,11 @@ impl<P: Clone> CommitGraph<P> {
         self.publishable_nodes()[idx.0].then(|| (&self.nodes[idx].meta, &self.store[&idx]))
     }
 
-    /// Exchange publishable history and signature evidence, never permissions or
-    /// local trust. Received detached commits can be forwarded too.
-    pub fn merge(&mut self, other: &Self) {
-        let publishable = other.publishable_nodes();
-        let mut blocked = other
-            .nodes
-            .0
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !publishable[*i])
-            .map(|(_, node)| *node.meta.hash())
-            .collect::<HashSet<_>>();
-        // Keep queued local work, and any queued descendants of withheld work,
-        // off the wire regardless of the order in which they were received.
-        blocked.extend(
-            other
-                .pending
-                .iter()
-                .filter(|(meta, _)| other.local.contains(meta.hash()))
-                .map(|(meta, _)| *meta.hash()),
-        );
-        loop {
-            let before = blocked.len();
-            for (meta, _) in &other.pending {
-                if meta.parents().iter().any(|p| blocked.contains(p)) {
-                    blocked.insert(*meta.hash());
-                }
-            }
-            if blocked.len() == before {
-                break;
-            }
-        }
-        for (author, signatures) in &other.signatures {
-            for (hash, signature) in signatures {
-                self.ingest_signature(*author, *hash, *signature)
-                    .expect("source graph only stores verified signatures");
-            }
-        }
-        for (idx, node) in &other.nodes {
-            if publishable[idx.0] {
-                self.ingest_commit(node.meta.clone(), other.store[&idx].clone());
-            }
-        }
-        for (meta, data) in &other.pending {
-            if !blocked.contains(meta.hash()) {
-                self.ingest_commit(meta.clone(), data.clone());
-            }
-        }
+    /// Exchange history through verified sedimentree items, never permissions
+    /// or local trust. Currently unimplemented: peer exchange must use verification
+    /// and [`Self::ingest`], not the former raw-commit forwarding path.
+    pub fn merge(&mut self, _other: &Self) {
+        todo!("exchange and verify sedimentree items before ingestion")
     }
 
     /// Visit each ready commit once, parents before children, excluding queued commits.
@@ -468,7 +449,7 @@ impl<P: Clone> CommitGraph<P> {
             return;
         }
         self.local.insert(*meta.hash());
-        self.ingest_commit(meta, data);
+        self.insert_commit(meta, data);
     }
 
     /// Verify a signature over the raw commit hash, possibly before the commit
@@ -720,6 +701,14 @@ impl<P: Clone> CommitGraph<P> {
                 authenticated && permitted
             })
             .collect())
+    }
+}
+
+impl<P: Clone> crate::VerifiedDependencies for CommitGraph<P> {
+    /// Resolve only verified history. Unsigned local commits cannot provide
+    /// witnesses merely because their metadata is present in this graph.
+    fn get(&self, _id: &crate::DependencyId) -> Option<crate::VerifiedDependency<'_>> {
+        todo!("resolve retained verification evidence, not mere publication status")
     }
 }
 

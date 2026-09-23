@@ -10,7 +10,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use stockfoil::{
     Author, BlobHash, CommitGraph, CommitHash, CommitMeta, ResolveError, Signature, SignatureError,
-    ViewPoint, Vis, WritePermission,
+    SignatureEvidence, UnverifiedItem, ViewPoint, Vis, WritePermission,
 };
 
 pub struct MvRegisterMap {
@@ -23,8 +23,9 @@ pub struct MvRegisterMap {
     local_view_points: Vec<ViewPoint>,
 }
 
-/// A published assignment's envelope and canonical payload bytes. Signatures
-/// travel separately. The graph metadata stays opaque to document callers.
+/// A published assignment's envelope and canonical payload bytes. This legacy
+/// message lacks the signature evidence required for verified receipt; its wire
+/// format and proof transport remain deferred. Graph metadata stays opaque.
 #[derive(Clone)]
 pub struct AssignmentMessage {
     meta: CommitMeta,
@@ -164,8 +165,8 @@ impl MvRegisterMap {
         self.refresh();
     }
 
-    /// Export assignment messages, withholding unsigned local edits. Unlike
-    /// `merge`, this does not transfer signature evidence.
+    /// Export assignment messages, withholding unsigned local edits. Proof export
+    /// is still deferred, so these messages alone cannot support verified receipt.
     pub fn export_assignments(&self) -> Vec<AssignmentMessage> {
         let mut messages = Vec::new();
         self.graph.traverse_publishable(|meta, assignment| {
@@ -178,17 +179,31 @@ impl MvRegisterMap {
         messages
     }
 
-    /// Validate received bytes before decoding or storing an assignment. Receipt
-    /// alone does not authenticate it, even if it claims our own author identity.
+    /// Validate payload bytes, then verify metadata and evidence before admission.
+    /// Legacy tests expecting unsigned receipt need a later behavioral migration
+    /// to proof-bearing messages once verification and admission are implemented.
     pub fn receive_assignment(&mut self, message: AssignmentMessage) -> Result<(), &'static str> {
         if &BlobHash::of_contents(&message.payload) != message.meta.payload_hash() {
             return Err("assignment does not match the commit's payload hash");
         }
-        let assignment =
+        let assignment: Assignment =
             bcs::from_bytes(&message.payload).map_err(|_| "invalid assignment encoding")?;
-        self.graph.ingest_commit(message.meta, assignment);
+        let signatures = Self::received_signature_evidence(&message);
+        let verified = UnverifiedItem::Commit {
+            meta: message.meta,
+            signatures,
+        }
+        .verify(&self.graph)
+        .map_err(|_| "assignment verification failed")?;
+        self.graph
+            .ingest(verified, |_| assignment.clone())
+            .map_err(|_| "assignment admission failed")?;
         self.refresh();
         Ok(())
+    }
+
+    fn received_signature_evidence(_message: &AssignmentMessage) -> Vec<SignatureEvidence> {
+        todo!("transport genuine signature evidence with received assignment messages")
     }
 
     fn refresh(&mut self) {
