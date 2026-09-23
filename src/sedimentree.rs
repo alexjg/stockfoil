@@ -3,7 +3,7 @@
 //! This is not an inventory of encoded blobs or a proof of fragment-local author
 //! coverage. Encoding, blob metadata, sealing, and reconciliation are out of scope.
 
-use std::{collections::BTreeSet, marker::PhantomData};
+use std::collections::BTreeSet;
 
 use crate::CommitHash;
 
@@ -33,28 +33,37 @@ pub struct Fragment {
     pub checkpoints: BTreeSet<Checkpoint>,
 }
 
-/// A deterministic, reduced structural cover for one graph.
+/// A deterministic, non-minimal structural summary for one graph.
 ///
-/// Includes publishable delivered history, independently of write permissions
-/// and viewpoints. Uses the graph's existing publication rules, not the stronger
-/// proof requirements that independently verifiable blobs will eventually need.
-/// Entries are sorted by full commit hash / fragment range.
+/// Contains one canonical fragment for every publishable delivered commit of
+/// nonzero depth, including fragments wholly contained in others. Loose commits
+/// are exactly the publishable delivered commits covered by no fragment.
+/// Minimization is a separate, deferred operation.
+///
+/// Independent of write permissions and viewpoints. Uses the graph's existing
+/// publication rules, not the stronger proof requirements that independently
+/// verifiable blobs will eventually need. Entries are sorted by full commit hash
+/// / fragment range; checkpoint identifiers are truncated only in metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SedimentreeSummary {
     pub loose_commits: Vec<LooseCommit>,
     pub fragments: Vec<Fragment>,
 }
 
-/// Borrows maintained metadata indexes, never commit payloads.
-/// Creating a view and reading its summary do not decompose the graph again.
+/// Borrows maintained topology metadata, never commit payloads.
+/// Creating a view computes publication eligibility without rebuilding fragments.
 pub struct SedimentreeView<'graph> {
-    _graph: PhantomData<&'graph ()>,
+    pub(crate) nodes: &'graph crate::commit_graph::NodeStore,
+    pub(crate) fragments: &'graph crate::commit_graph::FragmentStore,
+    pub(crate) publishable: Vec<bool>,
 }
 
 impl SedimentreeView<'_> {
-    /// Copy the current cover's metadata, with work proportional to summary size.
-    /// No payload access, graph traversal, encoding, or IO is performed.
+    /// Return an owned, non-minimal snapshot of publishable history.
+    /// Scans the node and fragment indexes to select uncovered loose commits and
+    /// sort the output. Does not traverse parent edges, rebuild fragment ranges,
+    /// access payloads, encode anything, or perform IO.
     pub fn summary(&self) -> SedimentreeSummary {
-        todo!()
+        self.fragments.summary(self.nodes, &self.publishable)
     }
 }
