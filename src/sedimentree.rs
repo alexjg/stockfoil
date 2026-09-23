@@ -3,9 +3,9 @@
 //! This is not an inventory of encoded blobs or a proof of fragment-local author
 //! coverage. Encoding, blob metadata, sealing, and reconciliation are out of scope.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
-use crate::CommitHash;
+use crate::{CommitHash, commit_graph::NodeIdx};
 
 /// Inclusive head and boundary commits of a canonical fragment.
 /// A walk stops at ancestors at least as deep as the head, or at roots.
@@ -33,12 +33,12 @@ pub struct Fragment {
     pub checkpoints: BTreeSet<Checkpoint>,
 }
 
-/// A deterministic, non-minimal structural summary for one graph.
+/// A deterministic structural summary for one graph.
 ///
-/// Contains one canonical fragment for every publishable delivered commit of
-/// nonzero depth, including fragments wholly contained in others. Loose commits
-/// are exactly the publishable delivered commits covered by no fragment.
-/// Minimization is a separate, deferred operation.
+/// [`SedimentreeView::summary`] includes every canonical fragment, whereas
+/// [`SedimentreeView::minimized_summary`] omits structurally contained fragments.
+/// Loose commits are exactly the publishable delivered commits covered by no
+/// fragment, and are the same in both representations.
 ///
 /// Independent of write permissions and viewpoints. Uses the graph's existing
 /// publication rules, not the stronger proof requirements that independently
@@ -55,15 +55,33 @@ pub struct SedimentreeSummary {
 pub struct SedimentreeView<'graph> {
     pub(crate) nodes: &'graph crate::commit_graph::NodeStore,
     pub(crate) fragments: &'graph crate::commit_graph::FragmentStore,
+    pub(crate) by_hash: &'graph HashMap<CommitHash, NodeIdx>,
     pub(crate) publishable: Vec<bool>,
 }
 
 impl SedimentreeView<'_> {
     /// Return an owned, non-minimal snapshot of publishable history.
-    /// Scans the node and fragment indexes to select uncovered loose commits and
-    /// sort the output. Does not traverse parent edges, rebuild fragment ranges,
-    /// access payloads, encode anything, or perform IO.
+    /// Includes one canonical, maximum-level fragment for every nonzero-depth
+    /// head, even if contained in another fragment. Lower-level records at the
+    /// same head are internal traversal structure, not separate summary entries.
+    ///
+    /// Walks fragment links to collect checkpoints and level-one commit parents
+    /// to identify covered commits. Boundaries are read from the maintained
+    /// index. No payload access, encoding, or IO is performed.
     pub fn summary(&self) -> SedimentreeSummary {
-        self.fragments.summary(self.nodes, &self.publishable)
+        self.fragments
+            .summary(self.nodes, self.by_hash, &self.publishable, false)
+    }
+
+    /// Return the minimal cover under structural containment: recursively,
+    /// higher-level fragments contain their lower-level constituent fragments.
+    /// Boundary commits are included without including the fragments they head.
+    ///
+    /// Same-level overlaps (even accidental whole-range containment) are kept.
+    /// This is not minimum set cover or exhaustive commit-set containment
+    /// reduction. Uses the same metadata-only traversals as [`Self::summary`].
+    pub fn minimized_summary(&self) -> SedimentreeSummary {
+        self.fragments
+            .summary(self.nodes, self.by_hash, &self.publishable, true)
     }
 }

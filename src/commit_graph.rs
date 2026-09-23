@@ -41,8 +41,9 @@ pub struct CommitGraph<P> {
 #[derive(Clone)]
 pub(crate) struct Node {
     meta: CommitMeta,
-    // The fragment that this node is the head of, if any
-    headed_fragment: Option<FragmentIdx>,
+    // Entry n is the fragment headed here at level n + 1. Once insertion is
+    // complete, the length is this commit's hash depth.
+    headed_fragments: Vec<FragmentIdx>,
 }
 
 impl<P: Clone> Default for CommitGraph<P> {
@@ -194,69 +195,41 @@ impl<P: Clone> CommitGraph<P> {
         self.heads.insert(hash);
         self.nodes.0.push(Node {
             meta,
-            headed_fragment: None,
+            headed_fragments: Vec::new(),
         });
         self.by_hash.insert(hash, node_idx);
 
-        self.maybe_insert_fragment(hash, node_idx);
+        self.insert_fragments(node_idx);
     }
 
     // Index all delivered history. Publication is filtered when creating a view.
-    fn maybe_insert_fragment(&mut self, head: CommitHash, node: NodeIdx) {
-        let depth = sedimentree_depth(&head);
-        if depth == 0 {
-            return;
-        }
-
-        let mut boundary = Vec::new();
-        let mut checkpoints = BTreeSet::new();
-        let mut loose_members = Vec::new();
-        let mut visited = HashSet::new();
-        let mut stack = self.parents(node).collect::<Vec<_>>();
-        while let Some(idx) = stack.pop() {
-            if !visited.insert(idx) {
-                continue;
-            }
-            let node = &self.nodes[idx];
-            let node_depth = sedimentree_depth(&node.meta.hash());
-
-            if node_depth >= depth {
-                // This is a boundary commit
-                boundary.push(idx);
-            } else if node_depth > 0 {
-                // This isn't a boundary commit, but it is a lower level fragment head, so we can
-                // use it to skip to the boundaries of this fragment
-                //
-                // (Note that we rely on this routine being run after every commit insertion which
-                // means we can assume that any lower level fragment heads have already been
-                // inserted into the fragment store)
-
-                let fragment_idx = node
-                    .headed_fragment
-                    .expect("lower level fragment heads must have been inserted");
-                let fragment = &self.fragments[fragment_idx];
-                checkpoints.insert(crate::Checkpoint(
-                    node.meta.hash().as_bytes()[..12].try_into().unwrap(),
-                ));
-                checkpoints.extend(fragment.checkpoints.iter().copied());
-                stack.extend(fragment.boundary.iter().copied());
+    fn insert_fragments(&mut self, head: NodeIdx) {
+        let depth = sedimentree_depth(self.nodes[head].meta.hash());
+        for level in 1..=depth {
+            let boundary: BTreeSet<_> = if level == 1 {
+                self.nodes
+                    .level_one_members(&self.by_hash, head)
+                    .into_iter()
+                    .filter(|&idx| idx != head && !self.nodes[idx].headed_fragments.is_empty())
+                    .collect()
             } else {
-                // This is neither a boundary commit nor a lower level fragment head so we traverse
-                // as normal
-                loose_members.push(idx);
-                stack.extend(self.parents(idx));
-            }
+                // The same head's lower-level fragment was just inserted.
+                // Every other constituent belongs to an older commit.
+                self.fragments
+                    .lower_fragments(&self.nodes, head, level)
+                    .into_iter()
+                    .flat_map(|idx| self.fragments[idx].boundary.iter().copied())
+                    .filter(|&idx| self.nodes[idx].headed_fragments.len() >= level)
+                    .collect()
+            };
+            let idx = FragmentIdx(self.fragments.0.len());
+            self.fragments.0.push(Fragment {
+                head,
+                level,
+                boundary: boundary.into_iter().collect(),
+            });
+            self.nodes[head].headed_fragments.push(idx);
         }
-
-        let fragment_idx = FragmentIdx(self.fragments.0.len());
-        self.fragments.0.push(Fragment {
-            head: node,
-            boundary,
-            checkpoints,
-            loose_members,
-        });
-
-        self.nodes[node].headed_fragment = Some(fragment_idx);
     }
 
     /// Borrow the non-minimal sedimentree index, filtering for publishable history.
@@ -266,6 +239,7 @@ impl<P: Clone> CommitGraph<P> {
         SedimentreeView {
             nodes: &self.nodes,
             fragments: &self.fragments,
+            by_hash: &self.by_hash,
             publishable: self.publishable_nodes(),
         }
     }
@@ -666,6 +640,30 @@ pub struct NodeIdx(usize);
 #[derive(Clone)]
 pub(crate) struct NodeStore(Vec<Node>);
 
+impl NodeStore {
+    // Return all the commits which are reachable from `head` by traversing
+    // parent edges without crossing a fragment boundary. I.e. if `head` is a 
+    // level one commit then this returns the members of the fragment headed
+    // by `head`.
+    fn level_one_members(
+        &self,
+        by_hash: &HashMap<CommitHash, NodeIdx>,
+        head: NodeIdx,
+    ) -> HashSet<NodeIdx> {
+        let mut members = HashSet::new();
+        let mut stack = vec![head];
+        while let Some(idx) = stack.pop() {
+            if !members.insert(idx) {
+                continue;
+            }
+            if idx == head || self[idx].headed_fragments.is_empty() {
+                stack.extend(self[idx].meta.parents().iter().map(|hash| by_hash[hash]));
+            }
+        }
+        members
+    }
+}
+
 impl<'a> IntoIterator for &'a NodeStore {
     type Item = (NodeIdx, &'a Node);
 
@@ -722,33 +720,89 @@ impl Index<EdgeIdx> for EdgeStore {
 #[derive(Clone)]
 struct Fragment {
     head: NodeIdx,
+    level: usize,
     boundary: Vec<NodeIdx>,
-    checkpoints: BTreeSet<crate::Checkpoint>,
-    // Only depth-zero commits visited directly, not those inside skipped
-    // fragments. Those fragments remain in the full index with their own lists.
-    loose_members: Vec<NodeIdx>,
 }
 
 #[derive(Clone)]
 pub(crate) struct FragmentStore(Vec<Fragment>);
 
 impl FragmentStore {
+    // Derive the immediate constituents of a level > 1 fragment. Stop at
+    // boundaries of that level, following only level-(n-1) fragment links.
+    // No contents are stored, and overlapping paths are visited just once.
+    //
+    // I.e. if `head` is a level-n commit, return the level-(n-1) fragments headed by its
+    // level-(n-1) ancestors, stopping at any level-(n-1) boundaries.
+    fn lower_fragments(&self, nodes: &NodeStore, head: NodeIdx, level: usize) -> Vec<FragmentIdx> {
+        debug_assert!(level > 1);
+        let mut result = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack = vec![nodes[head].headed_fragments[level - 2]];
+        while let Some(idx) = stack.pop() {
+            if !visited.insert(idx) {
+                continue;
+            }
+            result.push(idx);
+            for &boundary in &self[idx].boundary {
+                let headed = &nodes[boundary].headed_fragments;
+                if headed.len() < level {
+                    // A level-(n-1) boundary is at least that deep, so this
+                    // boundary has depth exactly n-1 and heads that fragment.
+                    stack.push(headed[level - 2]);
+                }
+            }
+        }
+        result
+    }
+
     pub(crate) fn summary(
         &self,
         nodes: &NodeStore,
+        by_hash: &HashMap<CommitHash, NodeIdx>,
         publishable: &[bool],
+        minimize: bool,
     ) -> crate::SedimentreeSummary {
-        let mut covered = vec![false; nodes.0.len()];
+        let mut covered_fragments = vec![false; self.0.len()];
+        let mut covered_commits = vec![false; nodes.0.len()];
         let mut fragments = Vec::new();
-        for fragment in &self.0 {
-            if !publishable[fragment.head.0] {
+        // Every constituent was inserted before its containing fragment, even
+        // at the same head. Reverse insertion order is therefore a topological
+        // order of structural containment; no separate level sort is needed.
+        for (index, fragment) in self.0.iter().enumerate().rev() {
+            if !publishable[fragment.head.0]
+                || fragment.level != nodes[fragment.head].headed_fragments.len()
+                || (minimize && covered_fragments[index])
+            {
                 continue;
             }
-            // A publishable head has publishable ancestors. Since we keep all
-            // fragments, their direct loose-member lists together cover every
-            // depth-zero member, including those hidden by skip links.
-            for member in &fragment.loose_members {
-                covered[member.0] = true;
+            // Emit only the canonical (maximum-level) fragment at each head.
+            // Lower-level records are internal traversal structure.
+            let mut checkpoints = BTreeSet::new();
+            let mut visited = HashSet::new();
+            let mut stack = vec![FragmentIdx(index)];
+            while let Some(idx) = stack.pop() {
+                if !visited.insert(idx) {
+                    continue;
+                }
+                let constituent = &self[idx];
+                if constituent.head != fragment.head {
+                    checkpoints.insert(crate::Checkpoint(
+                        nodes[constituent.head].meta.hash().as_bytes()[..12]
+                            .try_into()
+                            .unwrap(),
+                    ));
+                }
+                if constituent.level > 1 {
+                    stack.extend(self.lower_fragments(nodes, constituent.head, constituent.level));
+                } else if !covered_fragments[idx.0] {
+                    // Level-zero constituents are individual commits. Covering
+                    // a boundary commit does NOT cover the fragment it heads.
+                    for member in nodes.level_one_members(by_hash, constituent.head) {
+                        covered_commits[member.0] = true;
+                    }
+                }
+                covered_fragments[idx.0] = true;
             }
             fragments.push(crate::Fragment {
                 range: crate::FragmentRange {
@@ -759,13 +813,12 @@ impl FragmentStore {
                         .map(|idx| *nodes[*idx].meta.hash())
                         .collect(),
                 },
-                checkpoints: fragment.checkpoints.clone(),
+                checkpoints,
             });
         }
         let mut loose_commits = Vec::new();
         for (idx, node) in nodes {
-            // Every nonzero-depth node has its own fragment, even a root.
-            if publishable[idx.0] && node.headed_fragment.is_none() && !covered[idx.0] {
+            if publishable[idx.0] && !covered_commits[idx.0] {
                 loose_commits.push(crate::LooseCommit {
                     commit: *node.meta.hash(),
                     parents: node.meta.parents().iter().copied().collect(),
@@ -781,7 +834,7 @@ impl FragmentStore {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct FragmentIdx(usize);
 
 impl Index<FragmentIdx> for FragmentStore {

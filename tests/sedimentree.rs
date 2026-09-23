@@ -1,4 +1,4 @@
-//! Public-API properties for the non-minimal structural summary.
+//! Public-API properties for canonical and structurally minimized summaries.
 //! The oracle knows only envelopes, arrival/local flags, and signature events;
 //! it never asks the graph for delivery, ancestry, depth, or fragment membership.
 mod support;
@@ -89,14 +89,18 @@ fn cases() -> &'static [Case] {
                         8 => (2, vec![7]), // contains ALL earlier depth-1 fragments
                         9 => (0, vec![8]),
                         10 => (1, vec![9]), // must stop at a strictly deeper boundary
-                        11 => (0, vec![4]), // fork from an old, now nested checkpoint
-                        12 => (1, vec![11, 1]),
-                        13 => (2, vec![10, 12]), // equal-depth stop at 8; checkpoint 10
-                        14 => (1, vec![13, 0]),  // boundary and root reached independently
+                        11 => (0, vec![9]),
+                        12 => (0, vec![11]),
+                        // No depth-1 checkpoint between depth-2 heads 13 and 8:
+                        // 13 must close its own level-1 fragment over a loose chain.
+                        13 => (2, vec![12]),
+                        14 => (1, vec![13, 0]), // boundary and root reached independently
                         15 => (0, vec![0]),
                         16 => (1, vec![15]),
                         17 => (0, vec![16]),
                         18 => (1, vec![17, 0]), // shortcut behind a boundary, leaving a hole
+                        19 => (0, vec![4]),     // fork from an old, now nested checkpoint
+                        20 => (1, vec![19, 1]),
                         39 => {
                             // Close the randomized portion too, exercising skip
                             // links through its arbitrary forks and merges.
@@ -202,10 +206,19 @@ impl Model {
 
 // Intentionally a plain parent walk for EVERY publishable nonzero head. There
 // is no fragment reuse, covering index, subset reduction, or production helper.
-fn oracle(commits: &[CommitMeta], published: &BTreeSet<CommitHash>) -> SedimentreeSummary {
+// Keep full-hash membership alongside the unchanged canonical summary oracle;
+// reduction must not infer membership from truncated checkpoint metadata.
+fn oracle(
+    commits: &[CommitMeta],
+    published: &BTreeSet<CommitHash>,
+) -> (
+    SedimentreeSummary,
+    HashMap<CommitHash, BTreeSet<CommitHash>>,
+) {
     let known: HashMap<_, _> = commits.iter().map(|meta| (hash(meta), meta)).collect();
     let mut covered = BTreeSet::new();
     let mut fragments = Vec::new();
+    let mut memberships = HashMap::new();
     for &head in published {
         let head_depth = depth(head);
         if head_depth == 0 {
@@ -232,7 +245,8 @@ fn oracle(commits: &[CommitMeta], published: &BTreeSet<CommitHash>) -> Sedimentr
             // Shallow roots naturally end the walk without becoming boundaries.
             stack.extend(known[&h].parents());
         }
-        covered.extend(members);
+        covered.extend(members.iter().copied());
+        memberships.insert(head, members);
         fragments.push(Fragment {
             range: FragmentRange { head, boundary },
             checkpoints,
@@ -247,22 +261,138 @@ fn oracle(commits: &[CommitMeta], published: &BTreeSet<CommitHash>) -> Sedimentr
         .collect();
     loose_commits.sort_by_key(|commit| commit.commit);
     fragments.sort_by(|a, b| a.range.cmp(&b.range));
-    SedimentreeSummary {
-        loose_commits,
-        fragments,
-    }
+    (
+        SedimentreeSummary {
+            loose_commits,
+            fragments,
+        },
+        memberships,
+    )
+}
+
+fn minimized_oracle(
+    canonical: &SedimentreeSummary,
+    memberships: &HashMap<CommitHash, BTreeSet<CommitHash>>,
+) -> SedimentreeSummary {
+    let mut minimized = canonical.clone();
+    minimized.fragments.retain(|fragment| {
+        let head = fragment.range.head;
+        let head_depth = depth(head);
+        assert!(head_depth > 0);
+        // Strict depth excludes both the other head and its inclusive >=-depth
+        // boundaries, so this is precisely nonzero interior membership. In
+        // particular, equal-depth set containment must NOT remove a fragment.
+        !memberships
+            .iter()
+            .any(|(&other_head, members)| head_depth < depth(other_head) && members.contains(&head))
+    });
+    minimized
+}
+
+fn summaries(graph: &CommitGraph<()>) -> (SedimentreeSummary, SedimentreeSummary) {
+    let view = graph.as_sedimentree();
+    (view.summary(), view.minimized_summary())
 }
 
 fn check(graph: &CommitGraph<()>, model: &Model, case: &Case, event: &str) {
     let published = model.published(&case.commits);
+    let (expected, memberships) = oracle(&case.commits, &published);
+    let (canonical, minimized) = summaries(graph);
     assert_eq!(
-        graph.as_sedimentree().summary(),
-        oracle(&case.commits, &published),
+        canonical,
+        expected,
         "seed={:#x}, {event}, arrived={}, published={}",
         case.seed,
         model.arrived.len(),
         published.len(),
     );
+    assert_eq!(
+        minimized,
+        minimized_oracle(&expected, &memberships),
+        "seed={:#x}, {event}, minimized, arrived={}, published={}",
+        case.seed,
+        model.arrived.len(),
+        published.len(),
+    );
+    assert_eq!(
+        minimized.loose_commits, canonical.loose_commits,
+        "seed={:#x}, {event}, minimization must preserve loose commits",
+        case.seed,
+    );
+}
+
+#[test]
+fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_chain() {
+    for case in cases() {
+        let mut graph = CommitGraph::new();
+        let mut model = Model::default();
+        for node in 0..=13 {
+            let meta = &case.commits[node];
+            graph.ingest_commit(meta.clone(), ());
+            model.ingest(meta, false);
+            check(&graph, &model, case, &format!("backbone node={node}"));
+            let (canonical, minimized) = summaries(&graph);
+            if node == 6 {
+                let smaller = hash(&case.commits[4]);
+                let larger = hash(&case.commits[6]);
+                let (_, memberships) = oracle(&case.commits, &model.published(&case.commits));
+                assert_eq!(depth(smaller), depth(larger));
+                assert!(
+                    memberships[&smaller].is_subset(&memberships[&larger]),
+                    "seed={:#x}, backbone must witness equal-depth containment",
+                    case.seed,
+                );
+                // The redundant edge to 3 reaches 0 behind boundary 4. Thus
+                // fragment 4 is wholly contained in 6 but neither is removable.
+                for summary in [&canonical, &minimized] {
+                    for head in [smaller, larger] {
+                        assert!(
+                            summary.fragments.iter().any(|f| f.range.head == head),
+                            "seed={:#x}, equal-depth contained fragments must survive",
+                            case.seed,
+                        );
+                    }
+                }
+            }
+            if node == 8 {
+                let nested = hash(&case.commits[6]);
+                assert!(canonical.fragments.iter().any(|f| f.range.head == nested));
+                assert!(
+                    !minimized.fragments.iter().any(|f| f.range.head == nested),
+                    "seed={:#x}, a strictly shallower interior head must be removed",
+                    case.seed,
+                );
+            }
+            if node == 13 {
+                let head = hash(&case.commits[13]);
+                let boundary = hash(&case.commits[8]);
+                assert_eq!(depth(head), 2);
+                assert_eq!(depth(boundary), 2);
+                let (_, memberships) = oracle(&case.commits, &model.published(&case.commits));
+                assert_eq!(
+                    memberships[&head],
+                    [8, 9, 11, 12, 13].map(|i| hash(&case.commits[i])).into(),
+                    "seed={:#x}, depth-2 head must close a checkpoint-free loose chain",
+                    case.seed,
+                );
+                for i in [9, 11, 12] {
+                    assert_eq!(depth(hash(&case.commits[i])), 0);
+                }
+                // Observe the same-head level-1 closure only through the public
+                // maximum-depth fragment, without inspecting internal records.
+                for summary in [&canonical, &minimized] {
+                    let fragment = summary
+                        .fragments
+                        .iter()
+                        .find(|f| f.range.head == head)
+                        .unwrap();
+                    assert_eq!(fragment.range.boundary, [boundary].into());
+                    assert!(fragment.checkpoints.is_empty());
+                    assert!(summary.fragments.iter().any(|f| f.range.head == boundary));
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -288,10 +418,10 @@ fn every_arrival_matches_the_walk_in_causal_reverse_and_shuffled_orders() {
                 check(&graph, &model, case, &event);
                 // Both queued and delivered duplicates are exercised, including
                 // parent arrivals that release multiple queued descendants.
-                let snapshot = graph.as_sedimentree().summary();
+                let snapshot = summaries(&graph);
                 graph.ingest_commit(meta.clone(), ());
                 check(&graph, &model, case, &format!("{event}, duplicate"));
-                assert_eq!(graph.as_sedimentree().summary(), snapshot, "{event}");
+                assert_eq!(summaries(&graph), snapshot, "{event}");
             }
             let all = case.commits.iter().map(hash).collect();
             assert_eq!(model.published(&case.commits), all, "seed={:#x}", case.seed);
@@ -324,7 +454,7 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                     }
                 }
             }
-            let snapshots = graphs.each_ref().map(|g| g.as_sedimentree().summary());
+            let snapshots = graphs.each_ref().map(summaries);
             let mut left = graphs[0].clone();
             let mut right = graphs[1].clone();
             check(
@@ -375,7 +505,7 @@ fn partitioned_arrivals_clone_and_merge_converge_in_both_directions() {
                     &format!("round={round}, original replica={replica}"),
                 );
                 assert_eq!(
-                    graphs[replica].as_sedimentree().summary(),
+                    summaries(&graphs[replica]),
                     snapshots[replica],
                     "seed={:#x}, round={round}, clone must be independent",
                     case.seed
@@ -426,25 +556,15 @@ fn randomized_local_publication_and_signature_timing_match_the_walk() {
             "seed={:#x}",
             case.seed
         );
-        let withheld = graph.as_sedimentree().summary();
+        let withheld = summaries(&graph);
         add_signature(&mut graph, &mut model, 2, &case.commits[10]);
         check(&graph, &model, case, "wrong author signature");
-        assert_eq!(
-            graph.as_sedimentree().summary(),
-            withheld,
-            "seed={:#x}",
-            case.seed
-        );
+        assert_eq!(summaries(&graph), withheld, "seed={:#x}", case.seed);
         // A signature targeting a not-yet-delivered descendant cannot cover
         // anything yet, but must become usable when its causal queue drains.
         add_signature(&mut graph, &mut model, 1, &case.commits[13]);
         check(&graph, &model, case, "signature before target arrival");
-        assert_eq!(
-            graph.as_sedimentree().summary(),
-            withheld,
-            "seed={:#x}",
-            case.seed
-        );
+        assert_eq!(summaries(&graph), withheld, "seed={:#x}", case.seed);
 
         let mut order: Vec<_> = (11..case.commits.len()).collect();
         order.shuffle(&mut rng);
