@@ -206,9 +206,9 @@ impl<P: Clone> CommitGraph<P> {
 
         let mut boundary = Vec::new();
         let mut visited = HashSet::new();
-        let mut stack = self.parents(self.by_hash[&head]).collect::<Vec<_>>();
+        let mut stack = self.parents(node).collect::<Vec<_>>();
         while let Some(idx) = stack.pop() {
-            if visited.contains(&idx) {
+            if !visited.insert(idx) {
                 continue;
             }
             let node = &self.nodes[idx];
@@ -224,15 +224,15 @@ impl<P: Clone> CommitGraph<P> {
                 // (Note that we rely on this routine being run after every commit insertion which
                 // means we can assume that any lower level fragment heads have already been
                 // inserted into the fragment store)
-                let fragment = self.fragments.0.iter().find(|fragment| fragment.head ==
-                    idx).expect("previously inserted fragments must be present");
+                
+                let fragment_idx = node.headed_fragment.expect("lower level fragment heads must have been inserted");
+                let fragment = &self.fragments[fragment_idx];
                 stack.extend(fragment.boundary.iter().copied());
             } else {
                 // This is neither a boundary commit nor a lower level fragment head so we traverse
                 // as normal
                 stack.extend(self.parents(idx));
             }
-            visited.insert(idx);
         }
 
         let fragment_idx = FragmentIdx(self.fragments.0.len());
@@ -709,7 +709,7 @@ struct Fragment {
 #[derive(Clone)]
 struct FragmentStore(Vec<Fragment>);
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct FragmentIdx(usize);
 
 impl Index<FragmentIdx> for FragmentStore {
