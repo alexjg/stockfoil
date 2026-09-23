@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    ops::{ControlFlow, Index},
+    ops::{ControlFlow, Index, IndexMut},
 };
 
 use crate::{
@@ -41,6 +41,8 @@ pub struct CommitGraph<P> {
 #[derive(Clone)]
 struct Node {
     meta: CommitMeta,
+    // The fragment that this node is the head of, if any
+    headed_fragment: Option<FragmentIdx>,
 }
 
 impl<P: Clone> Default for CommitGraph<P> {
@@ -190,22 +192,29 @@ impl<P: Clone> CommitGraph<P> {
             self.heads.remove(parent);
         }
         self.heads.insert(hash);
-        self.nodes.0.push(Node { meta });
+        self.nodes.0.push(Node { meta, headed_fragment: None });
         self.by_hash.insert(hash, node_idx);
 
-        self.maybe_insert_fragment(hash);
+        self.maybe_insert_fragment(hash, node_idx);
     }
 
-    fn maybe_insert_fragment(&mut self, head: CommitHash) {
+    fn maybe_insert_fragment(&mut self, head: CommitHash, node: NodeIdx) {
         let depth = sedimentree_depth(&head);
+        if depth == 0 {
+            return;
+        }
 
         let mut boundary = Vec::new();
-        let mut stack = vec![self.by_hash[&head]];
+        let mut visited = HashSet::new();
+        let mut stack = self.parents(self.by_hash[&head]).collect::<Vec<_>>();
         while let Some(idx) = stack.pop() {
+            if visited.contains(&idx) {
+                continue;
+            }
             let node = &self.nodes[idx];
             let node_depth = sedimentree_depth(&node.meta.hash());
 
-            if node_depth == depth {
+            if node_depth >= depth {
                 // This is a boundary commit
                 boundary.push(idx);
             } else if node_depth > 0 {
@@ -223,7 +232,16 @@ impl<P: Clone> CommitGraph<P> {
                 // as normal
                 stack.extend(self.parents(idx));
             }
+            visited.insert(idx);
         }
+
+        let fragment_idx = FragmentIdx(self.fragments.0.len());
+        self.fragments.0.push(Fragment {
+            head: node,
+            boundary,
+        });
+
+        self.nodes[node].headed_fragment = Some(fragment_idx);
 
     }
 
@@ -657,6 +675,12 @@ impl Index<NodeIdx> for NodeStore {
     }
 }
 
+impl IndexMut<NodeIdx> for NodeStore {
+    fn index_mut(&mut self, index: NodeIdx) -> &mut Self::Output {
+        &mut self.0[index.0]
+    }
+}
+
 #[derive(Clone)]
 struct Edge {
     next: Option<EdgeIdx>,
@@ -685,6 +709,7 @@ struct Fragment {
 #[derive(Clone)]
 struct FragmentStore(Vec<Fragment>);
 
+#[derive(Clone)]
 struct FragmentIdx(usize);
 
 impl Index<FragmentIdx> for FragmentStore {
