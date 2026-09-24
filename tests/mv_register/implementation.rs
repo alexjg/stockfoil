@@ -7,10 +7,10 @@ use std::{
 };
 
 use ed25519_dalek::{Signer, SigningKey};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use stockfoil::{
-    Author, BlobHash, CommitGraph, CommitHash, CommitMeta, ItemId, ResolveError, Signature,
-    SignatureError, UnverifiedItem, ViewPoint, Vis, WritePermission,
+    Author, CommitGraph, CommitHash, ResolveError, Signature, SignatureError, ViewPoint, Vis,
+    WritePermission,
 };
 
 pub struct MvRegisterMap {
@@ -24,17 +24,10 @@ pub struct MvRegisterMap {
     local_view_points: Vec<ViewPoint>,
 }
 
-/// A whole certified cover item and every member's canonical payload.
-#[derive(Clone)]
-pub struct AssignmentMessage {
-    pub(super) item: UnverifiedItem,
-    pub(super) payloads: BTreeMap<CommitHash, (CommitMeta, Vec<u8>)>,
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize)]
 struct ActorId([u8; 32]);
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 struct Assignment {
     actor: ActorId,
     key: String,
@@ -183,96 +176,6 @@ impl MvRegisterMap {
     pub fn merge(&mut self, other: &Self) {
         self.graph.merge(&other.graph);
         self.refresh();
-    }
-
-    /// Export whole current minimal-cover items in dependency order. A covered
-    /// assignment is never requested as an independently exportable commit.
-    pub fn export_assignments(&self) -> Vec<AssignmentMessage> {
-        let cover = self.graph.minimal_cover();
-        let mut pending: Vec<_> = cover
-            .loose_commits
-            .into_iter()
-            .map(|entry| ItemId::Commit(entry.commit))
-            .chain(
-                cover
-                    .fragments
-                    .into_iter()
-                    .map(|entry| ItemId::Fragment(entry.range)),
-            )
-            .map(|id| self.graph.export(&id).expect("current cover is exportable"))
-            .collect();
-        let mut messages = Vec::new();
-        let mut exported = BTreeSet::new();
-        while !pending.is_empty() {
-            let index = pending
-                .iter()
-                .position(|item| item.dependencies().all(|hash| exported.contains(&hash)))
-                .expect("cover dependencies must be closed");
-            let item = pending.remove(index);
-            let verified = item
-                .clone()
-                .verify()
-                .expect("exported certificate must verify");
-            let payloads = verified
-                .commits()
-                .map(|meta| {
-                    let (_, assignment) = self
-                        .graph
-                        .publishable_commit(meta.hash())
-                        .expect("cover member must be readable");
-                    exported.insert(*meta.hash());
-                    (
-                        *meta.hash(),
-                        (
-                            meta.clone(),
-                            bcs::to_bytes(assignment).expect("assignment serialization failed"),
-                        ),
-                    )
-                })
-                .collect();
-            messages.push(AssignmentMessage { item, payloads });
-        }
-        messages
-    }
-
-    /// Authenticate the complete item and validate all payload bindings before
-    /// admitting any remote history (including duplicate boundary members).
-    pub fn receive_assignment(&mut self, message: AssignmentMessage) -> Result<(), &'static str> {
-        let verified = message
-            .item
-            .verify()
-            .map_err(|_| "assignment verification failed")?;
-        if message.payloads.len() != verified.commits().count() {
-            return Err("assignment metadata does not match the verified item");
-        }
-        let mut assignments = BTreeMap::new();
-        for meta in verified.commits() {
-            let (claimed, bytes) = message
-                .payloads
-                .get(meta.hash())
-                .ok_or("missing assignment metadata")?;
-            if meta.hash() != claimed.hash()
-                || meta.parents() != claimed.parents()
-                || meta.author() != claimed.author()
-                || meta.payload_hash() != claimed.payload_hash()
-            {
-                return Err("assignment metadata does not match the verified commit");
-            }
-            if &BlobHash::of_contents(bytes) != meta.payload_hash() {
-                return Err("assignment does not match the commit's payload hash");
-            }
-            let assignment: Assignment =
-                bcs::from_bytes(bytes).map_err(|_| "invalid assignment encoding")?;
-            if assignment.actor.0 != *meta.author().as_array() {
-                return Err("assignment actor does not match the commit author");
-            }
-            assignments.insert(*meta.hash(), assignment);
-        }
-        self.graph
-            .ingest(verified, |meta| assignments[meta.hash()].clone())
-            .map_err(|_| "assignment admission failed")?;
-        self.refresh();
-        Ok(())
     }
 
     fn refresh(&mut self) {

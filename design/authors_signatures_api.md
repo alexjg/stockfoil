@@ -12,7 +12,8 @@ sketch: no compatibility APIs or format migrations.
   cannot encode an arbitrary `P`: callers must bind received payloads to this
   hash before ingestion or use. Signature
   verification authenticates the envelope and hash, not an unchecked decoded
-  value. The MVR receive path checks its canonical BCS bytes before storing them.
+  value. The MVR demo hashes its local assignments using BCS, but only merges
+  in-memory replicas; it does not implement an untrusted payload decoder.
 * Remove signatures from `CommitContents`, `CommitMeta`, and the hashed encoding.
   Deliver them separately as `(author, commit_hash, signature)`.
 * Add an authored commit builder, roughly `commit_by(author, payload)`. Parents
@@ -138,7 +139,7 @@ the signed one.
 
 The implementation lives in `tests/mv_register/implementation.rs`. The tests are
 sibling modules, so Rust privacy keeps them out of its graph and assignment store.
-They exercise document reads, historical views, publication, and receive behavior
+They exercise document reads, historical views, signing, and merge behavior
 through the MVR API:
 
 * `author() -> Author` exposes the replica's public signing key.
@@ -155,10 +156,9 @@ through the MVR API:
   and reevaluates the document.
 * `view_point()` and `signed_view_point()` capture working and signature-backed
   document views.
-* `export_assignments()` returns messages with opaque metadata and encoded MVR
-  payloads, withholding unsigned local work. `receive_assignment(message)` checks
-  the payload hash, decodes the assignment, and ingests it as received data.
-  Signatures travel separately; receipt alone doesn't make an assignment visible.
+* `merge(&other)` delegates to `CommitGraph::merge` and refreshes the document.
+  Only authenticated history travels; unsigned local work stays local. There is
+  no separate MVR message format or export/receive API.
 * `get_at(&ViewPoint, key) -> Result<BTreeSet<String>, ResolveError>` reads a
   captured viewpoint without changing the current one. Local captures can be
   read before signing; imported viewpoints must be resolved first.
@@ -197,20 +197,20 @@ The flow test covers:
 1. Capture the initial working and signed viewpoints.
 2. Prepare a local edit without delivering its signature. It appears in the
    working document immediately; the signed view still shows the old value.
-3. Read the working and signed views. Confirm another replica cannot receive the
-   local assignment through export or merge, or read the captured pending view.
-4. Deliver the real signature. The signed view catches up, export is allowed,
+3. Read the working and signed views. Confirm another replica cannot merge the
+   local assignment or read the captured pending view.
+4. Deliver the real signature. The signed view catches up, merging is allowed,
    and the working document doesn't change again.
 5. Recheck the captured views: their values stay fixed. Another replica can now
    read the earlier working view using the published signature evidence.
 
-It also checks a batch covered by one later signature, an overwritten pending
-edit, a valid signature supplied for the wrong hash, duplicate delivery, and
-holding back unsigned descendants and permissions changing while signing is
-pending. The MVR receive tests also cover tampered assignment payloads and
-receiving our own author identity without granting local trust. `tests/auth.rs`
-covers a signed descendant by another author that mustn't leak an unsigned local
-ancestor.
+It also checks checkpoint-backed history, an overwritten pending edit, a valid
+signature supplied for the wrong hash, repeated merges, and holding back unsigned
+descendants while signing is pending. Merging an assignment with our own author
+identity grants neither local trust nor write permission. `tests/auth.rs` covers
+a signed descendant by another author that mustn't leak an unsigned local
+ancestor. Payload-tampering tests belong to an application wire protocol, which
+this demo intentionally does not implement.
 
 The graph-level tests in `tests/auth.rs` deliver commits and signatures separately
 to cover:
