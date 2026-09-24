@@ -101,7 +101,7 @@ impl Error for QueryError {}
 pub enum FragmentReadError {
     /// The head is unknown or still waiting for causal delivery.
     MissingCommit(CommitHash),
-    /// The head has depth zero and therefore heads no fragment.
+    /// No canonical fragment is indexed here (including standalone checkpoints).
     NotFragment(CommitHash),
     /// The head or its ancestors are withheld by publication policy.
     NotPublishable(CommitHash),
@@ -158,12 +158,11 @@ impl Error for VerificationError {
     }
 }
 
-/// A verified item's dependencies or contents do not fit the destination graph.
+/// A verified item's dependencies are not yet authenticated at the destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestError {
     /// The dependency is not authenticated and causally admitted here.
     MissingDependency(CommitHash),
-    ConflictingCommit(CommitHash),
 }
 
 impl fmt::Display for IngestError {
@@ -172,14 +171,13 @@ impl fmt::Display for IngestError {
             Self::MissingDependency(hash) => {
                 write!(f, "missing admitted destination dependency: {hash:?}")
             }
-            Self::ConflictingCommit(hash) => write!(f, "conflicting commit metadata: {hash:?}"),
         }
     }
 }
 
 impl Error for IngestError {}
 
-/// The requested item is not in the current published minimal cover.
+/// The requested item is neither a current cover entry nor its signed head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportError {
     NotInMinimalCover(ItemId),

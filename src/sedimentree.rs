@@ -19,6 +19,8 @@ pub struct FragmentRange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Checkpoint(pub [u8; 12]);
 
+/// An authenticated commit not introduced by an indexed fragment. It can have
+/// any depth; a signed checkpoint announcement does not certify its fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LooseCommit {
     pub commit: CommitHash,
@@ -70,9 +72,10 @@ pub struct SedimentreeView<'graph> {
 
 impl SedimentreeView<'_> {
     /// Return an owned, non-minimal snapshot of publishable history.
-    /// Includes one canonical, maximum-level fragment for every nonzero-depth
-    /// head, even if contained in another fragment. Lower-level records at the
-    /// same head are internal traversal structure, not separate summary entries.
+    /// Includes every indexed canonical, maximum-level fragment, even if
+    /// contained in another. Standalone signed heads do not imply fragments.
+    /// Lower-level records at the same head are internal traversal structure,
+    /// not separate summary entries.
     ///
     /// Walks fragment links to collect checkpoints and level-one commit parents
     /// to identify covered commits. Boundaries are read from the maintained

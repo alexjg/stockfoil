@@ -314,8 +314,16 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
         for meta in [&a, &b, &c] {
             assert!(graph.has_admitted_commit(meta.hash()));
             assert!(graph.publishable_commit(meta.hash()).is_some());
-            // Bob's commit has its own direct signature, but is not a cover entry.
-            assert_not_exportable(graph, ItemId::Commit(*meta.hash()));
+            if meta.hash() == c.hash() {
+                // A cover fragment's signed head can also be announced on its own.
+                graph
+                    .export(&ItemId::Commit(*meta.hash()))
+                    .unwrap()
+                    .verify()
+                    .unwrap();
+            } else {
+                assert_not_exportable(graph, ItemId::Commit(*meta.hash()));
+            }
         }
         let resolved = graph.resolve(&captured).unwrap();
         assert!(resolved.visible(a.hash()).unwrap());

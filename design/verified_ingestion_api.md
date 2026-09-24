@@ -12,12 +12,18 @@ impl UnverifiedItem {
     fn id(&self) -> ItemId;
     fn dependencies(&self) -> impl Iterator<Item = CommitHash>;
     fn verify(self) -> Result<VerifiedItem, VerificationError>;
+    fn verify_fragment(
+        range: FragmentRange,
+        signatures: Vec<SignatureEvidence>,
+        commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
+    ) -> Result<VerifiedItem, VerificationError>;
 }
 
 impl VerifiedItem {
     fn id(&self) -> &ItemId;
     fn dependencies(&self) -> impl Iterator<Item = &CommitHash>;
     fn commits(&self) -> impl Iterator<Item = &CommitMeta>;
+    fn signature_boundary(&self) -> &BTreeMap<Author, BTreeSet<CommitHash>>;
 }
 
 impl<P: Clone> CommitGraph<P> {
@@ -37,27 +43,41 @@ impl<P: Clone> CommitGraph<P> {
 }
 ```
 
-`ItemId` names a loose commit or canonical fragment. `MinimalCover` contains
-`loose_commits` and `fragments`, in deterministic order. An `UnverifiedItem` is
-one of those items with its metadata and signature evidence; payloads travel
+`ItemId` names a standalone commit (at any depth) or canonical fragment.
+`MinimalCover` contains `loose_commits` and `fragments`, in deterministic order.
+An `UnverifiedItem` carries metadata and signature evidence; payloads travel
 separately. `VerifiedItem` has private fields and no unchecked constructor.
+
+The owned item is an in-memory convenience, not a wire representation.
+`verify_fragment` drives an application-supplied fallible decoder incrementally;
+callers need not materialize a decoded `Vec<CommitMeta>` first. Compression can
+omit commit hashes and encode parent references however the application chooses.
+The decoder reconstructs each envelope with `CommitMeta::new` and yields it;
+malformed compressed data can return `VerificationError::InvalidItem`.
+Verification retains metadata for structure checks and admission, not payload
+bytes. A decoder error aborts without producing a certificate.
 
 ## Stateless verification and causal admission
 
 Verification checks only the item:
 
-* Reconstruct every metadata hash; reject duplicates and cycles.
+* Consume canonically constructed metadata; reject duplicates and cycles.
+  `CommitMeta` has private fields and hashes its contents at construction, so
+  duplicate identity needs no second metadata comparison or rehashing.
 * Require exact canonical fragment membership and inclusive boundaries.
-* Require loose commit items to have depth zero and their own author signature.
+* Require standalone commits at any depth to have their own author signature.
 * Check every signature, with targets and coverage paths confined to members.
   A signer authenticates only that signer's authored ancestors.
-* Require coverage for every introduced member. Boundaries are assumptions,
+* Compute each author's causally latest **introduced** commits, keeping all
+  concurrent tips. The author's signature boundary must dominate every one of
+  these tips through supplied metadata. Signed targets may be later members
+  authored by somebody else. Inclusive boundaries are authenticated assumptions,
   not repeated signature obligations.
 * Order members lexicographically among parents-first choices by full hash.
 
 The result is conditional: **if the declared dependencies are authenticated,
 this item authenticates the history it introduces**. Dependencies are parent
-hashes for a loose commit and boundary hashes for a fragment. Verification has
+hashes for a standalone commit and boundary hashes for a fragment. Verification has
 no dependency provider and does not query graph state.
 
 Admission checks those dependencies against authenticated, parent-closed history
@@ -65,23 +85,32 @@ at the destination. Bare local metadata does not suffice. Missing dependencies
 return `IngestError::MissingDependency` before mutation or payload callbacks;
 verified items can wait in an external buffer without being verified again.
 
-Admission checks metadata conflicts and prepares all new payload values before
-mutation. Duplicate receipts preserve existing payloads, including local copies.
+Admission prepares all new payload values before mutation. Canonical hash identity
+binds metadata under collision resistance. Duplicate receipts preserve existing
+payloads, including local copies.
 A payload callback panic leaves the graph unchanged. Neither metadata verification
 nor ingestion checks opaque payload bytes against their declared hashes.
 
 ## Where certificates live
 
-A loose node stores its signature certificate. A canonical fragment stores its
-signature certificate directly on the fragment record. Internal, structurally
-contained fragments need not retain certificates.
+Every node stores signatures **over its own hash**, keyed by signer, without a
+redundant target hash. A fragment stores a per-author signature boundary: references
+to the signed member nodes whose signatures establish the required frontier
+coverage. `SignatureEvidence` adds the explicit target only for transport.
 
-A received item already has everything needed for admission: insert its new
-members into the authenticated index and attach its certificate to its node or
-fragment. The existing structural reduction determines the minimal cover.
-Certificates for covered pieces can then be discarded; topology remains for
-future construction and late forks. Shared evidence needed by two cover
-fragments stays on both fragments.
+A received fragment indexes its introduced members and attaches the verified
+signature-boundary references to its canonical record. A standalone commit does
+not index a fragment, even at nonzero depth: its own author signature authenticates
+that commit, not a whole fragment's multi-author contents. It stays loose until
+covered by a certified fragment. A later fragment can promote the same admitted
+head or index a formerly bare checkpoint as an interior constituent.
+
+The existing structural reduction determines the minimal cover. Contained and
+auxiliary fragments can drop their signature-boundary references; topology remains
+for construction and late forks. Pruning keeps the union of signatures referenced
+by current cover fragments, loose nodes' own-author signatures, and pending local
+signatures. Shared evidence is stored once on its target node, not copied onto
+every fragment that references it.
 
 Authentication is durable. Local viewpoint hash frontiers remain valid after
 signature-byte pruning, but are not transport certificates.
@@ -97,9 +126,12 @@ Unknown hashes, received history, and already-admitted local commits return
 `SignatureError::NotPendingLocalCommit`. Signatures can arrive while known local
 metadata is still waiting for its parents, but not before the metadata is known.
 
-A pending loose commit waits for its own signature and authenticated parents.
-A pending fragment head combines its signatures with certificates on its
-constituents. Signatures at the head replace older evidence from the same author.
+A pending depth-zero commit waits for its own signature and authenticated parents.
+Local nonzero-depth heads assemble a canonical fragment using signatures stored
+on the actual member nodes. Signatures at the head replace older evidence from
+the same author. To admit a high-depth local edit as a standalone announcement
+instead, verify and ingest an explicit `UnverifiedItem::Commit`; automatic local
+fragment assembly does not prematurely admit it before co-signatures can arrive.
 Once the item is complete, it is verified and admitted exactly like a received
 item. All newly ready local items can reuse constituent evidence before covered
 certificates are discarded. Incomplete local work never blocks unrelated items.
@@ -113,12 +145,18 @@ commits cannot be re-signed through the separate-signature API.
 ## Reading and exchanging the cover
 
 `minimal_cover()` uses structural reduction over the authenticated fragment
-index. `export()` checks current cover membership, reads the item's stored
-signatures, and gathers its metadata using the indexed fragment traversal. It
-does not search for signature coverage or perform cryptographic verification.
+index. `export()` reads current cover items, following stored signature-boundary
+references and gathering ordered metadata through indexed fragment traversal.
+It does not search for signature coverage or perform cryptographic verification.
 Payloads are not cloned by metadata export.
 
-Non-current items return `ExportError::NotInMinimalCover`, even when still
+A current cover fragment's head may also be exported as `ItemId::Commit(head)`:
+a single envelope and its own-author signature. This announces the head and its
+parent links, but the receiver must still admit its parents and must not mistake
+the announcement for a fragment certificate. Receiving the complete fragment
+later preserves already-admitted payloads.
+
+Other non-current items return `ExportError::NotInMinimalCover`, even when still
 readable locally. An inventory snapshot does not pin old exports; refresh the
 inventory after a stale request. There is no historical export fallback.
 

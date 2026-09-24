@@ -1,19 +1,17 @@
-//! The trust boundary for received sedimentree history.
-//!
-//! Verification is stateless and uses only supplied metadata. Signature targets
-//! and coverage paths are confined to actual item members; fragment boundaries
-//! are assumed to be authenticated, a premise established during admission.
-//! Metadata authentication binds payload hashes, not the actual payload bytes.
+//! Stateless verification of received history. Fragment boundaries are assumed
+//! authenticated; admission establishes that premise. Signatures cover each
+//! author's causal frontier among the members introduced by the item.
+//! Payload bytes and application-specific decoding remain separate.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    Author, CommitContents, CommitHash, CommitMeta, FragmentRange, Signature, SignatureError,
-    VerificationError,
+    Author, CommitHash, CommitMeta, FragmentRange, Signature, SignatureError, VerificationError,
 };
 
-/// Signature evidence supplied with an untrusted item. Merely constructing this
-/// value does not establish signature validity or author coverage.
+/// Transport evidence: a signature with an explicit signer and target.
+/// Constructing this value establishes neither validity nor author coverage.
+/// Internally the graph stores signatures on the commit they sign.
 #[derive(Debug, Clone)]
 pub struct SignatureEvidence {
     pub author: Author,
@@ -21,16 +19,16 @@ pub struct SignatureEvidence {
     pub signature: Signature,
 }
 
-/// An exchangeable item's identity, not a verification prerequisite.
+/// A standalone commit at any depth or a canonical fragment, not a dependency witness.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ItemId {
     Commit(CommitHash),
     Fragment(FragmentRange),
 }
 
-/// Decoded, untrusted metadata and evidence. Payload bytes are supplied and
-/// checked separately. A future decoder may reconstruct omitted internal hashes
-/// before producing these envelopes; no serialization format is fixed here.
+/// Owned, decoded transport contents, convenient for in-memory exchange.
+/// This is not a wire format. Streaming/application-specific decoders can use
+/// [`Self::verify_fragment`] without first constructing a vector of commits.
 #[derive(Debug, Clone)]
 pub enum UnverifiedItem {
     Commit {
@@ -53,8 +51,7 @@ impl UnverifiedItem {
         }
     }
 
-    /// Enumerate distinct, untrusted prerequisite claims deterministically.
-    /// Fragment boundaries are inclusive members assumed authenticated.
+    /// Untrusted prerequisite claims. Verification never looks these up.
     pub fn dependencies(&self) -> impl Iterator<Item = CommitHash> + '_ {
         let hashes: BTreeSet<_> = match self {
             Self::Commit { meta, .. } => meta.parents().iter().copied().collect(),
@@ -63,130 +60,161 @@ impl UnverifiedItem {
         hashes.into_iter()
     }
 
-    /// Verify identity, canonical structure, and author-signature coverage using
-    /// only supplied metadata. The result is conditional on authentication of
-    /// the declared dependencies; admission must establish that premise.
+    /// Verify already-decoded contents. A standalone commit is valid at any depth;
+    /// its own certificate does not certify a fragment headed at that commit.
+    /// The result assumes authenticated dependencies; admission checks that premise.
     pub fn verify(self) -> Result<VerifiedItem, VerificationError> {
-        let dependencies: Vec<_> = self.dependencies().collect();
-        let (id, commits, signatures) = match self {
+        match self {
             Self::Commit { meta, signatures } => {
-                (ItemId::Commit(*meta.hash()), vec![meta], signatures)
+                let dependencies = meta.parents().iter().copied().collect::<BTreeSet<_>>();
+                verify_metadata(
+                    ItemId::Commit(*meta.hash()),
+                    dependencies,
+                    signatures,
+                    std::iter::once(Ok(meta)),
+                )
             }
             Self::Fragment {
                 range,
                 commits,
                 signatures,
-            } => (ItemId::Fragment(range), commits, signatures),
-        };
+            } => Self::verify_fragment(range, signatures, commits.into_iter().map(Ok)),
+        }
+    }
 
-        // Hash-check every envelope and reject duplicate records rather than
-        // silently overwriting them.
-        let mut actual = BTreeMap::new();
-        for meta in &commits {
-            let reconstructed = CommitMeta::new(CommitContents {
-                parents: meta.parents().to_vec(),
-                author: *meta.author(),
-                payload: *meta.payload_hash(),
+    /// Drive an application-provided decoder one envelope at a time. A decoder
+    /// can reconstruct omitted hashes and compressed parent references using
+    /// `CommitMeta::new` as it proceeds. Map malformed compressed data to
+    /// `VerificationError::InvalidItem`; a decoding error aborts verification.
+    ///
+    /// No graph or dependency provider is consulted. Metadata is retained for
+    /// structural checks and admission, but payload bytes need not be retained.
+    pub fn verify_fragment(
+        range: FragmentRange,
+        signatures: Vec<SignatureEvidence>,
+        commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
+    ) -> Result<VerifiedItem, VerificationError> {
+        let dependencies = range.boundary.clone();
+        verify_metadata(ItemId::Fragment(range), dependencies, signatures, commits)
+    }
+}
+
+fn verify_metadata(
+    id: ItemId,
+    dependencies: BTreeSet<CommitHash>,
+    signatures: Vec<SignatureEvidence>,
+    commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
+) -> Result<VerifiedItem, VerificationError> {
+    let mut members = BTreeMap::new();
+    for meta in commits {
+        let meta = meta?;
+        // CommitMeta's private fields and canonical constructor bind its hash to
+        // its contents. A decoder cannot supply an unchecked cached hash.
+        if members.insert(*meta.hash(), meta).is_some() {
+            return Err(VerificationError::InvalidItem);
+        }
+    }
+    let sorted = topological_order(&members)?;
+    let boundary = if let ItemId::Fragment(range) = &id {
+        validate_fragment(range, &members)?;
+        range.boundary.clone()
+    } else {
+        BTreeSet::new()
+    };
+
+    // Check every signature, even redundant evidence. Targets must be members;
+    // neither dependency claims nor decoder state extend signature coverage.
+    for evidence in &signatures {
+        if !members.contains_key(&evidence.commit) {
+            return Err(VerificationError::InvalidItem);
+        }
+        let key =
+            ed25519_dalek::VerifyingKey::from_bytes(evidence.author.as_array()).map_err(|_| {
+                VerificationError::InvalidSignature(SignatureError::InvalidPublicKey(
+                    evidence.author,
+                ))
+            })?;
+        let signature = ed25519_dalek::Signature::from_bytes(&evidence.signature.into());
+        key.verify_strict(evidence.commit.as_bytes(), &signature)
+            .map_err(|_| {
+                VerificationError::InvalidSignature(SignatureError::InvalidSignature {
+                    author: evidence.author,
+                    commit: evidence.commit,
+                })
+            })?;
+    }
+
+    let mut introduced: BTreeMap<Author, BTreeSet<CommitHash>> = BTreeMap::new();
+    for meta in members.values() {
+        if !boundary.contains(meta.hash()) {
+            introduced
+                .entry(*meta.author())
+                .or_default()
+                .insert(*meta.hash());
+        }
+    }
+    let mut signature_boundary = BTreeMap::new();
+    for (author, authored) in introduced {
+        // All concurrent latest commits matter. Checking these maximal members
+        // also establishes coverage of this author's earlier introduced members.
+        let required = frontier(&members, authored);
+        let signed = frontier(
+            &members,
+            signatures
+                .iter()
+                .filter(|evidence| evidence.author == author)
+                .map(|evidence| evidence.commit)
+                .collect(),
+        );
+        let covered = ancestry(&members, signed.iter().copied());
+        if let Some(commit) = required.difference(&covered).next() {
+            return Err(VerificationError::MissingSignature {
+                author,
+                commit: *commit,
             });
-            if reconstructed.hash() != meta.hash() || actual.insert(*meta.hash(), meta).is_some() {
-                return Err(VerificationError::InvalidItem);
-            }
         }
-        let sorted = topological_order(&actual)?;
-
-        let mut covered = BTreeSet::new();
-        match &id {
-            ItemId::Commit(hash) => {
-                if depth(hash) != 0 {
-                    return Err(VerificationError::InvalidItem);
-                }
-            }
-            ItemId::Fragment(range) => {
-                validate_fragment(range, &actual)?;
-                // Boundaries are authenticated by inductive assumption, not by
-                // lookup. Admission must establish this certificate's premise.
-                covered.extend(range.boundary.iter().copied());
-            }
-        }
-
-        // Every supplied signature must be valid, even if some other signature
-        // already provides complete coverage. A dependency alone is not an
-        // allowed target: it must be an actual item member.
-        for evidence in &signatures {
-            if !actual.contains_key(&evidence.commit) {
-                return Err(VerificationError::InvalidItem);
-            }
-            let key = ed25519_dalek::VerifyingKey::from_bytes(evidence.author.as_array()).map_err(
-                |_| {
-                    VerificationError::InvalidSignature(SignatureError::InvalidPublicKey(
-                        evidence.author,
-                    ))
-                },
-            )?;
-            let signature = ed25519_dalek::Signature::from_bytes(&evidence.signature.into());
-            key.verify_strict(evidence.commit.as_bytes(), &signature)
-                .map_err(|_| {
-                    VerificationError::InvalidSignature(SignatureError::InvalidSignature {
-                        author: evidence.author,
-                        commit: evidence.commit,
-                    })
-                })?;
-        }
-        covered.extend(signature_coverage(&actual, &signatures));
-
-        for hash in &sorted {
-            let meta = actual[hash];
-            if !covered.contains(hash) {
-                return Err(VerificationError::MissingSignature {
-                    author: *meta.author(),
-                    commit: *hash,
-                });
-            }
-        }
-        let commits = sorted
+        signature_boundary.insert(author, signed);
+    }
+    Ok(VerifiedItem {
+        id,
+        commits: sorted
             .into_iter()
-            .map(|hash| actual[&hash].clone())
-            .collect();
-        Ok(VerifiedItem {
-            id,
-            commits,
-            dependencies,
-            signatures,
-        })
-    }
+            .map(|hash| members.remove(&hash).unwrap())
+            .collect(),
+        dependencies: dependencies.into_iter().collect(),
+        signatures,
+        signature_boundary,
+    })
 }
 
-/// Author coverage within one item, after validating its signatures.
-fn signature_coverage(
-    members: &BTreeMap<CommitHash, &CommitMeta>,
-    signatures: &[SignatureEvidence],
+/// Follow only supplied metadata, including cross-author links.
+fn ancestry(
+    members: &BTreeMap<CommitHash, CommitMeta>,
+    tips: impl IntoIterator<Item = CommitHash>,
 ) -> BTreeSet<CommitHash> {
-    let mut covered = BTreeSet::new();
-    for evidence in signatures {
-        let mut pending = vec![evidence.commit];
-        let mut visited = BTreeSet::new();
-        while let Some(hash) = pending.pop() {
-            if !visited.insert(hash) {
-                continue;
+    let mut found = BTreeSet::new();
+    let mut stack: Vec<_> = tips.into_iter().collect();
+    while let Some(hash) = stack.pop() {
+        if let Some(meta) = members.get(&hash) {
+            if found.insert(hash) {
+                stack.extend(meta.parents());
             }
-            let Some(meta) = members.get(&hash) else {
-                continue;
-            };
-            if meta.author() == &evidence.author {
-                covered.insert(hash);
-            }
-            pending.extend(meta.parents().iter().copied());
         }
     }
-    covered
+    found
 }
 
-/// Compare the complete envelope, preserving parent order (and multiplicity).
-pub(crate) fn same_meta(left: &CommitMeta, right: &CommitMeta) -> bool {
-    left.hash() == right.hash()
-        && left.parents() == right.parents()
-        && left.author() == right.author()
-        && left.payload_hash() == right.payload_hash()
+fn frontier(
+    members: &BTreeMap<CommitHash, CommitMeta>,
+    mut tips: BTreeSet<CommitHash>,
+) -> BTreeSet<CommitHash> {
+    let ancestors = ancestry(
+        members,
+        tips.iter()
+            .flat_map(|hash| members[hash].parents().iter().copied()),
+    );
+    tips.retain(|hash| !ancestors.contains(hash));
+    tips
 }
 
 fn depth(hash: &CommitHash) -> usize {
@@ -196,10 +224,10 @@ fn depth(hash: &CommitHash) -> usize {
         .count()
 }
 
-/// Plain maximum-depth traversal, independent of any graph fragment index.
+/// Plain canonical traversal, independent of the graph's fragment index.
 fn validate_fragment(
     range: &FragmentRange,
-    members: &BTreeMap<CommitHash, &CommitMeta>,
+    members: &BTreeMap<CommitHash, CommitMeta>,
 ) -> Result<(), VerificationError> {
     let head_depth = depth(&range.head);
     if head_depth == 0 {
@@ -225,9 +253,9 @@ fn validate_fragment(
     Ok(())
 }
 
-/// Kahn's algorithm over only available metadata; external parents are not read.
+/// Kahn's algorithm over available metadata; external parents are not read.
 fn topological_order(
-    members: &BTreeMap<CommitHash, &CommitMeta>,
+    members: &BTreeMap<CommitHash, CommitMeta>,
 ) -> Result<Vec<CommitHash>, VerificationError> {
     let mut remaining = BTreeMap::new();
     let mut children: BTreeMap<CommitHash, Vec<CommitHash>> = BTreeMap::new();
@@ -268,10 +296,8 @@ fn topological_order(
     Ok(sorted)
 }
 
-/// A checked, conditional certificate relative to explicit dependencies.
-/// Does not establish that dependencies are authenticated or admitted, nor that
-/// payload bytes are available or valid.
-/// There is deliberately no public unchecked constructor or conversion.
+/// A conditional certificate, not proof that dependencies or payloads are available.
+/// There is deliberately no unchecked public constructor.
 ///
 /// ```compile_fail
 /// use stockfoil::VerifiedItem;
@@ -283,20 +309,24 @@ pub struct VerifiedItem {
     pub(crate) commits: Vec<CommitMeta>,
     pub(crate) dependencies: Vec<CommitHash>,
     pub(crate) signatures: Vec<SignatureEvidence>,
+    pub(crate) signature_boundary: BTreeMap<Author, BTreeSet<CommitHash>>,
 }
 
 impl VerifiedItem {
     pub fn id(&self) -> &ItemId {
         &self.id
     }
-
     /// Distinct prerequisites whose authentication admission must establish.
     pub fn dependencies(&self) -> impl Iterator<Item = &CommitHash> {
         self.dependencies.iter()
     }
-
     /// Member envelopes in lexicographically smallest parents-first order.
     pub fn commits(&self) -> impl Iterator<Item = &CommitMeta> {
         self.commits.iter()
+    }
+    /// Signed targets whose per-author frontiers dominate the author's latest
+    /// introduced commits. Already-authenticated boundaries add no obligation.
+    pub fn signature_boundary(&self) -> &BTreeMap<Author, BTreeSet<CommitHash>> {
+        &self.signature_boundary
     }
 }

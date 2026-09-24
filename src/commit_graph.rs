@@ -32,7 +32,7 @@ pub struct CommitGraph<P> {
     store: HashMap<NodeIdx, P>,
     by_hash: HashMap<CommitHash, NodeIdx>,
     heads: BTreeSet<CommitHash>,
-    pending: VecDeque<(CommitMeta, P, Vec<SignatureEvidence>)>,
+    pending: VecDeque<(CommitMeta, P, BTreeMap<Author, Signature>)>,
     permissions: HashMap<Author, WritePermission>,
     // Trusted hash frontiers for local views, independent of transport certificates.
     signature_frontiers: HashMap<Author, BTreeSet<CommitHash>>,
@@ -44,11 +44,31 @@ pub struct CommitGraph<P> {
 #[derive(Clone)]
 pub(crate) struct Node {
     meta: CommitMeta,
-    // A loose item's certificate, or signatures awaiting local admission.
-    signatures: Vec<SignatureEvidence>,
-    // Empty while pending. After admission, entry n is the fragment headed here
-    // at level n + 1, with one record per level up to the commit's hash depth.
+    // Every signature here signs this node's hash. Fragment certificates refer
+    // to these signatures rather than copying arbitrary-target evidence.
+    signatures: BTreeMap<Author, Signature>,
+    // Empty until the canonical range is admitted, directly or as an interior
+    // constituent. A standalone announcement supplies no fragment certificate.
+    // Entry n is the fragment at level n + 1, up to the commit's hash depth.
     headed_fragments: Vec<FragmentIdx>,
+}
+
+impl Node {
+    /// Fragments are indexed in ascending level order. Only the maximum-level
+    /// record is canonical; the others are construction aids.
+    fn canonical_fragment(&self) -> Option<FragmentIdx> {
+        self.headed_fragments.last().copied()
+    }
+
+    fn signature_evidence(&self) -> impl Iterator<Item = SignatureEvidence> + '_ {
+        self.signatures
+            .iter()
+            .map(|(&author, &signature)| SignatureEvidence {
+                author,
+                commit: *self.meta.hash(),
+                signature,
+            })
+    }
 }
 
 impl<P: Clone> Default for CommitGraph<P> {
@@ -137,7 +157,7 @@ impl<P: Clone> CommitGraph<P> {
     /// item's authenticated dependencies; stateless verification does not imply
     /// that those dependencies are present here.
     ///
-    /// Checks dependencies and conflicts before graph mutation or payload
+    /// Checks dependencies before graph mutation or payload
     /// callbacks. For each newly admitted commit, `payload` supplies application
     /// data or a storage handle; duplicates preserve existing data. Neither this
     /// method nor metadata verification checks the bytes of an opaque `P`.
@@ -160,21 +180,6 @@ impl<P: Clone> CommitGraph<P> {
         for dependency in &item.dependencies {
             if !self.has_admitted_commit(dependency) {
                 return Err(crate::IngestError::MissingDependency(*dependency));
-            }
-        }
-        for meta in &item.commits {
-            let known = self
-                .by_hash
-                .get(meta.hash())
-                .map(|&idx| &self.nodes[idx].meta)
-                .or_else(|| {
-                    self.pending
-                        .iter()
-                        .find(|(known, _, _)| known.hash() == meta.hash())
-                        .map(|(known, _, _)| known)
-                });
-            if known.is_some_and(|known| !crate::ingest::same_meta(known, meta)) {
-                return Err(crate::IngestError::ConflictingCommit(*meta.hash()));
             }
         }
         // Prepare all new payloads before changing state. A pending local copy
@@ -215,7 +220,7 @@ impl<P: Clone> CommitGraph<P> {
         {
             return;
         }
-        self.pending.push_back((meta, data, Vec::new()));
+        self.pending.push_back((meta, data, BTreeMap::new()));
 
         // Retry the queue until a complete pass makes no progress. A blocked
         // commit must not prevent unrelated, ready commits from being inserted.
@@ -240,7 +245,7 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     // Only called once all parents have been inserted into the graph.
-    fn insert_ready(&mut self, meta: CommitMeta, data: P, signatures: Vec<SignatureEvidence>) {
+    fn insert_ready(&mut self, meta: CommitMeta, data: P, signatures: BTreeMap<Author, Signature>) {
         let hash = *meta.hash();
         let parents = meta
             .parents()
@@ -281,7 +286,9 @@ impl<P: Clone> CommitGraph<P> {
                 self.nodes
                     .level_one_members(&self.by_hash, head)
                     .into_iter()
-                    .filter(|&idx| idx != head && !self.nodes[idx].headed_fragments.is_empty())
+                    .filter(|&idx| {
+                        idx != head && sedimentree_depth(self.nodes[idx].meta.hash()) > 0
+                    })
                     .collect()
             } else {
                 // The same head's lower-level fragment was just inserted.
@@ -290,7 +297,7 @@ impl<P: Clone> CommitGraph<P> {
                     .lower_fragments(&self.nodes, head, level)
                     .into_iter()
                     .flat_map(|idx| self.fragments[idx].boundary.iter().copied())
-                    .filter(|&idx| self.nodes[idx].headed_fragments.len() >= level)
+                    .filter(|&idx| sedimentree_depth(self.nodes[idx].meta.hash()) >= level)
                     .collect()
             };
             let idx = FragmentIdx(self.fragments.0.len());
@@ -298,7 +305,7 @@ impl<P: Clone> CommitGraph<P> {
                 head,
                 level,
                 boundary: boundary.into_iter().collect(),
-                signatures: Vec::new(),
+                signature_boundary: BTreeMap::new(),
             });
             self.nodes[head].headed_fragments.push(idx);
         }
@@ -340,10 +347,9 @@ impl<P: Clone> CommitGraph<P> {
         if !self.has_admitted_commit(&range.head) {
             return Err(FragmentReadError::NotPublishable(range.head));
         }
-        let fragment_idx = *self.nodes[head]
-            .headed_fragments
-            .last()
-            .expect("admitted checkpoint is indexed");
+        let fragment_idx = self.nodes[head]
+            .canonical_fragment()
+            .ok_or(FragmentReadError::NotFragment(range.head))?;
         let boundary: BTreeSet<_> = self.fragments[fragment_idx]
             .boundary
             .iter()
@@ -410,21 +416,28 @@ impl<P: Clone> CommitGraph<P> {
         self.publishable_nodes()[idx.0].then(|| (&self.nodes[idx].meta, &self.store[&idx]))
     }
 
-    /// Read a current cover item from the fragment index. Signatures are already
-    /// attached to that item; export never discovers or verifies author coverage.
+    /// Read a cover item or its signed head announcement at any depth. Fragment
+    /// certificates follow stored signature-boundary references, never a search
+    /// for author coverage. A head announcement is not a fragment certificate.
     pub fn export(&self, id: &ItemId) -> Result<UnverifiedItem, ExportError> {
         let cover = self.minimal_cover();
         match id {
-            ItemId::Commit(hash) if cover.loose_commits.iter().any(|c| &c.commit == hash) => {
+            ItemId::Commit(hash)
+                if cover.loose_commits.iter().any(|c| &c.commit == hash)
+                    || cover.fragments.iter().any(|f| &f.range.head == hash) =>
+            {
                 let node = &self.nodes[self.by_hash[hash]];
                 Ok(UnverifiedItem::Commit {
                     meta: node.meta.clone(),
-                    signatures: node.signatures.clone(),
+                    signatures: node
+                        .signature_evidence()
+                        .filter(|evidence| &evidence.author == node.meta.author())
+                        .collect(),
                 })
             }
             ItemId::Fragment(range) if cover.fragments.iter().any(|f| &f.range == range) => {
                 let head = self.by_hash[&range.head];
-                let fragment = *self.nodes[head].headed_fragments.last().unwrap();
+                let fragment = self.nodes[head].canonical_fragment().unwrap();
                 let mut commits = Vec::new();
                 self.traverse_fragment(range, |meta, _| {
                     commits.push(meta.clone());
@@ -434,7 +447,20 @@ impl<P: Clone> CommitGraph<P> {
                 Ok(UnverifiedItem::Fragment {
                     range: range.clone(),
                     commits,
-                    signatures: self.fragments[fragment].signatures.clone(),
+                    signatures: self.fragments[fragment]
+                        .signature_boundary
+                        .iter()
+                        .flat_map(|(&author, targets)| {
+                            targets.iter().map(move |&idx| {
+                                let node = &self.nodes[idx];
+                                SignatureEvidence {
+                                    author,
+                                    commit: *node.meta.hash(),
+                                    signature: node.signatures[&author],
+                                }
+                            })
+                        })
+                        .collect(),
                 })
             }
             _ => Err(ExportError::NotInMinimalCover(id.clone())),
@@ -614,12 +640,7 @@ impl<P: Clone> CommitGraph<P> {
                 .expect("known pending local commit")
                 .2
         };
-        signatures.retain(|evidence| evidence.author != author);
-        signatures.push(SignatureEvidence {
-            author,
-            commit: hash,
-            signature,
-        });
+        signatures.insert(author, signature);
         self.finish_local_commits();
         Ok(())
     }
@@ -754,15 +775,26 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     // Dependencies and payloads are ready. Index the authenticated members and
-    // put the supplied certificate directly on its loose node or fragment.
+    // store signatures on their targets and boundary references on the fragment.
     fn admit_certificate(&mut self, item: crate::VerifiedItem) {
         for meta in &item.commits {
             self.pending_local.remove(meta.hash());
-            if self.authenticated.insert(*meta.hash()) {
-                self.insert_fragments(self.by_hash[meta.hash()]);
+            self.authenticated.insert(*meta.hash());
+            // A signed commit at a checkpoint is still just a commit. Only a
+            // verified fragment supplies its canonical range's certificate.
+            if let ItemId::Fragment(range) = &item.id {
+                let idx = self.by_hash[meta.hash()];
+                if !range.boundary.contains(meta.hash())
+                    && self.nodes[idx].headed_fragments.is_empty()
+                {
+                    self.insert_fragments(idx);
+                }
             }
         }
         for evidence in &item.signatures {
+            self.nodes[self.by_hash[&evidence.commit]]
+                .signatures
+                .insert(evidence.author, evidence.signature);
             self.signature_frontiers
                 .entry(evidence.author)
                 .or_default()
@@ -778,15 +810,23 @@ impl<P: Clone> CommitGraph<P> {
                 )
             })
             .collect();
-        match item.id {
-            ItemId::Commit(hash) => self.nodes[self.by_hash[&hash]].signatures = item.signatures,
-            ItemId::Fragment(range) => {
-                let idx = *self.nodes[self.by_hash[&range.head]]
-                    .headed_fragments
-                    .last()
-                    .unwrap();
-                self.fragments.0[idx.0].signatures = item.signatures;
-            }
+        if let ItemId::Fragment(range) = item.id {
+            let idx = self.nodes[self.by_hash[&range.head]]
+                .canonical_fragment()
+                .unwrap();
+            self.fragments.0[idx.0].signature_boundary = item
+                .signature_boundary
+                .into_iter()
+                .map(|(author, targets)| {
+                    (
+                        author,
+                        targets
+                            .into_iter()
+                            .map(|hash| self.by_hash[&hash])
+                            .collect(),
+                    )
+                })
+                .collect();
         }
     }
 
@@ -807,17 +847,28 @@ impl<P: Clone> CommitGraph<P> {
         // discarding covered ones. Keep topology, not historical export proofs.
         let cover = self.minimal_cover();
         let heads: HashSet<_> = cover.fragments.iter().map(|f| f.range.head).collect();
-        let loose: HashSet<_> = cover.loose_commits.iter().map(|c| c.commit).collect();
+        let mut needed: HashSet<_> = cover
+            .loose_commits
+            .iter()
+            .map(|c| {
+                let idx = self.by_hash[&c.commit];
+                (idx, *self.nodes[idx].meta.author())
+            })
+            .collect();
         for fragment in &mut self.fragments.0 {
             if !heads.contains(self.nodes[fragment.head].meta.hash())
                 || fragment.level != self.nodes[fragment.head].headed_fragments.len()
             {
-                fragment.signatures.clear();
+                fragment.signature_boundary.clear();
+            }
+            for (&author, targets) in &fragment.signature_boundary {
+                needed.extend(targets.iter().map(|&idx| (idx, author)));
             }
         }
-        for node in &mut self.nodes.0 {
-            if self.authenticated.contains(node.meta.hash()) && !loose.contains(node.meta.hash()) {
-                node.signatures.clear();
+        for (index, node) in self.nodes.0.iter_mut().enumerate() {
+            if self.authenticated.contains(node.meta.hash()) {
+                node.signatures
+                    .retain(|author, _| needed.contains(&(NodeIdx(index), *author)));
             }
         }
     }
@@ -828,7 +879,7 @@ impl<P: Clone> CommitGraph<P> {
         let item = if depth == 0 {
             UnverifiedItem::Commit {
                 meta: node.meta.clone(),
-                signatures: node.signatures.clone(),
+                signatures: node.signature_evidence().collect(),
             }
         } else {
             // The pending head is not indexed yet. Read its canonical range
@@ -847,30 +898,19 @@ impl<P: Clone> CommitGraph<P> {
                     stack.extend(self.parents(idx));
                 }
             }
-            let hashes: HashSet<_> = members
-                .iter()
-                .map(|&idx| *self.nodes[idx].meta.hash())
+            // Read only signatures attached to actual member nodes. A head
+            // signature supersedes older signatures by that author. No inherited
+            // arbitrary-target certificate or target-membership filter is needed.
+            let signatures = node
+                .signature_evidence()
+                .chain(
+                    members
+                        .iter()
+                        .filter(|&&idx| idx != head)
+                        .flat_map(|&idx| self.nodes[idx].signature_evidence())
+                        .filter(|evidence| !node.signatures.contains_key(&evidence.author)),
+                )
                 .collect();
-            let head_authors: HashSet<_> = node.signatures.iter().map(|s| s.author).collect();
-            let mut signatures = BTreeMap::new();
-            for &idx in &members {
-                let member = &self.nodes[idx];
-                let inherited = member
-                    .headed_fragments
-                    .last()
-                    .into_iter()
-                    .flat_map(|&f| &self.fragments[f].signatures);
-                for evidence in member.signatures.iter().chain(inherited) {
-                    // A signature on this head covers all of its author's
-                    // members; older certificates for that author are redundant.
-                    if hashes.contains(&evidence.commit)
-                        && (evidence.commit == *node.meta.hash()
-                            || !head_authors.contains(&evidence.author))
-                    {
-                        signatures.insert((evidence.author, evidence.commit), evidence.clone());
-                    }
-                }
-            }
             UnverifiedItem::Fragment {
                 range: FragmentRange {
                     head: *node.meta.hash(),
@@ -880,7 +920,7 @@ impl<P: Clone> CommitGraph<P> {
                     .into_iter()
                     .map(|idx| self.nodes[idx].meta.clone())
                     .collect(),
-                signatures: signatures.into_values().collect(),
+                signatures,
             }
         };
         if !item
@@ -970,7 +1010,7 @@ impl NodeStore {
             if !members.insert(idx) {
                 continue;
             }
-            if idx == head || self[idx].headed_fragments.is_empty() {
+            if idx == head || sedimentree_depth(self[idx].meta.hash()) == 0 {
                 stack.extend(self[idx].meta.parents().iter().map(|hash| by_hash[hash]));
             }
         }
@@ -1036,8 +1076,9 @@ struct Fragment {
     head: NodeIdx,
     level: usize,
     boundary: Vec<NodeIdx>,
-    // Only cover fragments need a certificate; contained records are topology.
-    signatures: Vec<SignatureEvidence>,
+    // Per-author signed frontiers covering the introduced members. Signature
+    // bytes live on the referenced nodes; contained records can drop the refs.
+    signature_boundary: BTreeMap<Author, Vec<NodeIdx>>,
 }
 
 #[derive(Clone)]
@@ -1087,7 +1128,7 @@ impl FragmentStore {
             result.push(idx);
             for &boundary in &self[idx].boundary {
                 let headed = &nodes[boundary].headed_fragments;
-                if headed.len() < level {
+                if sedimentree_depth(nodes[boundary].meta.hash()) < level {
                     // A level-(n-1) boundary is at least that deep, so this
                     // boundary has depth exactly n-1 and heads that fragment.
                     stack.push(headed[level - 2]);
@@ -1252,12 +1293,13 @@ mod tests {
                 .signatures
                 .is_empty()
         );
-        let fragment = *graph.nodes[graph.by_hash[head.hash()]]
-            .headed_fragments
-            .last()
+        let fragment = graph.nodes[graph.by_hash[head.hash()]]
+            .canonical_fragment()
             .unwrap();
-        assert_eq!(graph.fragments[fragment].signatures.len(), 1);
-        assert_eq!(graph.fragments[fragment].signatures[0].commit, *head.hash());
+        assert_eq!(
+            graph.fragments[fragment].signature_boundary[&alice],
+            vec![graph.by_hash[head.hash()]]
+        );
         assert_eq!(
             graph.signature_frontiers[&alice],
             BTreeSet::from([*head.hash()])
@@ -1417,7 +1459,7 @@ mod tests {
         assert!(
             graph.nodes[graph.by_hash[root.hash()]]
                 .signatures
-                .is_empty()
+                .contains_key(&author(&alice_key))
         );
         let mut peer = CommitGraph::new();
         peer.merge(&graph);
@@ -1425,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_certificate_survives_in_each_current_entry() {
+    fn shared_signature_survives_on_its_target_for_each_current_entry() {
         let key = SigningKey::from_bytes(&[1; 32]);
         let bob_key = SigningKey::from_bytes(&[2; 32]);
         let alice = author(&key);
@@ -1467,15 +1509,17 @@ mod tests {
         graph.ingest(incoming, |_| 0).unwrap();
         assert_eq!(graph.minimal_cover().fragments.len(), 2);
         for fragment in graph.minimal_cover().fragments {
-            let idx = *graph.nodes[graph.by_hash[&fragment.range.head]]
-                .headed_fragments
-                .last()
+            let idx = graph.nodes[graph.by_hash[&fragment.range.head]]
+                .canonical_fragment()
                 .unwrap();
             assert!(
-                graph.fragments[idx]
+                graph.fragments[idx].signature_boundary[&author(&bob_key)]
+                    .contains(&graph.by_hash[root.hash()])
+            );
+            assert!(
+                graph.nodes[graph.by_hash[root.hash()]]
                     .signatures
-                    .iter()
-                    .any(|evidence| evidence.commit == *root.hash())
+                    .contains_key(&author(&bob_key))
             );
             assert!(
                 graph

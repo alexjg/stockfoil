@@ -13,10 +13,11 @@ they do not promise arbitrary item exports.
 
 ## Structural summaries and the published cover
 
-`summary()` is **non-minimal**. It contains one canonical fragment for every
-authenticated, parent-closed delivered commit of nonzero depth, even when that
-fragment is wholly contained in another. Loose commits are the eligible delivered
-commits not supplied by a fragment beyond its prerequisite boundaries.
+`summary()` is **non-minimal**. It contains every indexed canonical fragment,
+even when wholly contained in another. A standalone authenticated commit of
+nonzero depth does not imply an indexed fragment: its fragment certificate may
+not have arrived. Loose commits, at any depth, are eligible delivered commits
+not supplied by an indexed fragment beyond its prerequisite boundaries.
 `minimized_summary()` omits structurally contained fragments without removing
 historical records needed for construction and late forks. Both summaries have
 identical loose commits. Neither exposes auxiliary lower-level fragments at a
@@ -30,8 +31,9 @@ cover that author's earlier members within the fragment. Separate signatures
 are rejected for unknown or already-admitted commits. Received history enters through
 `ingest(VerifiedItem, ...)`, not raw insertion.
 
-Only authenticated items enter the fragment index. Their certificates are stored
-directly on the loose node or fragment. `minimal_cover()` uses the same structural
+Only authenticated fragments enter the fragment index. Raw signatures live on
+their target nodes, keyed by signer; fragments retain per-author signature-boundary
+references, not copies of arbitrary-target evidence. `minimal_cover()` uses the same structural
 reduction as `minimized_summary()`; there is no separate candidate or cached
 published cover. Pending local items do not block unrelated admissions. Every
 cover entry already has its certificate, and the complete cover is causally
@@ -98,9 +100,10 @@ index, not a new full graph walk. No payloads are accessed or cloned, and no
 encoding or IO occurs. Structural summary construction traverses local topology;
 it is not merely proportional to output size.
 
-`minimal_cover()` uses that structural reduction. `export()` checks cover
-membership, reads the stored signatures, and uses the indexed traversal below
-to gather ordered metadata. Neither performs signature-coverage discovery.
+`minimal_cover()` uses that structural reduction. `export()` reads cover entries
+or a cover fragment's standalone signed head announcement. Fragment export follows
+stored signature-boundary references and uses the indexed traversal below to
+gather ordered metadata. Neither performs signature-coverage discovery.
 
 Loose entries are sorted by commit hash; fragments are sorted by full range.
 Parents, boundaries, and checkpoints are sets. Parent order and multiplicity in
@@ -125,19 +128,23 @@ this reference walk:
 
 Merges can yield multiple boundaries and paths terminating at different roots.
 Paths may overlap or bypass a boundary through another branch. A root with
-nonzero depth creates a singleton fragment with no boundaries. Range identity
+nonzero depth defines a singleton fragment with no boundaries; a standalone
+announcement of that root does not itself install the fragment. Range identity
 is `(head, boundary)`, not head alone, although a fully delivered head has exactly
 one canonical range.
 
 ## Maintained skip-DAG index
 
 The skip index contains only authenticated, parent-closed history. Pending local
-nodes have no indexed fragments. An admitted depth-`d` node heads explicit
-fragments at every level `1..=d`. Its `headed_fragments[n - 1]` points to the
-fragment at level `n`, not to fragments containing that commit. Each record stores
-its head, level, boundaries, and signature certificate. Contained and auxiliary
-fragments can discard their certificates. There are no cached contents,
-checkpoint sets, loose-member lists, or separate transport-cover index.
+nodes and standalone announcements have no indexed fragments. When a depth-`d`
+node's canonical range is admitted, either directly or as an introduced constituent
+of a larger certified fragment, it heads explicit fragments at levels `1..=d`.
+Its `headed_fragments[n - 1]` points to the fragment at level `n`, not to fragments
+containing that commit. Each record stores its head, level, boundaries, and
+per-author signature-boundary references. Contained and auxiliary fragments can
+discard those references. Signature bytes remain on their targets while referenced
+by any cover entry. There are no cached contents, checkpoint sets, loose-member
+lists, or separate transport-cover index.
 
 Internal identity is `(head, level)`: different levels can have identical
 head/boundary ranges but remain distinct records. The public canonical fragment
@@ -147,7 +154,8 @@ redundant ones.
 Build headed fragments from lower levels to higher levels:
 
 * Level 1 walks backwards from the head through depth-zero commits, stopping at
-  any other nonzero-depth commit. Roots end naturally. Include head and stopping
+  any other nonzero-depth commit, even an unindexed standalone announcement.
+  Roots end naturally. Include head and stopping
   commits in membership; only stopping commits become boundaries.
 * For level `n > 1`, start at the same head's newly created level-`n-1` fragment.
   Follow level-`n-1` fragment boundaries. A boundary of depth at least `n` stops
@@ -197,7 +205,8 @@ may retain references for the duration of the graph borrow. `Break(())` stops
 the entire traversal; both normal completion and an early break return `Ok(())`.
 
 `FragmentReadError` distinguishes an unknown or queued head (`MissingCommit`),
-a depth-zero head (`NotFragment`), withheld history (`NotPublishable`), and a
+a head without an indexed canonical fragment (`NotFragment`, including standalone
+checkpoints), withheld history (`NotPublishable`), and a
 range differing from the canonical boundaries (`BoundaryMismatch`). Validation
 happens before invoking any callback. These are canonical reads, not arbitrary
 head/boundary walks; internal lower-level ranges are not separately readable
@@ -212,16 +221,17 @@ another merge path *does* constrain ordering: stopping membership discovery at
 that boundary does not remove edges from the induced graph used for sorting.
 The order is independent of arrival order, local node IDs, or hash-map iteration.
 The sorting stage uses temporary per-fragment state and costs approximately
-`O(E + V log V)`, in addition to eligibility and membership discovery. Transport
-cover maintenance precomputes this order; export does not rerun the traversal.
+`O(E + V log V)`, in addition to eligibility and membership discovery. Export
+uses this traversal to produce ordered metadata; there is no cached member order.
 
 `publishable_commit` reads an individual authenticated, parent-closed commit,
 returning `None` for unknown, queued, or withheld commits. It does not require
 that the commit remain loose. Previously advertised loose entries and fragments
 remain readable after later fragments cover them or minimization omits them.
 
-Readability is not exportability. Only current cover entries export; a request
-for a contained or replaced item returns `ExportError::NotInMinimalCover`.
+Readability is not exportability. Current cover entries and their signed head
+announcements export; a request for any other contained or replaced item returns
+`ExportError::NotInMinimalCover`.
 Inventory snapshots do not pin historical exports. Borrowed reads supply neither
 signature certificates nor a way to bypass the maintained inventory. See
 [verified ingestion](verified_ingestion_api.md) for evidence lifetime, stale

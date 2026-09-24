@@ -216,11 +216,13 @@ fn signature_targets_must_be_actual_members_even_when_evidence_is_redundant() {
 }
 
 #[test]
-fn nonzero_depth_commits_require_a_fragment_item() {
+fn standalone_commit_and_fragment_certificates_are_distinct_at_nonzero_depth() {
     let head = at_depth(1, vec![], 1);
+    let commit = signed(&head, 1).verify().unwrap();
+    assert_eq!(commit.id(), &ItemId::Commit(*head.hash()));
     assert_eq!(
-        signed(&head, 1).verify().unwrap_err(),
-        VerificationError::InvalidItem
+        commit.signature_boundary()[&author(1)],
+        BTreeSet::from([*head.hash()])
     );
     let range = FragmentRange {
         head: *head.hash(),

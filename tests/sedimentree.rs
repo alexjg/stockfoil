@@ -1090,10 +1090,9 @@ fn verified_fragment_authenticates_local_members_without_waiting_for_internal_pa
             );
         }
         let head_id = ItemId::Commit(range.head);
-        assert_eq!(
-            graph.export(&head_id).unwrap_err(),
-            ExportError::NotInMinimalCover(head_id)
-        );
+        let announcement = graph.export(&head_id).unwrap().verify().unwrap();
+        assert_eq!(announcement.id(), &head_id);
+        assert_eq!(announcement.commits().count(), 1);
         graph
             .export(&ItemId::Fragment(range.clone()))
             .unwrap()
