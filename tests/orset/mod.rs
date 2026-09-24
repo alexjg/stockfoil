@@ -101,7 +101,7 @@ impl OrSet {
 
     fn evaluate(&mut self, start_at: &[CommitHash]) {
         self.graph
-            .traverse_delivered_since(start_at, |meta, commit| {
+            .traverse_since(start_at, |meta, commit| {
                 for op in &commit.ops {
                     match op {
                         Op::Add { value } => {

@@ -289,7 +289,7 @@ impl MvRegisterMap {
         let graph = &self.graph;
         let participation = graph.diff(view_point, view_point)?;
         let mut state = State::default();
-        graph.traverse_delivered(|meta, assignment| {
+        graph.traverse(|meta, assignment| {
             if participation
                 .visibility(meta.hash())
                 .expect("delivered commit")

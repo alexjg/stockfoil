@@ -79,7 +79,7 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
     let after = alice.view_point();
     assert_eq!(before.delivered_heads(), after.delivered_heads());
     let mut redelivered = 0;
-    alice.traverse_delivered_since(before.delivered_heads(), |_, _| {
+    alice.traverse_since(before.delivered_heads(), |_, _| {
         redelivered += 1;
         ControlFlow::Continue(())
     });

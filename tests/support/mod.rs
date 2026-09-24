@@ -48,7 +48,7 @@ pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> Unve
         return UnverifiedItem::Commit { meta, signatures };
     }
     let mut known = BTreeMap::new();
-    graph.traverse_delivered(|meta, _| {
+    graph.traverse(|meta, _| {
         known.insert(*meta.hash(), meta.clone());
         ControlFlow::Continue(())
     });

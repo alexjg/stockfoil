@@ -502,7 +502,7 @@ impl<P: Clone> CommitGraph<P> {
 
     /// Visit each ready commit once, parents before children, excluding queued commits.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
-    pub fn traverse_delivered<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
+    pub fn traverse<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
         &self,
         mut traversal: F,
     ) {
@@ -517,7 +517,7 @@ impl<P: Clone> CommitGraph<P> {
     /// Visit ready commits excluding `since` and all their ancestors, parents first.
     /// An empty `since` visits all ready commits. Unknown or queued hashes are ignored.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
-    pub fn traverse_delivered_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
+    pub fn traverse_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
         &self,
         since: &[CommitHash],
         mut traversal: F,

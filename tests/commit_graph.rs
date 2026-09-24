@@ -38,7 +38,7 @@ fn insert(graph: &mut CommitGraph<u8>, value: u8, parents: &[CommitHash]) -> Com
 
 fn visited(graph: &CommitGraph<u8>) -> Vec<u8> {
     let mut values = Vec::new();
-    graph.traverse_delivered(|_, value| {
+    graph.traverse(|_, value| {
         values.push(*value);
         ControlFlow::Continue(())
     });
@@ -47,7 +47,7 @@ fn visited(graph: &CommitGraph<u8>) -> Vec<u8> {
 
 fn visited_since(graph: &CommitGraph<u8>, since: &[CommitHash]) -> Vec<u8> {
     let mut values = Vec::new();
-    graph.traverse_delivered_since(since, |_, value| {
+    graph.traverse_since(since, |_, value| {
         values.push(*value);
         ControlFlow::Continue(())
     });
@@ -143,7 +143,7 @@ fn chain_preserves_metadata_payloads_and_edges() {
     assert_eq!(graph.children(grandchild).count(), 0);
 
     let mut hashes = Vec::new();
-    graph.traverse_delivered(|meta, value| {
+    graph.traverse(|meta, value| {
         hashes.push(*meta.hash());
         assert_eq!(*value as usize, hashes.len());
         ControlFlow::Continue(())
@@ -429,7 +429,7 @@ fn traverse_delivered_since_honors_break() {
     insert(&mut graph, 4, &[]);
 
     let mut values = Vec::new();
-    graph.traverse_delivered_since(&[child], |_, value| {
+    graph.traverse_since(&[child], |_, value| {
         values.push(*value);
         ControlFlow::Break(())
     });
@@ -445,7 +445,7 @@ fn break_stops_the_entire_traversal() {
     insert(&mut graph, 3, &[]);
 
     let mut values = Vec::new();
-    graph.traverse_delivered(|_, value| {
+    graph.traverse(|_, value| {
         values.push(*value);
         ControlFlow::Break(())
     });

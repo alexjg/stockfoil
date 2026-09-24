@@ -77,7 +77,7 @@ fn local_signature_arrival_changes_only_new_signed_view_points() {
     assert!(!graph.resolve(&before).unwrap().visible(&hash).unwrap());
     assert!(graph.resolve(&after).unwrap().visible(&hash).unwrap());
     let mut count = 0;
-    graph.traverse_delivered_since(before.delivered_heads(), |_, _| {
+    graph.traverse_since(before.delivered_heads(), |_, _| {
         count += 1;
         ControlFlow::Continue(())
     });
@@ -195,7 +195,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
             .unwrap()
     );
     let mut newly_delivered = Vec::new();
-    graph.traverse_delivered_since(before.delivered_heads(), |_, value| {
+    graph.traverse_since(before.delivered_heads(), |_, value| {
         newly_delivered.push(*value);
         ControlFlow::Continue(())
     });
