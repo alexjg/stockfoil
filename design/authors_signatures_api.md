@@ -47,15 +47,15 @@ when signatures haven't arrived yet.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.
-* Add `traverse_publishable`, with the same callback shape as delivered traversal,
-  for the export path.
-  Withhold our unpublished local commits until covered by verified signatures.
-  A descendant export must not leak unsigned local ancestors. Publication uses
-  actual signature coverage, not the working frontier or document visibility.
-* `merge` uses that export path to exchange commits and signature evidence, not
-  write permissions. Receiving data must not grant access. Received commits can
-  still be forwarded pending verification; the holdback is for unpublished local
-  work. Revoked, published commits remain available for delivery and sync.
+* `minimal_cover` selects authenticated transport items; `export` supplies their
+  metadata and stored signature evidence. Pending local work is excluded. A
+  descendant export must not leak unsigned local ancestors. Publication is
+  independent of the working frontier and document visibility. See
+  [verified ingestion](verified_ingestion_api.md) for the transport contract.
+* `merge` exchanges those items, verifies them, and admits them in dependency
+  order. Write permissions and unverified queues do not travel through merge.
+  Receiving data must not grant access. Revoked, admitted commits remain
+  available for delivery and sync.
 
 Graph tests and the delivery-only OR-set example use authored commits without
 signatures. The MVR demo uses signatures and explicit permission grants.

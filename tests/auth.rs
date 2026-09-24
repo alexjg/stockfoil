@@ -396,6 +396,8 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_local_work() {
             .unwrap(),
         Vis::After
     );
+    assert!(!graph.has_admitted_commit(root.hash()));
+    assert!(!graph.has_admitted_commit(child.hash()));
     sign(&mut graph, &alice, *root.hash());
     assert!(
         graph
