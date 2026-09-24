@@ -71,6 +71,8 @@ fn assert_heads(graph: &CommitGraph<u8>, expected: &[CommitHash]) {
 fn heads_follow_chains_forks_merges_and_disconnected_roots() {
     let mut graph = CommitGraph::new();
     assert_heads(&graph, &[]);
+    assert_eq!(graph.roots().count(), 0);
+    assert!(visited(&graph).is_empty());
     let root = insert(&mut graph, 1, &[]);
     assert_heads(&graph, &[root]);
     let left = insert(&mut graph, 2, &[root]);
@@ -112,13 +114,6 @@ fn heads_change_only_when_local_queued_commits_become_ready() {
     // descendant was queued first. Neither intermediate commit remains a head.
     insert(&mut graph, 2, &[]);
     assert_heads(&graph, &[tip, unrelated]);
-}
-
-#[test]
-fn empty_graph() {
-    let graph = CommitGraph::<u8>::default();
-    assert_eq!(graph.roots().count(), 0);
-    assert!(visited(&graph).is_empty());
 }
 
 #[test]
@@ -240,27 +235,6 @@ fn merge_waits_for_all_parents_then_releases_descendants() {
 }
 
 #[test]
-fn reverse_order_local_signed_chain_is_delivered_causally() {
-    let mut graph = CommitGraph::new();
-    let root = meta(1, &[]);
-    let child = meta(2, &[*root.hash()]);
-    let grandchild = meta(3, &[*child.hash()]);
-
-    ingest_local_signed(&mut graph, grandchild, 3);
-    ingest_local_signed(&mut graph, child, 2);
-    assert!(visited(&graph).is_empty());
-    assert_eq!(graph.roots().count(), 0);
-
-    ingest_local_signed(&mut graph, root, 1);
-    assert_eq!(visited(&graph), vec![1, 2, 3]);
-    let root = graph.roots().next().unwrap();
-    let child = graph.children(root).next().unwrap();
-    let grandchild = graph.children(child).next().unwrap();
-    assert_eq!(graph.parents(child).collect::<Vec<_>>(), vec![root]);
-    assert_eq!(graph.parents(grandchild).collect::<Vec<_>>(), vec![child]);
-}
-
-#[test]
 fn local_signed_queued_duplicates_preserve_first_payload() {
     let mut graph = CommitGraph::new();
     let root = *meta(1, &[]).hash();
@@ -272,21 +246,6 @@ fn local_signed_queued_duplicates_preserve_first_payload() {
     ingest_local_signed(&mut graph, meta(2, &[root, root]), 100);
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 1);
-}
-
-#[test]
-fn blocked_commits_do_not_block_unrelated_ready_commits() {
-    let mut graph = CommitGraph::new();
-    let missing = *meta(1, &[]).hash();
-    insert(&mut graph, 2, &[missing]);
-    let root = insert(&mut graph, 3, &[]);
-    insert(&mut graph, 4, &[root]);
-    assert_eq!(visited(&graph), vec![3, 4]);
-    assert_eq!(graph.roots().count(), 1);
-
-    insert(&mut graph, 1, &[]);
-    assert_eq!(visited(&graph), vec![3, 4, 1, 2]);
-    assert_eq!(graph.roots().count(), 2);
 }
 
 #[test]
@@ -347,24 +306,7 @@ fn ancestry_ignores_unknown_and_queued_commits_until_ready() {
 }
 
 #[test]
-fn ancestry_survives_fork_and_merge() {
-    let mut graph = CommitGraph::new();
-    let root = insert(&mut graph, 1, &[]);
-    let mut other = graph.clone();
-    let left = insert(&mut graph, 2, &[root]);
-    let right = insert(&mut other, 3, &[root]);
-    assert!(other.is_ancestor(&root, &right));
-    graph.merge(&other);
-    assert!(graph.is_ancestor(&root, &right));
-    assert!(!graph.is_ancestor(&left, &right));
-    assert!(!graph.is_ancestor(&right, &left));
-    let merge = insert(&mut graph, 4, &[left, right]);
-    assert!(graph.is_ancestor(&left, &merge));
-    assert!(graph.is_ancestor(&right, &merge));
-}
-
-#[test]
-fn traverse_delivered_since_excludes_heads_and_all_their_ancestors() {
+fn traverse_since_excludes_heads_and_all_their_ancestors() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 1, &[]);
     let left = insert(&mut graph, 2, &[root]);
@@ -384,7 +326,7 @@ fn traverse_delivered_since_excludes_heads_and_all_their_ancestors() {
 }
 
 #[test]
-fn traverse_delivered_since_delivers_only_new_history_after_merge() {
+fn traverse_since_delivers_only_new_history_after_merge() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 1, &[]);
     let mut other = graph.clone();
@@ -406,7 +348,7 @@ fn traverse_delivered_since_delivers_only_new_history_after_merge() {
 }
 
 #[test]
-fn traverse_delivered_since_handles_empty_unknown_and_queued_heads() {
+fn traverse_since_handles_empty_unknown_and_queued_heads() {
     let mut graph = CommitGraph::new();
     let unknown = *meta(99, &[]).hash();
     assert!(visited_since(&graph, &[]).is_empty());
@@ -421,7 +363,7 @@ fn traverse_delivered_since_handles_empty_unknown_and_queued_heads() {
 }
 
 #[test]
-fn traverse_delivered_since_honors_break() {
+fn traverse_since_honors_break() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);

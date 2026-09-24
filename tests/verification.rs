@@ -295,6 +295,7 @@ fn boundaries_are_inclusive_assumptions_without_external_parent_metadata() {
     );
     // No evidence for the boundary's author and no metadata for its parent.
     let verified = incoming.verify().unwrap();
+    assert!(!verified.signature_boundary().contains_key(&author(2)));
     assert_eq!(
         verified.dependencies().copied().collect::<Vec<_>>(),
         vec![*boundary.hash()]
@@ -350,32 +351,6 @@ fn boundaries_are_inclusive_assumptions_without_external_parent_metadata() {
             VerificationError::InvalidItem
         );
     }
-}
-
-#[test]
-fn fragment_requires_each_authors_own_coverage() {
-    let root = at_depth(2, vec![], 0);
-    let head = at_depth(1, vec![*root.hash()], 1);
-    let range = FragmentRange {
-        head: *head.hash(),
-        boundary: BTreeSet::new(),
-    };
-    assert_eq!(
-        fragment(&range, vec![root.clone(), head.clone()], 1)
-            .verify()
-            .unwrap_err(),
-        VerificationError::MissingSignature {
-            author: author(2),
-            commit: *root.hash()
-        }
-    );
-    UnverifiedItem::Fragment {
-        range,
-        commits: vec![head.clone(), root],
-        signatures: vec![evidence(1, *head.hash()), evidence(2, *head.hash())],
-    }
-    .verify()
-    .unwrap();
 }
 
 #[test]

@@ -19,10 +19,11 @@ fn author(seed: u8) -> Author {
 }
 
 fn meta(seed: u8, parents: Vec<CommitHash>, depth: usize) -> CommitMeta {
+    let author = author(seed);
     (0u64..2_000_000)
         .map(|nonce| {
             CommitMeta::new(CommitContents {
-                author: author(seed),
+                author,
                 parents: parents.clone(),
                 payload: BlobHash::of_contents(&nonce.to_le_bytes()),
             })
@@ -200,28 +201,6 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
 }
 
 #[test]
-fn an_author_present_only_at_a_boundary_has_no_new_signature_obligation() {
-    let external = meta(1, vec![], 0);
-    let boundary = meta(1, vec![*external.hash()], 1);
-    let head = meta(2, vec![*boundary.hash()], 1);
-    let verified = UnverifiedItem::Fragment {
-        range: FragmentRange {
-            head: *head.hash(),
-            boundary: BTreeSet::from([*boundary.hash()]),
-        },
-        commits: vec![boundary.clone(), head.clone()],
-        signatures: vec![sig(2, &head)],
-    }
-    .verify()
-    .unwrap();
-    assert!(!verified.signature_boundary().contains_key(&author(1)));
-    assert_eq!(
-        verified.dependencies().copied().collect::<Vec<_>>(),
-        vec![*boundary.hash()]
-    );
-}
-
-#[test]
 fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certificates() {
     let root = meta(1, vec![], 0);
     let boundary = meta(2, vec![*root.hash()], 1);
@@ -360,10 +339,11 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
             for &parent in &parents {
                 reachable[index][parent] = true;
             }
+            let signer = author(seed);
             let envelope = (0u64..1_000_000)
                 .map(|nonce| {
                     CommitMeta::new(CommitContents {
-                        author: author(seed),
+                        author: signer,
                         parents: parents.iter().map(|&i| *members[i].hash()).collect(),
                         payload: BlobHash::of_contents(
                             &[index as u64, nonce].map(u64::to_le_bytes).concat(),

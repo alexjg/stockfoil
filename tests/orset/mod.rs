@@ -1,79 +1,71 @@
-//! Signed, delivery-only OR-set example. Merges exchange verified history;
-//! the MVR demo additionally exercises document participation and permissions.
-
+//! Delivery-only observed-remove set. The graph supplies causal ordering and
+//! deduplication, so the materialized state only needs the surviving add IDs.
 use std::{
     collections::{BTreeSet, HashMap},
     ops::ControlFlow,
 };
 
 use ed25519_dalek::{Signer, SigningKey};
-use serde::{Deserialize, Serialize};
-use stockfoil::{Author, CommitGraph, CommitHash, CommitMeta, Signature};
+use serde::Serialize;
+use stockfoil::{Author, CommitGraph, CommitHash, Signature};
 
 pub struct OrSet {
-    graph: CommitGraph<OrSetCommit>,
-    state: State,
-    actor: ActorId,
+    graph: CommitGraph<Op>,
+    adds: HashMap<String, BTreeSet<CommitHash>>,
     signing_key: SigningKey,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ActorId([u8; 32]);
-
-impl ActorId {
-    fn author(&self) -> Author {
-        Author::try_from(self.0.as_slice()).unwrap()
-    }
+#[derive(Clone, Serialize)]
+enum Op {
+    Add(String),
+    Remove {
+        value: String,
+        observed: Vec<[u8; 32]>,
+    },
 }
 
 impl OrSet {
     pub fn new() -> Self {
-        let signing_key = SigningKey::from_bytes(&rand::random());
         Self {
             graph: CommitGraph::new(),
-            state: State {
-                adds: HashMap::new(),
-                removes: BTreeSet::new(),
-            },
-            actor: ActorId(signing_key.verifying_key().to_bytes()),
-            signing_key,
+            adds: HashMap::new(),
+            signing_key: SigningKey::from_bytes(&rand::random()),
         }
+    }
+
+    fn author(&self) -> Author {
+        Author::try_from(self.signing_key.verifying_key().as_bytes().as_slice()).unwrap()
     }
 
     pub fn add(&mut self, value: String) {
-        let commit = OrSetCommit {
-            actor: self.actor.clone(),
-            ops: vec![Op::Add { value }],
-        };
-        self.ingest_local_commit(
-            self.graph.commit_by(self.actor.author(), &commit.encode()),
-            commit,
-        );
+        self.commit(Op::Add(value));
     }
 
     pub fn remove(&mut self, value: String) {
-        let predecessors = self
-            .state
+        let observed: Vec<_> = self
             .adds
             .get(&value)
-            .map(|commits| {
-                let remaining_adds = commits.difference(&self.state.removes);
-                remaining_adds.cloned().collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        // There is no surviving key which sets this value. Nothing to do
-        if predecessors.is_empty() {
-            return;
+            .into_iter()
+            .flatten()
+            .map(|h| *h.as_bytes())
+            .collect();
+        if !observed.is_empty() {
+            self.commit(Op::Remove { value, observed });
         }
-        let commit = OrSetCommit {
-            actor: self.actor.clone(),
-            ops: vec![Op::Remove { predecessors }],
-        };
-        self.ingest_local_commit(
-            self.graph.commit_by(self.actor.author(), &commit.encode()),
-            commit,
-        );
+    }
+
+    fn commit(&mut self, op: Op) {
+        let before: Vec<_> = self.graph.delivered_heads().collect();
+        let meta = self
+            .graph
+            .commit_by(self.author(), &bcs::to_bytes(&op).unwrap());
+        let hash = *meta.hash();
+        let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
+        self.graph.ingest_local_commit(meta, op);
+        self.graph
+            .ingest_signature(self.author(), hash, signature)
+            .unwrap();
+        self.evaluate(&before);
     }
 
     pub fn fork(&self) -> Self {
@@ -83,130 +75,63 @@ impl OrSet {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        let heads_before = self.graph.delivered_heads().collect::<Vec<_>>();
+        let before: Vec<_> = self.graph.delivered_heads().collect();
         self.graph.merge(&other.graph);
-        self.evaluate(&heads_before);
+        self.evaluate(&before);
     }
 
-    fn ingest_local_commit(&mut self, meta: CommitMeta, commit: OrSetCommit) {
-        let heads_before = self.graph.delivered_heads().collect::<Vec<_>>();
-        let hash = *meta.hash();
-        let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
-        self.graph.ingest_local_commit(meta, commit);
-        self.graph
-            .ingest_signature(self.actor.author(), hash, signature)
-            .expect("signature from our own signing key");
-        self.evaluate(&heads_before);
-    }
-
-    fn evaluate(&mut self, start_at: &[CommitHash]) {
-        self.graph
-            .traverse_since(start_at, |meta, commit| {
-                for op in &commit.ops {
-                    match op {
-                        Op::Add { value } => {
-                            self.state
-                                .adds
-                                .entry(value.to_string())
-                                .or_default()
-                                .insert(*meta.hash());
-                        }
-                        Op::Remove { predecessors } => {
-                            self.state.removes.extend(predecessors);
-                        }
+    fn evaluate(&mut self, since: &[CommitHash]) {
+        self.graph.traverse_since(since, |meta, op| {
+            match op {
+                Op::Add(value) => {
+                    self.adds
+                        .entry(value.clone())
+                        .or_default()
+                        .insert(*meta.hash());
+                }
+                Op::Remove { value, observed } => {
+                    if let Some(adds) = self.adds.get_mut(value) {
+                        adds.retain(|hash| !observed.contains(hash.as_bytes()));
                     }
                 }
-                ControlFlow::Continue(())
-            });
+            }
+            ControlFlow::Continue(())
+        });
     }
 
     pub fn value(&self) -> BTreeSet<String> {
-        let mut result = BTreeSet::new();
-        for (key, commits) in &self.state.adds {
-            let remaining_adds = commits.difference(&self.state.removes);
-            if remaining_adds.count() > 0 {
-                result.insert(key.to_string());
-            }
-        }
-        result
+        self.adds
+            .iter()
+            .filter(|(_, ids)| !ids.is_empty())
+            .map(|(value, _)| value.clone())
+            .collect()
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub enum Op {
-    Add {
-        value: String,
-    },
-    Remove {
-        #[serde(with = "commit_hashes")]
-        predecessors: Vec<CommitHash>,
-    },
-}
+#[test]
+fn removes_observed_adds_but_preserves_concurrent_adds() {
+    let mut left = OrSet::new();
+    left.remove("absent".into());
+    left.add("old".into());
+    left.remove("old".into());
+    assert!(left.value().is_empty());
+    let mut right = left.fork();
+    assert_ne!(left.author(), right.author());
+    left.add("shared".into());
+    right.add("shared".into());
+    left.remove("shared".into());
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct OrSetCommit {
-    pub ops: Vec<Op>,
-    pub actor: ActorId,
-}
+    right.merge(&left);
+    left.merge(&right);
+    left.merge(&right);
+    assert_eq!(left.value(), BTreeSet::from(["shared".into()]));
+    assert_eq!(right.value(), left.value());
 
-impl OrSetCommit {
-    pub fn encode(&self) -> Vec<u8> {
-        bcs::to_bytes(self).expect("OR-set commit serialization failed")
-    }
-
-    pub fn decode(data: &[u8]) -> bcs::Result<Self> {
-        bcs::from_bytes(data)
-    }
-}
-
-// Keep Serde support local to the tests; hashes encode as fixed-size byte arrays.
-mod commit_hashes {
-    use super::*;
-
-    pub fn serialize<S: serde::Serializer>(
-        hashes: &[CommitHash],
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(hashes.iter().map(CommitHash::as_bytes))
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<CommitHash>, D::Error> {
-        let hashes = Vec::<[u8; 32]>::deserialize(deserializer)?;
-        Ok(hashes.into_iter().map(CommitHash::from).collect())
-    }
-}
-
-pub struct State {
-    adds: HashMap<String, BTreeSet<CommitHash>>,
-    removes: BTreeSet<CommitHash>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signed_forks_keep_distinct_actors_and_converge_after_repeated_merges() {
-        let mut left = OrSet::new();
-        let mut right = left.fork();
-        assert_ne!(left.actor.author(), right.actor.author());
-        left.add("shared".to_owned());
-        right.add("shared".to_owned());
-        left.remove("shared".to_owned());
-
-        // The removal observed only the left actor's independently signed add.
-        right.merge(&left);
-        left.merge(&right);
-        left.merge(&right);
-        assert_eq!(left.value(), BTreeSet::from(["shared".to_owned()]));
-        assert_eq!(right.value(), left.value());
-
-        right.remove("shared".to_owned());
-        left.merge(&right);
-        right.merge(&left);
-        assert!(left.value().is_empty());
-        assert!(right.value().is_empty());
-    }
+    right.remove("shared".into());
+    left.merge(&right);
+    right.merge(&left);
+    assert!(left.value().is_empty());
+    assert!(right.value().is_empty());
+    // Replaying old history cannot resurrect an observed, removed add.
+    assert!(left.fork().value().is_empty());
 }

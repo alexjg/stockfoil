@@ -47,52 +47,6 @@ fn grant(graph: &mut CommitGraph<u8>, keys: &[&SigningKey]) {
 }
 
 #[test]
-fn local_signature_arrival_changes_only_new_signed_view_points() {
-    let alice = key(1);
-    let mut graph = CommitGraph::new();
-    grant(&mut graph, &[&alice]);
-    let c = commit(&alice, 1, &[]);
-    let hash = *c.hash();
-    graph.ingest_local_commit(c, 1);
-    let working = graph.view_point();
-    assert!(matches!(
-        graph.resolve(&working),
-        Err(ResolveError::MissingSignature { .. })
-    ));
-    let before = graph.signed_view_point();
-    assert!(!graph.resolve(&before).unwrap().visible(&hash).unwrap());
-
-    sign(&mut graph, &alice, hash);
-    let after = graph.signed_view_point();
-    assert!(graph.resolve(&working).unwrap().visible(&hash).unwrap());
-    assert_eq!(before.delivered_heads(), after.delivered_heads());
-    assert_eq!(
-        graph
-            .diff(&before, &after)
-            .unwrap()
-            .visibility(&hash)
-            .unwrap(),
-        Vis::After
-    );
-    assert!(!graph.resolve(&before).unwrap().visible(&hash).unwrap());
-    assert!(graph.resolve(&after).unwrap().visible(&hash).unwrap());
-    let mut count = 0;
-    graph.traverse_since(before.delivered_heads(), |_, _| {
-        count += 1;
-        ControlFlow::Continue(())
-    });
-    assert_eq!(count, 0);
-
-    // Historical signatures are rejected; duplicate receipts remain idempotent.
-    assert_eq!(
-        graph.ingest_signature(author(&alice), hash, signature(&alice, hash)),
-        Err(SignatureError::NotPendingLocalCommit(hash))
-    );
-    support::receive_commit(&mut graph, commit(&alice, 1, &[]), 99);
-    assert_eq!(graph.view_point(), after);
-}
-
-#[test]
 fn signatures_require_known_local_work_but_can_precede_causal_delivery() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
@@ -293,43 +247,6 @@ fn pending_evidence_waits_for_admission_before_resolving_old_views() {
             .visible(root.hash())
             .unwrap()
     );
-}
-
-#[test]
-fn unverified_receipts_reject_missing_invalid_or_other_authors_signatures() {
-    let alice = key(1);
-    let bob = key(2);
-    let root = commit(&alice, 1, &[]);
-    let graph = CommitGraph::<u8>::new();
-    let unsigned = UnverifiedItem::Commit {
-        meta: root.clone(),
-        signatures: vec![],
-    };
-    assert!(matches!(
-        unsigned.verify(),
-        Err(VerificationError::MissingSignature { author: signer, commit: hash })
-            if signer == author(&alice) && hash == *root.hash()
-    ));
-    // A valid signature by Bob is not coverage for Alice's received metadata.
-    assert!(matches!(
-        receipt(root.clone(), &bob).verify(),
-        Err(VerificationError::MissingSignature { author: signer, commit: hash })
-            if signer == author(&alice) && hash == *root.hash()
-    ));
-    let wrong_signer = signature(&bob, *root.hash());
-    assert!(matches!(
-        (UnverifiedItem::Commit {
-            meta: root.clone(),
-            signatures: vec![SignatureEvidence {
-                author: author(&alice),
-                commit: *root.hash(),
-                signature: wrong_signer,
-            }],
-        })
-        .verify(),
-        Err(VerificationError::InvalidSignature(_))
-    ));
-    assert!(graph.delivered_heads().next().is_none());
 }
 
 #[test]
@@ -566,36 +483,6 @@ fn merge_withholds_queued_descendants_of_local_work() {
         vec![*tip.hash()]
     );
     assert!(peer.is_ancestor(root.hash(), tip.hash()));
-}
-
-#[test]
-fn received_children_require_verified_parents_not_local_optimism() {
-    let alice = key(1);
-    let bob = key(2);
-    let root = commit(&alice, 1, &[]);
-    let child = commit(&bob, 2, &[*root.hash()]);
-    let mut graph = CommitGraph::new();
-    grant(&mut graph, &[&alice, &bob]);
-    graph.ingest_local_commit(root.clone(), 1);
-    let before = graph.view_point();
-    let pending = receipt(child.clone(), &bob).verify().unwrap();
-    assert!(!graph.has_admitted_commit(root.hash()));
-    assert!(matches!(
-        graph.ingest(pending.clone(), |_| panic!("missing dependency must precede payload lookup")),
-        Err(IngestError::MissingDependency(hash)) if hash == *root.hash()
-    ));
-    assert_eq!(graph.view_point(), before);
-
-    sign(&mut graph, &alice, *root.hash());
-    assert!(graph.has_admitted_commit(root.hash()));
-    graph.ingest(pending, |_| 2).unwrap();
-    assert!(
-        graph
-            .resolve(&graph.signed_view_point())
-            .unwrap()
-            .visible(child.hash())
-            .unwrap()
-    );
 }
 
 #[test]

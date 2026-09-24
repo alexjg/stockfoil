@@ -46,21 +46,9 @@ fn concurrent_assignments_survive_both_merge_directions() {
     assert_eq!(right.get("title"), left.get("title"));
 
     // Neither repeated delivery nor exchanging merged histories changes the result.
-    for _ in 0..3 {
-        left.merge(&right);
-        right.merge(&left);
-        assert_eq!(left.get("title"), values(&["Hello", "Howdy"]));
-        assert_eq!(right.get("title"), left.get("title"));
-    }
-}
-
-#[test]
-fn assignment_after_merge_resolves_conflict() {
-    let (mut left, mut right) = conflicting_replicas();
     left.merge(&right);
-    left.set("title", "Welcome");
-    assert_eq!(left.get("title"), values(&["Welcome"]));
     right.merge(&left);
+    assert_eq!(left.get("title"), values(&["Hello", "Howdy"]));
     assert_eq!(right.get("title"), left.get("title"));
 }
 

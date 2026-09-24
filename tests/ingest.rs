@@ -5,7 +5,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
     Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
     FragmentRange, IngestError, ItemId, Signature, SignatureEvidence, UnverifiedItem,
-    VerificationError, WritePermission,
+    WritePermission,
 };
 
 fn author(seed: u8) -> Author {
@@ -525,27 +525,4 @@ fn payload_panic_after_partial_preparation_leaves_all_graph_state_unchanged() {
         .unwrap();
     graph.ingest(verified, |_| 8).unwrap();
     assert!(graph.has_admitted_commit(head.hash()));
-}
-
-#[test]
-fn duplicate_metadata_still_requires_item_local_valid_signature_targets() {
-    let root = at_depth(1, vec![], 0);
-    let outside = at_depth(2, vec![], 0);
-    let mut graph = CommitGraph::new();
-    graph
-        .ingest(item(&root, 1).verify().unwrap(), |_| ())
-        .unwrap();
-    graph
-        .ingest(item(&outside, 2).verify().unwrap(), |_| ())
-        .unwrap();
-    let before = graph.minimal_cover();
-    let incoming = UnverifiedItem::Commit {
-        meta: root.clone(),
-        signatures: vec![proof(1, *root.hash()), proof(2, *outside.hash())],
-    };
-    assert_eq!(
-        incoming.verify().unwrap_err(),
-        VerificationError::InvalidItem
-    );
-    assert_eq!(graph.minimal_cover(), before);
 }

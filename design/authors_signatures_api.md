@@ -58,8 +58,8 @@ when signatures haven't arrived yet.
   Receiving data must not grant access. Revoked, admitted commits remain
   available for delivery and sync.
 
-Graph tests and the delivery-only OR-set example use authored commits without
-signatures. The MVR demo uses signatures and explicit permission grants.
+Both examples sign their local commits. The OR-set uses delivery only; the MVR
+also exercises participation and explicit permission grants.
 
 ## Viewpoints and diffs
 
@@ -129,102 +129,32 @@ maximal *participating* assignments for each key. Revoking an assignment removes
 both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
-The small demo rebuilds its state from retained assignments. Later we can use
-the commit diff to pick affected keys. It also retains its locally captured viewpoints
-so it can recognize historical local reads that don't yet have signatures.
-In either case, compare viewpoints after local creation, commit ingestion,
-signature ingestion, and permission updates, not just after explicit revocation.
-The displayed state uses the working viewpoint; signing status compares it with
-the signed one.
+The implementation lives in `tests/mv_register/implementation.rs`. It computes
+values on reads rather than maintaining a second state cache. Locally captured
+working viewpoints remain readable before signing; imported viewpoints must
+resolve against authenticated history first.
 
-The implementation lives in `tests/mv_register/implementation.rs`. The tests are
-sibling modules, so Rust privacy keeps them out of its graph and assignment store.
-They exercise document reads, historical views, signing, and merge behavior
-through the MVR API:
+The example owns its signing key and has no external-signer wrapper or wire
+protocol. Its document API is:
 
-* `author() -> Author` exposes the replica's public signing key.
-* `with_author(Author)` creates a replica whose signer lives elsewhere. It uses
-  the public key as the assignment's actor ID; no private key is required.
-* `prepare_set(key, value) -> CommitHash` creates and locally ingests an assignment
-  without signing it. `ingest_signature(author, hash, signature)` delivers a
-  signer response and refreshes the working and signed views.
-* `set(key, value) -> CommitHash` remains a convenience that prepares a local
-  assignment and signs it immediately with the demo's in-memory key. Split those
-  steps in the fixture so tests can hold back real signatures while the local
-  edit is already visible. Callers may still ignore the returned hash.
-* `set_write_permissions(&HashMap<Author, WritePermission>)` updates the graph
-  and reevaluates the document.
-* `view_point()` and `signed_view_point()` capture working and signature-backed
-  document views.
-* `merge(&other)` delegates to `CommitGraph::merge` and refreshes the document.
-  Only authenticated history travels; unsigned local work stays local. There is
-  no separate MVR message format or export/receive API.
-* `get_at(&ViewPoint, key) -> Result<BTreeSet<String>, ResolveError>` reads a
-  captured viewpoint without changing the current one. Local captures can be
-  read before signing; imported viewpoints must be resolved first.
+* `new()` and `author()` create and identify a replica, initially permitted to
+  read its own writes.
+* `prepare_set(key, value)` makes a local draft; `publish()` signs pending work.
+  `set(key, value)` does both.
+* `set_write_permissions(...)` changes participation without discarding history.
+* `view_point()`, `get(key)`, and `get_at(view, key)` support current and historical
+  reads.
+* `merge(&other)` transfers authenticated history, not permissions or drafts.
+  `fork()` creates a new key, copies permissions, and merges that history.
 
-`new()` generates a signing key and explicitly grants that author unbounded
-access. This is demo setup, not a Stockfoil default. `fork()` creates a new
-signing key, copies the old permission map, and imports only publishable history.
-It doesn't copy unsigned local drafts or the source's local viewpoint exemptions. Tests
-must grant the new author on both replicas before expecting its writes to
-contribute. `merge()` transfers publishable commits and signature evidence, and
-leaves local permissions alone.
+The tests are sibling modules and cannot inspect the private graph. They cover
+concurrent register values, revocation restoring overwritten values, and one
+prepare/publish/relay flow preserving historical drafts. The OR-set example in
+`tests/orset/mod.rs` instead applies each delivered operation once with
+`traverse_since`, retaining only surviving add IDs.
 
-## First test and follow-ups
-
-`tests/mv_register/revocation.rs` and the signature-flow test run in the normal
-smoke target against the MVR API, backed by the real graph and Ed25519 verification.
-
-The revocation test covers inclusive bounds, restored overwritten values,
-concurrent values, allowed descendants of revoked commits, default-deny, explicit
-denial, empty bounds, restoring unbounded access, stable historical reads, and
-reading a captured view on another replica.
-
-`tests/view_point_diff.rs` tests the graph API directly: bidirectional and cross-branch
-diffs, visibility classification, changed-commit enumeration, unchanged delivery
-under revocation, strict resolution, and working-versus-signed participation.
-Those assertions don't belong in the MVR tests.
-
-`tests/mv_register/signatures.rs` exercises the split
-prepare/sign flow. It creates an Ed25519 key from a fixed test seed and signs the
-actual 32-byte commit hashes with `ed25519-dalek`. The test controls when those
-signatures reach Stockfoil, so it can exercise delayed signing without fixed
-signature fixtures or a second implementation of the commit encoding.
-
-The flow test covers:
-
-1. Capture the initial working and signed viewpoints.
-2. Prepare a local edit without delivering its signature. It appears in the
-   working document immediately; the signed view still shows the old value.
-3. Read the working and signed views. Confirm another replica cannot merge the
-   local assignment or read the captured pending view.
-4. Deliver the real signature. The signed view catches up, merging is allowed,
-   and the working document doesn't change again.
-5. Recheck the captured views: their values stay fixed. Another replica can now
-   read the earlier working view using the published signature evidence.
-
-It also checks checkpoint-backed history, an overwritten pending edit, a valid
-signature supplied for the wrong hash, repeated merges, and holding back unsigned
-descendants while signing is pending. Merging an assignment with our own author
-identity grants neither local trust nor write permission. `tests/auth.rs` covers
-a signed descendant by another author that mustn't leak an unsigned local
-ancestor. Payload-tampering tests belong to an application wire protocol, which
-this demo intentionally does not implement.
-
-The graph-level tests in `tests/auth.rs` deliver commits and signatures separately
-to cover:
-
-* A remote signature arriving without new commits changes participation, not old
-  viewpoints or delivered heads.
-* A queued frontier commit proves nothing until all its parents are delivered;
-  its delivery can activate older assignments without redelivering them.
-* Invalid signatures, wrong signers, signature-before-commit, and duplicates.
-* Resolving old viewpoints using newer signatures after pruning old ones;
-  insufficient evidence reports an error.
-* Multiple heads in both write and authentication frontiers, including branches
-  signed by different authors.
-
-Keep byte-format and signature-verification tests at the graph/metadata layer.
-The MVR has no nested objects, so it cannot test hiding an object whose creation
-was revoked; that needs a richer CRDT demo.
+Signature errors, causal admission, fragment certificates, and viewpoint diffs
+are tested directly in the graph suites rather than repeated through the examples.
+The sedimentree structural oracle runs causal, reverse, and shuffled schedules
+with two seeds by default; `SEDIMENTREE_TEST_SEED` and `SEDIMENTREE_TEST_CASES`
+allow longer reproducible runs without slowing the normal suite.
