@@ -21,15 +21,6 @@ fn append(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHas
     hash
 }
 
-fn published(graph: &CommitGraph<u8>) -> Vec<CommitHash> {
-    let mut hashes = Vec::new();
-    graph.traverse_publishable(|meta, _| {
-        hashes.push(*meta.hash());
-        ControlFlow::Continue(())
-    });
-    hashes
-}
-
 fn assert_changes(diff: &ViewPointDiff<'_>, removed: &[CommitHash], added: &[CommitHash]) {
     let changes = diff.changed_commits().collect::<Vec<_>>();
     assert_eq!(changes.len(), removed.len() + added.len());
@@ -144,7 +135,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     graph.set_write_permissions(&HashMap::from([(author(&key), WritePermission::Unbounded)]));
     let base = prepare(&mut graph, &key, 0);
     assert!(graph.resolve(&graph.view_point()).is_err());
-    assert!(published(&graph).is_empty());
     sign(&mut graph, &key, base);
     let initial = graph.view_point();
     assert!(graph.resolve(&initial).is_ok());
@@ -162,7 +152,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     assert_eq!(pending.visibility(&base).unwrap(), Vis::Both);
     assert_eq!(pending.visibility(&first).unwrap(), Vis::After);
     assert_changes(&pending, &[], &[first]);
-    assert_eq!(published(&graph), vec![base]);
 
     assert!(
         graph
@@ -187,7 +176,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         &[],
         &[first, tip],
     );
-    assert_eq!(published(&graph), vec![base]);
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
     assert_eq!(peer.delivered_heads().collect::<Vec<_>>(), vec![base]);
@@ -211,7 +199,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         batch_working.delivered_heads(),
         graph.view_point().delivered_heads()
     );
-    assert_eq!(published(&graph), vec![base, first, tip]);
     assert!(graph.resolve(&first_working).is_ok());
     assert!(graph.resolve(&batch_working).is_ok());
     let old_signed = graph.resolve(&batch_signed).unwrap();
@@ -233,5 +220,4 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         &[],
         &[],
     );
-    assert_eq!(published(&graph), vec![base, first, tip]);
 }

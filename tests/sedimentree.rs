@@ -537,7 +537,7 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
     let mut destination = CommitGraph::new();
     destination.merge(graph);
     let mut received = BTreeSet::new();
-    destination.traverse_publishable(|meta, _| {
+    destination.traverse_delivered(|meta, _| {
         received.insert(hash(meta));
         ControlFlow::Continue(())
     });

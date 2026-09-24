@@ -44,18 +44,13 @@ pub struct CommitGraph<P> {
 #[derive(Clone)]
 pub(crate) struct Node {
     meta: CommitMeta,
-    // Every signature here signs this node's hash. Fragment certificates refer
-    // to these signatures rather than copying arbitrary-target evidence.
     signatures: BTreeMap<Author, Signature>,
-    // Empty until the canonical range is admitted, directly or as an interior
-    // constituent. A standalone announcement supplies no fragment certificate.
-    // Entry n is the fragment at level n + 1, up to the commit's hash depth.
+    // Fragments which this commit is a head of. Indexed by depth, ascending
     headed_fragments: Vec<FragmentIdx>,
 }
 
 impl Node {
-    /// Fragments are indexed in ascending level order. Only the maximum-level
-    /// record is canonical; the others are construction aids.
+    // The deepest fragment which this commit is a head of
     fn canonical_fragment(&self) -> Option<FragmentIdx> {
         self.headed_fragments.last().copied()
     }
@@ -125,9 +120,7 @@ impl<P: Clone> CommitGraph<P> {
         self.heads.iter().copied()
     }
 
-    /// Whether `ancestor` is a strict ancestor of `descendant` via parent edges.
-    /// Returns false for identical hashes or if either commit is unknown or queued.
-    /// Walks the existing graph on demand, without storing a transitive ancestry index.
+    /// Whether `ancestor` is a strict ancestor of `descendant`
     pub fn is_ancestor(&self, ancestor: &CommitHash, descendant: &CommitHash) -> bool {
         let (Some(&ancestor), Some(&descendant)) =
             (self.by_hash.get(ancestor), self.by_hash.get(descendant))
@@ -208,9 +201,6 @@ impl<P: Clone> CommitGraph<P> {
         Ok(())
     }
 
-    // Internal delivery machinery for local edits and successfully admitted items.
-    // This is not a public received-history entry point.
-    // Queues missing parents and preserves the first payload for duplicates.
     fn insert_commit(&mut self, meta: CommitMeta, data: P) {
         if self.by_hash.contains_key(meta.hash())
             || self
@@ -278,7 +268,8 @@ impl<P: Clone> CommitGraph<P> {
         self.by_hash.insert(hash, node_idx);
     }
 
-    // Only authenticated, parent-closed history enters the fragment index.
+    // Given some node `head`, create and insert all the fragments which have that node as their
+    // head. 
     fn insert_fragments(&mut self, head: NodeIdx) {
         let depth = sedimentree_depth(self.nodes[head].meta.hash());
         for level in 1..=depth {
@@ -311,9 +302,7 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Borrow the authenticated sedimentree index without accessing payloads.
-    /// Contained fragments remain useful topology, but only cover entries retain
-    /// certificates and can be exported.
+    // Return a view of this commit graph as a sedimentree
     pub fn as_sedimentree(&self) -> SedimentreeView<'_> {
         SedimentreeView {
             nodes: &self.nodes,
@@ -327,11 +316,6 @@ impl<P: Clone> CommitGraph<P> {
     /// exactly once. Parents within the fragment precede their children; among
     /// currently eligible commits, the smallest full commit hash is visited first.
     /// This order is independent of ingestion order and local node indices.
-    ///
-    /// Validates the range and publication eligibility before any callback.
-    /// Metadata and payloads are borrowed, not cloned or encoded. Returning
-    /// `ControlFlow::Break(())` stops the entire traversal and returns `Ok(())`.
-    /// No signatures or independent fragment-local verification proofs are supplied.
     pub fn traverse_fragment<'graph>(
         &'graph self,
         range: &FragmentRange,
@@ -481,9 +465,6 @@ impl<P: Clone> CommitGraph<P> {
         self.authenticated.contains(hash)
     }
 
-    /// Exchange the entire current cover, verify without a provider, then admit
-    /// ready items. Dependencies are obtained through covering items, never an
-    /// arbitrary-commit export fallback. Local trust and permissions do not travel.
     pub fn merge(&mut self, other: &Self) {
         let cover = other.minimal_cover();
         let mut pending: Vec<_> = cover
@@ -564,22 +545,6 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Visit authenticated, parent-closed history in parents-first order.
-    /// Returning `Break` stops traversal. Publication is separate from document
-    /// participation and does not guarantee standalone exportability of each
-    /// commit. Use [`Self::minimal_cover`] to select transport items.
-    pub fn traverse_publishable<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
-        &self,
-        mut traversal: F,
-    ) {
-        let publishable = self.publishable_nodes();
-        for (idx, node) in &self.nodes {
-            if publishable[idx.0] && traversal(&node.meta, &self.store[&idx]).is_break() {
-                break;
-            }
-        }
-    }
-
     /// Prepare an authored commit without signing or ingesting it.
     /// Sign the raw 32 bytes of its hash with Ed25519.
     pub fn commit_by(&self, author: Author, contents: &[u8]) -> CommitMeta {
@@ -590,10 +555,7 @@ impl<P: Clone> CommitGraph<P> {
         })
     }
 
-    /// Ingest our own prepared commit for immediate local use. Keep it out of
-    /// publication until covered by verified signatures. The caller is responsible
-    /// for owning the author's signing key; never use this path for received data.
-    /// Duplicate ingestion does not upgrade received data to local trust.
+    /// Ingest our own prepared commit for immediate local use.
     pub fn ingest_local_commit(&mut self, meta: CommitMeta, data: P) {
         if self.by_hash.contains_key(meta.hash())
             || self
@@ -608,10 +570,7 @@ impl<P: Clone> CommitGraph<P> {
         self.finish_local_commits();
     }
 
-    /// Attach a signature to a known, still-pending local commit. Unknown targets,
-    /// received history and already-admitted commits are rejected. Once a local
-    /// item's certificate and dependencies are complete, admit it through the
-    /// same stateless verification rules as received history.
+    /// Attach a signature to a known, still-pending local commit
     pub fn ingest_signature(
         &mut self,
         author: Author,
@@ -1076,8 +1035,6 @@ struct Fragment {
     head: NodeIdx,
     level: usize,
     boundary: Vec<NodeIdx>,
-    // Per-author signed frontiers covering the introduced members. Signature
-    // bytes live on the referenced nodes; contained records can drop the refs.
     signature_boundary: BTreeMap<Author, Vec<NodeIdx>>,
 }
 
