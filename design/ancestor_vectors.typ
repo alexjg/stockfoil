@@ -21,57 +21,69 @@ stop traversal of the graph, we just want to indicate to the caller that the
 commit is not visible.
 
 This concept of visibility makes the diff APIs that we would like to offer 
-more complex than might be immediately obvious. 
+more complex than might be immediately obvious. When the point in a document is
+identified by just a set of heads then diffing between them is well expressed
+by a topological walk of the commit graph from before to after with a flag
+indicating whether the commit was added or removed. With visibility in the mix
+we need to expand the walk and add another flag for the commit visibility 
+before and afterwards. Specifically, we start the walk at the intersection of
+the down-set defined by the before/after write frontiers and then walk towards
+the union of the before/after heads. We annotate each commit in the walk with
+it's before/after presence in the graph, and it's before/after visibility
+according to the write frontiers.
 
+This traversal is good for some usecases. In other scenarios though
+materialization is split into two steps. Firstly, ingesting newly delivered
+(causally ready) commits, and secondly filtering commits based on whether they
+are visible before/after some viewpoint. For example, Automerge stores all 
+operations ever received in a log and then materializes a view by walking over
+this log and filtering out things which are not visible.
 
-=== Diffs
+This second requirement means that we would like a simple way to check whether
+a commit is visible at some point in the commit graph.
 
-A common operation for example is to ask what commits have become visible
-between two sets of heads. For example, here's a commit graph:
+== Chain Clocks
 
-#figure(
-  align(center)[
-    #diagram(
-      spacing: 12mm,
-      node-stroke: 1pt,
-      node((0, 0), [A], radius: 4mm),
-      node((1, 0), [B], radius: 4mm),
-      edge((1, 0), (0, 0), "-|>"),
-    )
-  ],
-  caption: [A commit  graph with two nodes, arrows point from parents to children]
-)
+One way of implementing ancestry checks is to add parent/child links (we
+already have parent links) and traverse the graph. This is simple and slow,
+especially in large graphs. Instead I think we should use something I am
+calling an "chain clock". 
 
-The heads of this commit graph are (`B`). If we now recieve some new commits
-`C` and `D` we might have a graph that looks like this:
+The idea here is to do something a bit like a vector clock. We assign a unique
+number to each "chain" in the commit graph and then represent any position as
+an array of `(chain number, position)` pairs. In this manner we can determine
+ancestry via a bunch of integer comparisons rather than by walking the graph.
 
-#figure(
-  align(center)[
-    #diagram(
-      spacing: 12mm,
-      node-stroke: 1pt,
-      node((0, 0), [A], radius: 4mm),
-      node((1, 0), [B], radius: 4mm),
-      node((2, 0), [C], radius: 4mm),
-      node((3, 0), [D], radius: 4mm),
-      edge((1, 0), (0, 0), "-|>"),
-      edge((2, 0), (1, 0), "-|>"),
-      edge((3, 0), (2, 0), "-|>"),
-    )
-  ],
-)
+In order to do this we need a mechanism to decompose the commit graph into 
+chains. Once we have this we can store a pair `(chain number, position)`
+(which I call the "chain time") on each commit. Determining ancestry then 
+becomes a matter of determining the chain clock for some given set of heads
+and then we can use this clock to quickly filter out commits based on that
+clock. This finally gives us a mechanism for converting a view point into two
+clocks which can then be used to determine delivery and visibility before/after
+some viewpoint.
 
-The heads of the graph are now `D`. We would like to be able to say, well I 
-last examined this graph at `B` and I want to see what is new.
+=== Chain Decomposition
 
-=== Write Frontiers
+The chain decomposition of a commit graph is done greedily. Every time we 
+insert a new commit into the graph we do the following:
 
-In `stockfoil` we have the concept of a "write frontier". Each commit has an
-author and each author has a region of the commit graph which we accept writes
-to, their write frontier. This region is expressed as a set of heads.
+- For each predecessor (in lexicographic order)
+  - Look up the chain ID of the predecessor
+  - Look up the max position for that chain
+  - If the max position is the chain position of the predecessor then set the
+    chain time of the new commit to (pred chain ID, tip + 1)
+- If no predecessor at the tip of it's chain was found
+  - create a new chain ID and set the chain time of this commit to
+    (new chain ID, 1)
 
-From time to time the write frontiers of an author change. Thus, we will
-sometimes want to determine what commits have become visible due to a change in
-the write frontiers, even if no new  commits have been received.
+=== Cached Clocks
 
-
+Storing the chain time on each commit is useful, but we still need to be able
+to derive the full clock at each commit. Naively this can be done by walking
+the commit graph from the root merging clocks. However, we have a natural
+coarsening of the commit graph. I think we can actually cache the chain clocks
+at the boundary of each fragment. Thus, to derive a clock for some arbitrary
+commit we find it's nearest containing fragment (we may need an index for this,
+or we could use the clocks maybe) and then walk forward accumulating the clocks
+for each commit until we reach the target.
