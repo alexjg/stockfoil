@@ -1,13 +1,17 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::{ControlFlow, Index, IndexMut, Range},
+    sync::{Arc, OnceLock},
 };
 
 use crate::{
     Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ExportError,
     FragmentRange, FragmentReadError, ItemId, ResolveError, ResolvedViewPoint, SedimentreeView,
     Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff,
-    WritePermission, sedimentree::MinimalCover,
+    WritePermission,
+    ancestor_clock::{AncestorClock, ClockBuilder},
+    sedimentree::MinimalCover,
+    view_point::PreparedView,
 };
 
 /// An in-memory, causally closed commit DAG.
@@ -18,11 +22,6 @@ use crate::{
 /// metadata. Signatures authenticate the commit envelope and its payload hash,
 /// not an arbitrary `P`. Callers must validate received payload bytes against
 /// [`CommitMeta::payload_hash`] before ingestion or use.
-///
-/// Cloning preserves local provenance. Received history must pass sedimentree
-/// verification and enter through [`Self::ingest`], never raw commit insertion.
-/// Local edits may await signatures, but all their parents must already be
-/// delivered before insertion.
 #[derive(Clone)]
 pub struct CommitGraph<P> {
     nodes: NodeStore,
@@ -31,14 +30,19 @@ pub struct CommitGraph<P> {
     by_hash: HashMap<CommitHash, NodeIdx>,
     heads: BTreeSet<CommitHash>,
     permissions: HashMap<Author, WritePermission>,
-    // Optimistic local work, removed as soon as it is admitted. Every delivered
-    // commit outside this set is verified and has admitted dependencies.
+    // Local commits which we are waiting for the caller to provide signatures
+    // over
     pending_local: HashSet<CommitHash>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Node {
-    meta: CommitMeta,
+    pub(crate) meta: CommitMeta,
+    // Immutable graph-local chain label; NodeIdx is the position on the chain.
+    pub(crate) chain: usize,
+    clock: OnceLock<Arc<AncestorClock>>,
+    // Longest path since an eagerly cached clock. Query caching can only shorten it.
+    uncached_depth: u8,
     depth: usize,
     parents: Range<usize>,
     signatures: BTreeMap<Author, Signature>,
@@ -119,18 +123,11 @@ impl<P: Clone> CommitGraph<P> {
         if ancestor >= descendant {
             return false;
         }
-        let mut stack = vec![descendant];
-        let mut visited = HashSet::new();
-        while let Some(idx) = stack.pop() {
-            if idx == ancestor {
-                return true;
-            }
-            if idx < ancestor || !visited.insert(idx) {
-                continue;
-            }
-            stack.extend(self.parents(idx));
-        }
-        false
+        let chain = self.nodes[ancestor].chain;
+        // Chain members are totally ordered by ancestry, even when consecutive
+        // members are not linked by a direct parent edge.
+        chain == self.nodes[descendant].chain
+            || self.nodes.clock(descendant).contains(chain, ancestor)
     }
 
     /// Admit verified sedimentree history. The destination must already have the
@@ -196,19 +193,36 @@ impl<P: Clone> CommitGraph<P> {
             .extend(meta.parents().iter().map(|hash| self.by_hash[hash]));
         let parents = start..self.nodes.parent_ids.len();
         let node_idx = NodeIdx(self.nodes.entries.len());
+        let chain = self.nodes.assign_chain(parents.clone(), node_idx);
+        let depth = sedimentree_depth(&hash);
+        let uncached_depth = self.nodes.parent_ids[parents.clone()]
+            .iter()
+            .map(|&idx| self.nodes[idx].uncached_depth)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        // Checkpoints are useful regardless of fragment certification. Cache
+        // merges too, and bound reconstruction along checkpoint-free runs.
+        let cache_clock = depth > 0 || parents.len() > 1 || uncached_depth >= 128;
         self.store.insert(node_idx, data);
         for parent in meta.parents() {
             self.heads.remove(parent);
         }
         self.heads.insert(hash);
         self.nodes.entries.push(Node {
-            depth: sedimentree_depth(&hash),
+            depth,
             meta,
+            chain,
+            clock: OnceLock::new(),
+            uncached_depth: if cache_clock { 0 } else { uncached_depth },
             parents,
             signatures: BTreeMap::new(),
             headed_fragments: Vec::new(),
         });
         self.by_hash.insert(hash, node_idx);
+        if cache_clock {
+            self.nodes.clock(node_idx);
+        }
     }
 
     // Build headed fragments from lower to higher levels.
@@ -590,6 +604,7 @@ impl<P: Clone> CommitGraph<P> {
         }
         Ok(ResolvedViewPoint {
             known: &self.by_hash,
+            nodes: &self.nodes,
             visible: self.participation(view_point)?,
         })
     }
@@ -603,6 +618,7 @@ impl<P: Clone> CommitGraph<P> {
     ) -> Result<ViewPointDiff<'_>, DiffError> {
         Ok(ViewPointDiff {
             known: &self.by_hash,
+            nodes: &self.nodes,
             before: self.participation(before)?,
             after: self.participation(after)?,
         })
@@ -759,51 +775,57 @@ impl<P: Clone> CommitGraph<P> {
         item.verify().ok()
     }
 
-    fn history(&self, heads: &[CommitHash]) -> Result<HashSet<CommitHash>, DiffError> {
-        let mut history = HashSet::new();
-        let mut stack = Vec::new();
-        for hash in heads {
-            stack.push(
-                *self
-                    .by_hash
+    fn history_clock(&self, heads: &[CommitHash]) -> Result<Arc<AncestorClock>, DiffError> {
+        let mut indices = heads
+            .iter()
+            .map(|hash| {
+                self.by_hash
                     .get(hash)
-                    .ok_or(DiffError::MissingCommit(*hash))?,
-            );
+                    .copied()
+                    .ok_or(DiffError::MissingCommit(*hash))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        indices.sort_unstable();
+        indices.dedup();
+        // The current working history contains every stored node. Its clock is
+        // already available as the chain-tip table; no ancestor walk is needed.
+        if indices.len() == self.heads.len()
+            && indices
+                .iter()
+                .all(|&idx| self.heads.contains(self.nodes[idx].meta.hash()))
+        {
+            return Ok(Arc::new(AncestorClock::from_tips(&self.nodes.chain_tips)));
         }
-        while let Some(idx) = stack.pop() {
-            if history.insert(*self.nodes[idx].meta.hash()) {
-                stack.extend(self.parents(idx));
-            }
-        }
-        Ok(history)
+        Ok(self.nodes.clock_for_heads(&indices))
     }
 
-    fn participation(&self, view_point: &ViewPoint) -> Result<HashSet<CommitHash>, DiffError> {
-        let history = self.history(&view_point.delivered_heads)?;
+    fn participation(&self, view_point: &ViewPoint) -> Result<PreparedView, DiffError> {
+        let history = self.history_clock(&view_point.delivered_heads)?;
         let mut bounded = HashMap::new();
-        for (author, permission) in &view_point.write_permissions {
-            if let WritePermission::Bounded(frontier) = permission {
-                // A bound outside the captured history supplies no proof in
-                // this viewpoint, even if that commit has since arrived locally.
-                let available = frontier
-                    .iter()
-                    .copied()
-                    .filter(|hash| history.contains(hash))
-                    .collect::<Vec<_>>();
-                bounded.insert(*author, self.history(&available)?);
+        let mut unbounded = HashSet::new();
+        for (&author, permission) in &view_point.write_permissions {
+            match permission {
+                WritePermission::Unbounded => {
+                    unbounded.insert(author);
+                }
+                WritePermission::Bounded(frontier) => {
+                    // Filter frontier *heads*, not the resulting ancestry clock:
+                    // an out-of-history bound grants nothing in this snapshot.
+                    let available = frontier
+                        .iter()
+                        .filter_map(|hash| self.by_hash.get(hash).copied())
+                        .filter(|&idx| history.contains(self.nodes[idx].chain, idx))
+                        .collect::<Vec<_>>();
+                    bounded.insert(author, self.nodes.clock_for_heads(&available));
+                }
+                WritePermission::Denied => {}
             }
         }
-        Ok(history
-            .into_iter()
-            .filter(|hash| {
-                let author = self.nodes[self.by_hash[hash]].meta.author();
-                match view_point.write_permissions.get(author) {
-                    Some(WritePermission::Unbounded) => true,
-                    Some(WritePermission::Bounded(_)) => bounded[author].contains(hash),
-                    Some(WritePermission::Denied) | None => false,
-                }
-            })
-            .collect())
+        Ok(PreparedView {
+            history,
+            bounded,
+            unbounded,
+        })
     }
 }
 
@@ -811,15 +833,81 @@ impl<P: Clone> CommitGraph<P> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeIdx(usize);
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct NodeStore {
     // Append-only, parents before children. Each node owns a contiguous parent
     // slice, preserving the envelope's parent order and multiplicity.
     entries: Vec<Node>,
     parent_ids: Vec<NodeIdx>,
+    chain_tips: Vec<NodeIdx>,
 }
 
 impl NodeStore {
+    fn assign_chain(&mut self, parents: Range<usize>, position: NodeIdx) -> usize {
+        let parents = &self.parent_ids[parents];
+        // Ordinary sequential edits need no clock construction or chain scan.
+        let direct = parents
+            .iter()
+            .filter_map(|&parent| {
+                let chain = self[parent].chain;
+                (self.chain_tips[chain] == parent).then_some(chain)
+            })
+            .min();
+        let reusable = direct.or_else(|| {
+            if parents.is_empty() {
+                return None;
+            }
+            // Direct-parent-only reuse strands a chain after every diamond.
+            // Any tip in the parents' down-set can safely precede this node.
+            let history = self.clock_for_heads(parents);
+            history
+                .entries()
+                .find_map(|(chain, tip)| (self.chain_tips[chain] == tip).then_some(chain))
+        });
+        if let Some(chain) = reusable {
+            self.chain_tips[chain] = position;
+            chain
+        } else {
+            let chain = self.chain_tips.len();
+            self.chain_tips.push(position);
+            chain
+        }
+    }
+
+    fn clock_for_heads(&self, heads: &[NodeIdx]) -> Arc<AncestorClock> {
+        if let [head] = heads {
+            return Arc::clone(self.clock(*head));
+        }
+        let mut builder = ClockBuilder::default();
+        for &head in heads {
+            builder.merge(self.clock(head));
+        }
+        Arc::new(builder.finish())
+    }
+
+    fn clock(&self, head: NodeIdx) -> &Arc<AncestorClock> {
+        self[head].clock.get_or_init(|| {
+            let mut builder = ClockBuilder::default();
+            let mut stack = vec![head];
+            let mut visited = HashSet::new();
+            while let Some(idx) = stack.pop() {
+                if !visited.insert(idx) {
+                    continue;
+                }
+                let node = &self[idx];
+                if let Some(clock) = node.clock.get() {
+                    builder.merge(clock);
+                } else {
+                    builder.include(node.chain, idx);
+                    stack.extend(self.parents(idx));
+                }
+            }
+            // Do not prune a walk merely because builder contains a node's chain
+            // time: its cross-chain parents may not have been visited yet.
+            Arc::new(builder.finish())
+        })
+    }
+
     fn parents(&self, node: NodeIdx) -> &[NodeIdx] {
         &self.parent_ids[self[node].parents.clone()]
     }
@@ -1028,7 +1116,7 @@ impl FragmentStore {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FragmentIdx(usize);
 
 impl Index<FragmentIdx> for FragmentStore {
@@ -1042,6 +1130,9 @@ impl Index<FragmentIdx> for FragmentStore {
 fn sedimentree_depth(hash: &CommitHash) -> usize {
     hash.as_bytes().iter().take_while(|b| **b == 0).count()
 }
+
+#[cfg(test)]
+mod ancestry_tests;
 
 #[cfg(test)]
 mod tests {

@@ -2,6 +2,7 @@
 //!
 //! `stockfoil` is a library for storing and synchronizing authenticated commit
 //! graphs
+mod ancestor_clock;
 mod author;
 pub use author::Author;
 mod errors;
