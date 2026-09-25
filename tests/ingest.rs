@@ -851,6 +851,73 @@ fn supplying_a_boundary_ancestor_as_a_member_is_not_normalized() {
 }
 
 #[test]
+fn extra_dependency_walks_share_history_but_stop_at_the_first_checkpoint() {
+    let older = at_depth(2, vec![], 1);
+    let stop = at_depth(2, vec![*older.hash()], 1);
+    let shared = at_depth(2, vec![*stop.hash()], 0);
+    let x = at_depth(2, vec![*shared.hash()], 0);
+    let y = at_depth(2, vec![*shared.hash(), *shared.hash()], 0);
+    let b = at_depth(2, vec![*x.hash(), *y.hash()], 1);
+    // Both extras are referenced by an interior member, not the head. Their
+    // walks overlap, and neither may continue through stop to older.
+    let middle = at_depth(1, vec![*b.hash(), *x.hash(), *y.hash(), *x.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash(), *stop.hash()]),
+    };
+    let members = vec![head.clone(), middle.clone()];
+    let mut graph = CommitGraph::new();
+    for meta in [&older, &stop, &shared, &x, &y, &b] {
+        graph
+            .ingest(item(meta, 2).verify().unwrap(), |_| 1)
+            .unwrap();
+    }
+
+    // All claimed dependencies are admitted ancestors, but older is not a
+    // depth-stopped boundary. Exact boundary validation must still reject it.
+    let mut spurious = range.clone();
+    spurious.boundary.insert(*older.hash());
+    assert_ingest_rejected_without_changes(
+        &mut graph,
+        fragment(&spurious, members.clone(), 1).verify().unwrap(),
+        IngestError::InvalidFragment,
+    );
+    let mut missing = range.clone();
+    missing.boundary.remove(stop.hash());
+    assert_ingest_rejected_without_changes(
+        &mut graph,
+        fragment(&missing, members.clone(), 1).verify().unwrap(),
+        IngestError::InvalidFragment,
+    );
+
+    let incoming = fragment(&range, members, 1).verify().unwrap();
+    assert_eq!(
+        incoming.dependencies().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([*b.hash(), *stop.hash(), *x.hash(), *y.hash()]),
+    );
+    let mut applied = Vec::new();
+    graph
+        .ingest(incoming, |meta| {
+            applied.push(*meta.hash());
+            2
+        })
+        .unwrap();
+    assert_eq!(applied, vec![*middle.hash(), *head.hash()]);
+    let exported = graph
+        .export(&ItemId::Fragment(range))
+        .unwrap()
+        .verify()
+        .unwrap();
+    graph
+        .ingest(exported, |_| panic!("duplicate payload"))
+        .unwrap();
+    let mut relay = CommitGraph::new();
+    relay.merge(&graph);
+    assert_eq!(relay.minimal_cover(), graph.minimal_cover());
+}
+
+#[test]
 fn raw_stopped_walk_keeps_a_boundary_reached_through_excluded_history() {
     // h -> m -> b -> x -> old, plus m -> x. Stopping at b alone is wrong:
     // the bypass reaches old, even though both x and old are b's ancestors.

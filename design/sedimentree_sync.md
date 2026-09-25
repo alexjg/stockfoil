@@ -47,13 +47,19 @@ members, not prerequisites.
 
 Verification is stateless: it checks signatures, item-local reachability,
 acyclicity, depth constraints, and exact declared external-parent closure. It
-cannot prove that an omitted parent belongs to boundary history. Before payload
-callbacks or mutation, admission therefore:
+also retains the boundary hashes directly referenced by supplied members in the
+verified item. It cannot prove that an omitted parent belongs to boundary
+history. Before payload callbacks or mutation, admission therefore:
 
 1. Requires every declared dependency to be admitted, not merely a local draft.
 2. Checks that extras lie in boundary history and supplied members do not.
-3. Reconstructs the raw depth-based boundary and checks exact normalized members
-   using supplied metadata plus already-admitted dependency history.
+3. Walks only additional dependencies' admitted history to discover further
+   depth-based boundary stops, combining these with the cached direct references
+   and requiring an exact match with the declared boundary.
+
+Admission does not rebuild a member map or rewalk supplied member edges:
+stateless reachability and closure, together with these placement checks,
+already establish exact normalized membership.
 
 Missing dependencies produce `IngestError::MissingDependency`; incorrect range
 placement produces `IngestError::InvalidFragment`. The caller buffers/retries;

@@ -178,9 +178,9 @@ impl<P: Clone> CommitGraph<P> {
         Ok(())
     }
 
-    // Stateless verification proves signatures and declared closure, not that
-    // omitted parents really lie below the declared boundaries. Check that
-    // premise and exact canonical membership using a read-only metadata overlay.
+    // Stateless verification already proves member reachability, depth, and
+    // declared closure. Only placement in boundary history and boundary stops
+    // reached through omitted dependency metadata remain graph-dependent.
     fn validate_fragment_admission(
         &self,
         item: &crate::VerifiedItem,
@@ -200,38 +200,37 @@ impl<P: Clone> CommitGraph<P> {
                 .get(hash)
                 .is_some_and(|&idx| excluded.contains(self.nodes[idx].chain, idx))
         };
-        if item.dependencies.iter().any(|hash| !in_excluded(hash))
-            || item.commits.iter().any(|meta| in_excluded(meta.hash()))
-        {
+        if item.commits.iter().any(|meta| in_excluded(meta.hash())) {
             return Err(invalid);
         }
-        let supplied: BTreeMap<_, _> = item.commits.iter().map(|m| (*m.hash(), m)).collect();
-        let mut visited = HashSet::new();
-        let mut boundary = BTreeSet::new();
-        let mut members = BTreeSet::new();
-        let mut stack = vec![range.head];
-        let depth = sedimentree_depth(&range.head);
-        while let Some(hash) = stack.pop() {
-            if !visited.insert(hash) {
+        let mut stack = Vec::new();
+        for hash in &item.dependencies {
+            if range.boundary.contains(hash) {
                 continue;
             }
-            if hash != range.head && sedimentree_depth(&hash) >= depth {
-                boundary.insert(hash);
-                continue;
-            }
-            let meta = if let Some(meta) = supplied.get(&hash) {
-                members.insert(hash);
-                *meta
-            } else if in_excluded(&hash) {
-                &self.nodes[self.by_hash[&hash]].meta
-            } else {
-                // Locally knowing a commit outside dependency history does not
-                // excuse its omission from this independently exportable item.
+            if !in_excluded(hash) {
                 return Err(invalid);
-            };
-            stack.extend(meta.parents());
+            }
+            stack.push(self.by_hash[hash]);
         }
-        if boundary != range.boundary || members.len() != supplied.len() {
+        // All members are reachable, so every cached direct boundary reference
+        // and every additional dependency is reached by the raw head walk.
+        // Starting at those extras completes boundary discovery without walking
+        // supplied members again. Their ancestors remain in excluded history.
+        let mut boundary = item.direct_boundary.clone();
+        let mut visited = HashSet::new();
+        let depth = sedimentree_depth(&range.head);
+        while let Some(idx) = stack.pop() {
+            if !visited.insert(idx) {
+                continue;
+            }
+            if self.nodes[idx].depth >= depth {
+                boundary.insert(*self.nodes[idx].meta.hash());
+            } else {
+                stack.extend(self.parents(idx));
+            }
+        }
+        if boundary != range.boundary {
             return Err(invalid);
         }
         Ok(())

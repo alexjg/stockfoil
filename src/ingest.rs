@@ -148,9 +148,10 @@ fn verify_metadata(
         }
     }
     let sorted = topological_order(&members)?;
-    if let ItemId::Fragment(range) = &id {
-        validate_fragment(range, &dependencies, &members)?;
-    }
+    let direct_boundary = match &id {
+        ItemId::Fragment(range) => validate_fragment(range, &dependencies, &members)?,
+        ItemId::Commit(_) => BTreeSet::new(),
+    };
 
     // Check every signature, even redundant evidence. Targets must be members;
     // neither dependency claims nor decoder state extend signature coverage.
@@ -210,6 +211,7 @@ fn verify_metadata(
             .map(|hash| members.remove(&hash).unwrap())
             .collect(),
         dependencies: dependencies.into_iter().collect(),
+        direct_boundary,
         signatures,
         signature_boundary,
     })
@@ -252,12 +254,13 @@ fn depth(hash: &CommitHash) -> usize {
         .count()
 }
 
-/// Check item-local closure, not canonical placement in excluded history.
+/// Check item-local closure and retain boundary references from supplied members.
+/// Canonical placement in excluded history still requires the destination graph.
 fn validate_fragment(
     range: &FragmentRange,
     dependencies: &BTreeSet<CommitHash>,
     members: &BTreeMap<CommitHash, CommitMeta>,
-) -> Result<(), VerificationError> {
+) -> Result<BTreeSet<CommitHash>, VerificationError> {
     let head_depth = depth(&range.head);
     if head_depth == 0
         || !members.contains_key(&range.head)
@@ -271,18 +274,22 @@ fn validate_fragment(
     {
         return Err(VerificationError::InvalidItem);
     }
-    let external: BTreeSet<_> = members
-        .values()
-        .flat_map(|meta| meta.parents().iter().copied())
-        .filter(|hash| !members.contains_key(hash) && !range.boundary.contains(hash))
-        .collect();
+    let mut direct_boundary = BTreeSet::new();
+    let mut external = BTreeSet::new();
+    for parent in members.values().flat_map(|meta| meta.parents()) {
+        if range.boundary.contains(parent) {
+            direct_boundary.insert(*parent);
+        } else if !members.contains_key(parent) {
+            external.insert(*parent);
+        }
+    }
     let additional: BTreeSet<_> = dependencies.difference(&range.boundary).copied().collect();
     // Boundaries can also be discovered through excluded history, so they need
     // not be referenced directly. Additional dependencies must be exact.
     if external != additional || ancestry(members, [range.head]).len() != members.len() {
         return Err(VerificationError::InvalidItem);
     }
-    Ok(())
+    Ok(direct_boundary)
 }
 
 /// Kahn's algorithm over available metadata; external parents are not read.
@@ -342,6 +349,10 @@ pub struct VerifiedItem {
     pub(crate) id: ItemId,
     pub(crate) commits: Vec<CommitMeta>,
     pub(crate) dependencies: Vec<CommitHash>,
+    // Boundary hashes referenced by member parents, computed during verification.
+    // Empty for standalone commits. Admission only needs to discover the stops
+    // reached through additional dependencies, without rewalking member edges.
+    pub(crate) direct_boundary: BTreeSet<CommitHash>,
     pub(crate) signatures: Vec<SignatureEvidence>,
     pub(crate) signature_boundary: BTreeMap<Author, BTreeSet<CommitHash>>,
 }
