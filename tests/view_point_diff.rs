@@ -6,7 +6,9 @@ use std::{collections::HashMap, ops::ControlFlow};
 use support::{author, key, sign, signature};
 
 use ed25519_dalek::SigningKey;
-use stockfoil::{CommitGraph, CommitHash, ViewPointDiff, Vis, VisDiff, WritePermission};
+use stockfoil::{
+    CommitGraph, CommitHash, ResolveError, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
+};
 
 fn prepare(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHash {
     let meta = graph.commit_by(author(key), &[value]);
@@ -129,6 +131,106 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
 }
 
 #[test]
+fn signed_heads_preserve_admitted_branches_beneath_drafts() {
+    let alice = key(1);
+    let mut graph = CommitGraph::new();
+    graph.set_write_permissions(&HashMap::from([(
+        author(&alice),
+        WritePermission::Unbounded,
+    )]));
+    assert_eq!(graph.view_point(), graph.signed_view_point());
+    append(&mut graph, &alice, 0);
+    let mut fork = graph.clone();
+    let left = append(&mut graph, &alice, 1);
+    let draft = prepare(&mut graph, &alice, 2);
+    let right = append(&mut fork, &alice, 3);
+    graph.merge(&fork);
+    let joined = prepare(&mut graph, &alice, 4);
+    let working = graph.view_point();
+    let signed = graph.signed_view_point();
+    let mut expected = vec![left, right];
+    expected.sort();
+    assert_eq!(working.delivered_heads(), &[joined]);
+    assert_eq!(signed.delivered_heads(), expected);
+    assert_changes(
+        &graph.diff(&signed, &working).unwrap(),
+        &[],
+        &[draft, joined],
+    );
+
+    let mut peer = CommitGraph::new();
+    peer.merge(&graph);
+    assert_eq!(peer.delivered_heads().collect::<Vec<_>>(), expected);
+    assert!(peer.resolve(&signed).is_ok());
+    assert!(matches!(
+        peer.resolve(&working),
+        Err(ResolveError::MissingCommit(hash)) if hash == joined
+    ));
+
+    sign(&mut graph, &alice, draft);
+    expected = vec![draft, right];
+    expected.sort();
+    assert_eq!(graph.signed_view_point().delivered_heads(), expected);
+    assert!(graph.resolve(&signed).unwrap().visible(&left).unwrap());
+    assert!(!graph.resolve(&signed).unwrap().visible(&draft).unwrap());
+    assert_eq!(graph.view_point(), working);
+    sign(&mut graph, &alice, joined);
+    assert_eq!(graph.signed_view_point(), working);
+    peer.merge(&graph);
+    for snapshot in [&signed, &working] {
+        assert_changes(&peer.diff(snapshot, snapshot).unwrap(), &[], &[]);
+        assert!(peer.resolve(snapshot).is_ok());
+    }
+    assert!(!peer.resolve(&signed).unwrap().visible(&joined).unwrap());
+    assert!(peer.resolve(&working).unwrap().visible(&joined).unwrap());
+}
+
+#[test]
+fn pending_write_bounds_apply_only_to_working_history() {
+    let alice = key(1);
+    let bob = key(2);
+    let mut graph = CommitGraph::new();
+    let root = append(&mut graph, &alice, 0);
+    let bound = prepare(&mut graph, &bob, 1);
+    // Bob is denied, but his commit can bound Alice's permission in histories
+    // that contain it. Denial must not bypass admission checks in resolve.
+    graph.set_write_permissions(&HashMap::from([(
+        author(&alice),
+        WritePermission::Bounded(vec![bound]),
+    )]));
+    let working = ViewPoint::from_parts(
+        graph.view_point().delivered_heads().to_vec(),
+        graph.view_point().write_permissions().clone(),
+    );
+    let signed = graph.signed_view_point();
+    assert_eq!(signed.delivered_heads(), &[root]);
+    assert!(!graph.resolve(&signed).unwrap().visible(&root).unwrap());
+    assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
+    assert!(matches!(
+        graph.resolve(&working),
+        Err(ResolveError::PendingLocalCommit(hash)) if hash == bound
+    ));
+    let mut peer = CommitGraph::new();
+    peer.merge(&graph);
+    assert!(matches!(
+        peer.resolve(&working),
+        Err(ResolveError::MissingCommit(hash)) if hash == bound
+    ));
+
+    sign(&mut graph, &bob, bound);
+    assert_eq!(graph.view_point(), working);
+    assert_eq!(graph.signed_view_point(), working);
+    peer.merge(&graph);
+    for graph in [&graph, &peer] {
+        assert!(!graph.resolve(&signed).unwrap().visible(&root).unwrap());
+        let resolved = graph.resolve(&working).unwrap();
+        assert!(resolved.visible(&root).unwrap());
+        assert!(!resolved.visible(&bound).unwrap());
+        assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
+    }
+}
+
+#[test]
 fn signing_a_frontier_changes_signed_participation_not_captured_working_view_points() {
     let key = key(42);
     let mut graph = CommitGraph::new();
@@ -142,10 +244,8 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     let first = prepare(&mut graph, &key, 1);
     let first_working = graph.view_point();
     let first_signed = graph.signed_view_point();
-    assert_eq!(
-        first_working.delivered_heads(),
-        first_signed.delivered_heads()
-    );
+    assert_eq!(first_working.delivered_heads(), &[first]);
+    assert_eq!(first_signed.delivered_heads(), &[base]);
     assert!(graph.resolve(&first_working).is_err());
     assert!(graph.resolve(&first_signed).is_ok());
     let pending = graph.diff(&first_signed, &first_working).unwrap();

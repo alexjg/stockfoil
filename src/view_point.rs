@@ -2,28 +2,27 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{Author, CommitHash, NodeIdx, QueryError, WritePermission};
 
-/// An owned snapshot of delivered heads, write permissions, and authentication
-/// frontiers. Describes participation, not the materialized document.
+/// An owned snapshot of history heads and write permissions.
+/// Describes participation, not the materialized document or signature status.
+/// Working snapshots may include local drafts; signed snapshots include only
+/// admitted history. Later admission never changes a captured snapshot's meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewPoint {
     pub(crate) delivered_heads: Vec<CommitHash>,
     pub(crate) write_permissions: HashMap<Author, WritePermission>,
-    pub(crate) authentication_frontiers: HashMap<Author, Vec<CommitHash>>,
 }
 
 impl ViewPoint {
     /// Reconstruct a description, for example after transport or storage.
-    /// This does not validate its claims; resolve received viewpoints against signatures
-    /// before using them to drive a materialized view.
+    /// This does not validate its claims; resolve received viewpoints against
+    /// admitted history before using them to drive a materialized view.
     pub fn from_parts(
         delivered_heads: Vec<CommitHash>,
         write_permissions: HashMap<Author, WritePermission>,
-        authentication_frontiers: HashMap<Author, Vec<CommitHash>>,
     ) -> Self {
         Self {
             delivered_heads,
             write_permissions,
-            authentication_frontiers,
         }
     }
 
@@ -36,15 +35,9 @@ impl ViewPoint {
     pub fn write_permissions(&self) -> &HashMap<Author, WritePermission> {
         &self.write_permissions
     }
-
-    /// Captured authentication coverage. In a working viewpoint this may include
-    /// pending local signatures; it is not itself signature evidence.
-    pub fn authentication_frontiers(&self) -> &HashMap<Author, Vec<CommitHash>> {
-        &self.authentication_frontiers
-    }
 }
 
-/// A viewpoint resolved against graph data and actual signature evidence.
+/// A viewpoint resolved against verified, causally admitted graph history.
 #[derive(Debug)]
 pub struct ResolvedViewPoint<'graph> {
     pub(crate) known: &'graph HashMap<CommitHash, NodeIdx>,
@@ -62,7 +55,7 @@ impl ResolvedViewPoint<'_> {
 }
 
 /// A comparison of commit participation, not a document patch stream.
-/// Does not certify the signature evidence for either viewpoint.
+/// Does not require either viewpoint's history to have been admitted.
 #[derive(Debug)]
 pub struct ViewPointDiff<'graph> {
     pub(crate) known: &'graph HashMap<CommitHash, NodeIdx>,

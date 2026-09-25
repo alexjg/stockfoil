@@ -28,27 +28,20 @@ impl fmt::Display for SignatureError {
 
 impl Error for SignatureError {}
 
-/// A viewpoint could not be resolved against graph data and signature evidence.
+/// A viewpoint could not be resolved against admitted graph history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// The commit is unknown or still waiting for causal delivery.
+    /// The commit is not present in the graph.
     MissingCommit(CommitHash),
-    MissingSignature {
-        author: Author,
-        frontier: CommitHash,
-    },
+    /// The commit is delivered local work but has not passed verified admission.
+    PendingLocalCommit(CommitHash),
 }
 
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingCommit(hash) => write!(f, "missing delivered commit: {hash:?}"),
-            Self::MissingSignature { author, frontier } => {
-                write!(
-                    f,
-                    "missing signature coverage by {author:?} for {frontier:?}"
-                )
-            }
+            Self::PendingLocalCommit(hash) => write!(f, "pending local commit: {hash:?}"),
         }
     }
 }
@@ -79,7 +72,7 @@ impl From<DiffError> for ResolveError {
     }
 }
 
-/// A participation query used a hash that is unknown or not causally delivered.
+/// A participation query used a hash that is not present in the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryError {
     UnknownCommit(CommitHash),
@@ -99,7 +92,7 @@ impl Error for QueryError {}
 /// when validation fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FragmentReadError {
-    /// The head is unknown or still waiting for causal delivery.
+    /// The head is not present in the graph.
     MissingCommit(CommitHash),
     /// No canonical fragment is indexed here (including standalone checkpoints).
     NotFragment(CommitHash),

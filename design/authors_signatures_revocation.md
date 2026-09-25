@@ -32,8 +32,8 @@ Each author has one of three write permissions:
 * **Denied** - none of that author's commits can contribute.
 
 Missing authors are denied. An empty bounded frontier also permits nothing; it
-never means unbounded. Unbounded permission doesn't bypass the viewpoint's
-authentication frontier or causal delivery.
+never means unbounded. Unbounded permission doesn't include commits outside the
+viewpoint's selected history or bypass causal delivery.
 
 The application supplies the permissions and checks their authority. Stockfoil
 only needs the snapshot, not the history that produced it. Revoking an author
@@ -51,9 +51,11 @@ water if we have to include the signature for each commit.
 Therefore, we want to keep the signatures _outside_ of the commit envelop and
 only retain the signature for the latest commit in a run. If a commit is by
 some author, and we have their signature for that commit, then they are
-attesting to every ancestor commit. What this means is that all we need to 
-retain for each author is the frontier of the commit graph that they have 
-signed.
+attesting to every ancestor commit. Covering signatures and the ancestry needed
+to verify them can therefore replace older signatures once that evidence is
+publishable. This is transport evidence for verification and export, retained
+independently of viewpoints. `CommitGraph` does not maintain per-author
+`signature_frontiers` or a separate authenticated set.
 
 ### Creating Local Commits
 
@@ -62,6 +64,12 @@ Signing may require IO, but local edits should show up immediately. The flow is:
 1. Prepare the commit, fixing its author, parents, payload, and hash.
 2. Add it to the local working state and ask the application's signer to sign it.
 3. When the signature arrives and verifies, allow the commit to be published.
+
+`commit_by` chooses the delivered heads as parents, so normal prepared work
+meets the local ingestion precondition. `ingest_local_commit` asserts that every
+parent is already delivered before any mutation and panics on misuse; it never
+buffers causally unready work. Delivered parents may be unsigned local drafts,
+not yet admitted. Successful local ingestion delivers the commit immediately.
 
 Incoming changes don't alter a prepared commit's hash or parents. Signing can
 cover a batch through a later frontier signature; we don't need a round trip per
@@ -73,23 +81,28 @@ grant access, and permissions may change while we wait.
 
 ### Pending Commits
 
-The introduction of signatures, and of write frontiers, makes ingesting ready
-commits more complicated. There are two reasons for this: we're still waiting
-for the signature for the end of a line of commits, or we're waiting for the
-commits from some author to be linked up to the write frontier.
+Authentication gates admission of received commits, while write permissions
+gate participation in a selected history. Our own prepared commits are the
+local exception: they are delivered as `pending_local` drafts before signing.
+`pending_local` denotes only delivered but unsigned/unadmitted local work, never
+commits waiting for missing dependencies. `CommitGraph` has no causal queue;
+all missing-dependency buffering belongs outside the graph.
+Admitted commits are exactly delivered commits not marked `pending_local`;
+they are verified and parent-closed by invariant.
 
 #### Pending Signatures
 
-One consequence of a model where we discard all but the frontier signatures is
-that it is possible for signatures to arrive out of order with respect to the
-changes. I.e. you could have a bunch of commits which claim to be from some
-author but until the signature on the final commit arrives we can't actually
-verify this.
+Signatures and changes can arrive out of order. Received items must be verified
+before admission, and missing dependencies and unverified items are buffered
+outside `CommitGraph`. They are not delivered commits awaiting a participation
+check.
 
-For this reason when we receive a signature we need to check if it makes a
-whole set of commits verified. Our own prepared commits can already appear in
-the working viewpoint while their signatures are pending; that doesn't make
-them verified or publishable.
+The local `ingest_signature` API accepts signatures for known, already delivered
+pending local commits only; it cannot ingest a signature before its local
+commit. A verified covering signature can release a batch of local commits
+for admission and publication while preserving parent closure. Our own prepared
+commits can already appear in the working viewpoint while their signatures are
+pending; that doesn't make them admitted or publishable.
 
 #### Establishing Write Permission
 
@@ -99,19 +112,26 @@ by the viewpoint. Until we have that proof, those commits don't contribute;
 an unresolved bound never means unbounded access. Denied authors can't contribute
 under that permission snapshot.
 
-Receiving a commit can supply a missing proof for older commits, so we need to
-check whether ingestion changes their participation too.
+Receiving a commit can supply a missing proof for older commits in a newly
+captured viewpoint, so we need to check whether ingestion changes their
+participation too. It cannot supply a bound outside an earlier viewpoint's
+selected history. In particular, a pending draft cannot serve as a bound in a
+signed history that excludes it.
 
 #### Relationship to sync or merge
 
-Received commits can be forwarded while we wait for signatures or write-frontier
-proofs. Those checks gate their contribution, not forwarding.
+Only admitted history is exported through sync or merge. Received verified
+items first check that external dependencies are admitted, then insert commits
+parents-first. Fragment boundary dependencies must also be admitted. Every
+insertion is therefore causally ready by invariant; missing dependencies are
+buffered outside the graph, not queued inside it. Write-frontier proofs gate
+participation, not forwarding of admitted commits.
 
-Our own unpublished commits are different: they must stay out of sync and merge
-exports until covered by verified signatures. Exporting a descendant must not
-pull unsigned local ancestors along with it. Delivery into the local operation
-store is not publication. Signed commits can still be synced even when write
-permissions prevent them from contributing.
+Our own unpublished commits must stay out of sync and merge exports until
+covered by verified signatures. Exporting a descendant must not pull unsigned
+local ancestors along with it. Delivery into the local operation store is not
+publication. Admitted commits can still be synced even when write permissions
+prevent them from contributing.
 
 ## Revocation History
 
@@ -136,24 +156,21 @@ another.
 
 ### Eligibility
 
-For received commits, it is useful to distinguish these states:
+For received commits, distinguish data buffered outside the graph from admitted
+history:
 
-* unauthenticated - we are awaiting a signature which verifies this commit
-* detached - we are waiting for the causal dependencies of this commit
-* eligible - we have a signature and all causal dependencies, but the write
-  permission doesn't yet allow the commit, or we're missing a frontier proof
-* materialized - we have a signature, all causal dependencies, and the write
-  permission allows the commit (with a frontier proof if bounded)
+* unverified or detached - awaiting verification or causal dependencies outside
+  `CommitGraph`
+* admitted but nonparticipating - verified with admitted causal dependencies,
+  but outside the selected history or disallowed by its write permissions
+* participating - in the selected history and allowed by its write permissions
+  (with a frontier proof inside that history if bounded)
 
-The first two states are about what data we have received. The latter two can
-change when permissions change or new proofs arrive. We keep the delivered
-history in the operation store even when its commits don't contribute. Our own
-pending-signature commits can also contribute to the local working view, without
-being verified yet.
-
-This suggests that as long as we have a way of representing the state of the
-commit graph which includes these states then we can define a diff API which
-stays stable across revocation changes.
+Authentication is admission, not participation. We keep admitted history in the
+operation store even when its commits don't contribute. Our own pending local
+commits can also contribute to the local working view without being admitted
+yet. Once a history is selected, participation depends only on that history and
+the captured write permissions, allowing stable diffs across revocation changes.
 
 #### Descendants of revoked commits
 
@@ -164,32 +181,28 @@ what that means for the document.
 
 ### Viewpoints
 
-A viewpoint captures three things:
+A viewpoint captures only two things:
 
-* The delivered heads, identifying the captured causally complete commit history.
-  Notably this does not include commits which are not causally ready
+* The delivered heads, identifying the selected causally complete commit history.
+  Causally unready work remains outside the graph.
 * An immutable snapshot of the per-author write permissions
-* An immutable snapshot of the per-author authentication frontiers: the commits
-  this viewpoint treats as authenticated, not proof that signatures are already
-  available
 
-Concretely, we can represent a viewpoint as a set of delivered commit hashes,
-a mapping from author keys to their write permissions, and a mapping from author
-keys to their authentication frontier hashes. The delivered hashes are the heads,
-not an enumeration of the whole history. Both mappings are immutable snapshots,
-not references to the graph's mutable current state.
+The delivered hashes are heads, not an enumeration of the whole history.
+`ViewPoint::from_parts(delivered_heads, write_permissions)` reconstructs this
+owned description without validating it. Neither field references the graph's
+mutable current state; there is no authentication-frontier field.
 
-A commit contributes if it is in the captured delivered history, is covered by
-its author's captured authentication frontier, and its author's write permission
-allows it. Unbounded permission only satisfies the last check: it doesn't include
-future commits or later authentication evidence.
+A commit contributes if it is in the selected history and its author's write
+permission allows it. Unbounded permission only satisfies the last check: it
+doesn't include future commits or commits outside that history. Authentication
+is enforced at admission, not as another participation predicate.
 
-Proofs of membership in a write frontier are evaluated using only the commit
-history captured by the delivered heads, not subsequently received commits or
-commits still awaiting causal delivery. Signatures are outside the commit graph,
-so their arrival can authenticate already-delivered commits without changing the
-delivered heads. Capturing the authenticated frontiers separately preserves the
-meaning of earlier viewpoints when new signatures arrive.
+Proofs of membership in a write frontier are evaluated using only the history
+selected by the delivered heads, not subsequently received commits or items
+buffered outside the graph awaiting dependencies. A pending draft outside the
+signed history cannot serve as a permission bound there. Signing may change the
+heads selected by a new signed viewpoint, but cannot change the history or
+participation of an already captured viewpoint.
 
 A viewpoint contains enough information to determine the set of contributing
 commits regardless of future changes to the write permissions, commit graph, or
@@ -198,69 +211,64 @@ available signatures. This means we can define a diff API in terms of viewpoints
 We use `traverse_delivered_since` to incorporate newly delivered commits into
 the CRDT's operation store, independently of whether they contribute under a
 viewpoint. Comparing viewpoints determines participation changes, including
-changes to previously delivered commits when new signatures or frontier proofs
-arrive. The CRDT uses that comparison to produce document-level changes.
+changes to previously delivered commits when newly selected history supplies
+frontier proofs. Newly captured signed viewpoints can also change as drafts are
+admitted. The CRDT uses that comparison to produce document-level changes.
 
 #### Working and Signed Viewpoints
 
 We use the same representation for two views:
 
-* The working viewpoint includes signature-backed coverage plus our own local
-  commits whose signatures are pending. Creating a local commit advances its
-  author's authentication frontier here immediately.
-* The signed viewpoint advances authentication frontiers only when signatures
-  verify. It can use the same delivered heads and write permissions as the working
-  viewpoint.
+* `view_point()` selects all delivered history, including our own local drafts
+  whose signatures are pending, and snapshots the current write permissions.
+* `signed_view_point()` selects the maximal admitted commits as heads and
+  snapshots the same current write permissions. Its heads and history can differ
+  from the working viewpoint. Admitted ancestors underneath pending drafts are
+  retained; simply filtering the working heads would incorrectly lose them.
 
 Ordinary ingestion doesn't grant this local allowance to incoming commits, even
 if they claim our author key. It comes only from the local commit-creation path.
-The graph keeps actual signature evidence separate from the working frontier.
+Actual transport signature evidence is retained independently for export and
+verification, not as a viewpoint frontier or a participation predicate.
 
 Local materialization uses the working viewpoint without waiting for signing.
-Comparing it with the signed viewpoint shows the document changes awaiting
-signatures. Comparing authentication coverage identifies pending commits even
+Comparing it with the signed viewpoint shows participation changes awaiting
+signatures. Comparing their selected histories identifies pending commits even
 when their effects aren't visible, such as an overwritten assignment. The signed
-view needn't be a prefix: different branches may get signed at different times.
+history is parent-closed but needn't be a single linear prefix: different
+branches may get signed at different times.
 
 When a signature arrives, the signed view can catch up without changing the
 working document. Captured viewpoints stay unchanged. To preserve historical
 signing status, save both viewpoints; the working one alone doesn't record
-which signatures were available then.
+which commits were admitted then.
 
 #### Resolving Viewpoints
 
 A viewpoint describes which commits contribute to some view of the document.
-Its write permissions are already captured in the viewpoint. To resolve this
-description against signature evidence we additionally need two things:
+`resolve` checks that its selected heads exist and are admitted. A head absent
+from the graph returns `ResolveError::MissingCommit(hash)`; a delivered pending
+local head returns `ResolveError::PendingLocalCommit(hash)`. Since admitted
+history is verified and parent-closed by invariant, checking the heads establishes
+admission of the whole selected history. There is no separate signature-frontier
+coverage check or authenticated set to consult.
 
-* The causal graph referenced by the delivered heads in the viewpoint.
-* Authentication evidence that causally covers the captured authenticated
-  frontier for each author, including any ancestry proofs needed to establish
-  that coverage.
+A working viewpoint naming pending local heads cannot resolve until those
+commits are admitted. Signing can make that same description resolvable without
+changing its meaning. Resolution doesn't manage signing requests or return a
+list of pending ones, and it offers no "trust this frontier" option.
 
-Resolution always requires actual signatures. A viewpoint can name a frontier
-whose signatures are pending, but it cannot resolve against signature evidence
-until those signatures, or covering signatures, are available. Its meaning stays
-the same while we wait. Resolution doesn't manage signing requests or return a
-list of pending ones.
+Calculating participation is separate from validating admission. `diff` is
+optimistic: it checks graph history and write permissions only, not admission.
+Locally captured working viewpoints can drive materialization and diffs before
+signing; that doesn't make their drafts admitted. Received viewpoints must pass
+`resolve` before driving a materialized view or being used in its diffs.
 
-Calculating participation is separate from verifying signature evidence. Locally
-created working viewpoints can drive materialization and diffs before signing;
-that doesn't make them verified. Received viewpoints must be resolved before
-we use them to drive a view. There is no "trust this frontier" option in resolution.
-
-Coverage is per author and causal, not literal set inclusion: each captured
-frontier hash must be equal to or an ancestor of a commit authenticated by a
-signature from that same author. For example, a later signature on a descendant
-can authenticate an earlier captured frontier even if its original signature has
-been discarded. The ancestry evidence used for this validation may extend beyond
-the viewpoint's delivered history.
-
-Such additional evidence validates the captured authenticated frontier; it does
-not expand that frontier or supply new write-frontier proofs for the viewpoint.
-Write-frontier membership is still evaluated only within the captured delivered
-history. Missing data or evidence required to resolve the viewpoint means
-resolution is incomplete, not that the affected commits are invisible.
+Actual signature and ancestry evidence remains available independently for
+transport verification and export. Evidence outside the selected history may
+help admit a commit, but cannot expand a captured viewpoint or supply a
+write-frontier bound outside its history. Missing graph data or pending local
+heads are resolution errors, not proof that affected commits are invisible.
 
 Any process that resolves the same viewpoint obtains the same commit
 participation, regardless of arrival order or additional local knowledge. This
@@ -272,8 +280,9 @@ The MVR test should hold back a local signature: the edit appears in the working
 view, but not the signed view or an export. Their diff shows the pending edit.
 After signing, the signed view catches up and export is allowed, without another
 change to the working document. Both earlier viewpoints must still mean the
-same thing. Also check batching and that exporting a descendant cannot leak an
-unsigned local ancestor.
+same thing. Also check that admitted ancestors under drafts remain in the signed
+history, and that a pending draft cannot supply a permission bound there. Check
+batching and that exporting a descendant cannot leak an unsigned local ancestor.
 
 ## API
 
@@ -295,7 +304,8 @@ let mut permissions = HashMap::from([
 ]);
 graph.set_write_permissions(&permissions);
 
-// now load the commit graph
+// Load received items after verification, in dependency order.
+// Buffer unverified items and missing dependencies outside the graph.
 for commit in commits {
     graph.ingest_commit(commit)?;
 }
@@ -305,11 +315,11 @@ for commit in commits {
 // This gives us the "current viewpoint" of the graph. A combination of:
 // * the delivered heads of the commit graph
 // * an immutable snapshot of the per-author write permissions
-// * an immutable snapshot of the per-author authentication frontiers
-// This is the working viewpoint; signed_view_point() uses verified coverage.
+// This is the working viewpoint, including local drafts.
+// signed_view_point() instead selects the maximal admitted commits as heads.
 let view_point = graph.view_point();
 
-// now receive some new changes
+// Now admit a verified received change whose dependencies are admitted.
 graph.ingest_commit(new_commit)?;
 
 // Now incorporate new commits into the operation log
@@ -331,9 +341,9 @@ for commit_diff in ingestion_diff.changed_commits() {
     // CRDT-specific bookkeeping: update participation, not operation storage.
     log.set_commit_visibility(commit_diff.commit_id, visible);
 }
-// The operation log now reflects post_view_point. Receiving signatures can
-// also change participation and should be handled by comparing viewpoints
-// captured before and after signature ingestion, even without new delivery.
+// The operation log now reflects post_view_point. Signing local drafts changes
+// newly captured signed heads, not this working document. To update a signed
+// materialization, compare signed viewpoints captured before and after signing.
 
 let pre_revocation_view_point = graph.view_point();
 // Revoke Alice at these heads. Bob stays unbounded.

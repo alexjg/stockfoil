@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::{ControlFlow, Index, IndexMut, Range},
 };
 
@@ -10,9 +10,9 @@ use crate::{
     WritePermission, sedimentree::MinimalCover,
 };
 
-/// An in-memory commit DAG with causal delivery.
-/// Commits with missing parents are queued until all their ancestors are available.
-/// Queued commits are not exposed by graph queries or traversal.
+/// An in-memory, causally closed commit DAG.
+/// Every stored commit has all its ancestors available. Items with missing
+/// dependencies must be buffered outside the graph.
 ///
 /// `P` is opaque: it can be decoded operations, a storage reference, or application
 /// metadata. Signatures authenticate the commit envelope and its payload hash,
@@ -21,8 +21,8 @@ use crate::{
 ///
 /// Cloning preserves local provenance. Received history must pass sedimentree
 /// verification and enter through [`Self::ingest`], never raw commit insertion.
-/// Received items with missing verified dependencies must be buffered outside
-/// the graph; only local edits use its causal delivery queue.
+/// Local edits may await signatures, but all their parents must already be
+/// delivered before insertion.
 #[derive(Clone)]
 pub struct CommitGraph<P> {
     nodes: NodeStore,
@@ -30,12 +30,9 @@ pub struct CommitGraph<P> {
     store: HashMap<NodeIdx, P>,
     by_hash: HashMap<CommitHash, NodeIdx>,
     heads: BTreeSet<CommitHash>,
-    pending: VecDeque<(CommitMeta, P, BTreeMap<Author, Signature>)>,
     permissions: HashMap<Author, WritePermission>,
-    // Trusted hash frontiers for local views, independent of transport certificates.
-    signature_frontiers: HashMap<Author, BTreeSet<CommitHash>>,
-    authenticated: HashSet<CommitHash>,
-    // Optimistic local work, removed as soon as it is admitted.
+    // Optimistic local work, removed as soon as it is admitted. Every delivered
+    // commit outside this set is verified and has admitted dependencies.
     pending_local: HashSet<CommitHash>,
 }
 
@@ -80,10 +77,7 @@ impl<P: Clone> CommitGraph<P> {
             store: HashMap::new(),
             by_hash: HashMap::new(),
             heads: BTreeSet::new(),
-            pending: VecDeque::new(),
             permissions: HashMap::new(),
-            signature_frontiers: HashMap::new(),
-            authenticated: HashSet::new(),
             pending_local: HashSet::new(),
         }
     }
@@ -106,8 +100,8 @@ impl<P: Clone> CommitGraph<P> {
             .filter_map(|(i, node)| node.parents.is_empty().then_some(NodeIdx(i)))
     }
 
-    /// Return hashes of ready commits with no children, in hash order.
-    /// Queued commits neither appear as heads nor remove their parents from the heads.
+    /// Return hashes of delivered commits with no children, in hash order.
+    /// Includes local drafts awaiting signatures.
     /// Iterating all heads takes O(h) time for h heads, without scanning the graph.
     pub fn delivered_heads(&self) -> impl Iterator<Item = CommitHash> + '_ {
         self.heads.iter().copied()
@@ -173,19 +167,11 @@ impl<P: Clone> CommitGraph<P> {
         let prepared: Vec<_> = item
             .commits
             .iter()
-            .filter_map(|meta| {
-                if self.by_hash.contains_key(meta.hash())
-                    || self
-                        .pending
-                        .iter()
-                        .any(|(known, _, _)| known.hash() == meta.hash())
-                {
-                    None
-                } else {
-                    Some((meta.clone(), payload(meta)))
-                }
-            })
+            .filter(|meta| !self.by_hash.contains_key(meta.hash()))
+            .map(|meta| (meta.clone(), payload(meta)))
             .collect();
+        // Verification supplies parents-first members. Admitted dependencies
+        // close the fragment boundary, so every new member is ready on arrival.
         for (meta, data) in prepared {
             self.insert_commit(meta, data);
         }
@@ -194,41 +180,15 @@ impl<P: Clone> CommitGraph<P> {
         Ok(())
     }
 
+    // Only called for a new commit once all parents are present. Received
+    // members are verified and topologically sorted; local callers check first.
     fn insert_commit(&mut self, meta: CommitMeta, data: P) {
-        if self.by_hash.contains_key(meta.hash())
-            || self
-                .pending
+        debug_assert!(!self.by_hash.contains_key(meta.hash()));
+        debug_assert!(
+            meta.parents()
                 .iter()
-                .any(|(pending, _, _)| pending.hash() == meta.hash())
-        {
-            return;
-        }
-        self.pending.push_back((meta, data, BTreeMap::new()));
-
-        // Retry the queue until a complete pass makes no progress. A blocked
-        // commit must not prevent unrelated, ready commits from being inserted.
-        loop {
-            let pending_count = self.pending.len();
-            for _ in 0..pending_count {
-                let (meta, data, signatures) = self.pending.pop_front().unwrap();
-                if meta
-                    .parents()
-                    .iter()
-                    .all(|hash| self.by_hash.contains_key(hash))
-                {
-                    self.insert_ready(meta, data, signatures);
-                } else {
-                    self.pending.push_back((meta, data, signatures));
-                }
-            }
-            if self.pending.is_empty() || self.pending.len() == pending_count {
-                break;
-            }
-        }
-    }
-
-    // Only called once all parents have been inserted into the graph.
-    fn insert_ready(&mut self, meta: CommitMeta, data: P, signatures: BTreeMap<Author, Signature>) {
+                .all(|hash| self.by_hash.contains_key(hash))
+        );
         let hash = *meta.hash();
         let start = self.nodes.parent_ids.len();
         self.nodes
@@ -245,7 +205,7 @@ impl<P: Clone> CommitGraph<P> {
             depth: sedimentree_depth(&hash),
             meta,
             parents,
-            signatures,
+            signatures: BTreeMap::new(),
             headed_fragments: Vec::new(),
         });
         self.by_hash.insert(hash, node_idx);
@@ -371,7 +331,7 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Borrow a publishable delivered commit's metadata and payload.
-    /// Returns `None` for unknown, queued, or withheld commits. The commit need
+    /// Returns `None` for unknown or withheld commits. The commit need
     /// not still be loose: a previously advertised entry remains readable after
     /// a fragment covers it. Does not clone payloads or supply signature evidence.
     /// Readability does not guarantee standalone exportability; see [`Self::export`].
@@ -442,7 +402,7 @@ impl<P: Clone> CommitGraph<P> {
 
     /// Whether metadata is authenticated and parent-closed, not merely local.
     pub fn has_admitted_commit(&self, hash: &CommitHash) -> bool {
-        self.authenticated.contains(hash)
+        self.by_hash.contains_key(hash) && !self.pending_local.contains(hash)
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -480,7 +440,7 @@ impl<P: Clone> CommitGraph<P> {
         );
     }
 
-    /// Visit each ready commit once, parents before children, excluding queued commits.
+    /// Visit each delivered commit once, parents before children, including local drafts.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
     pub fn traverse<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(&self, mut traversal: F) {
         // Only ready commits are inserted, so node order is already topological.
@@ -491,8 +451,8 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Visit ready commits excluding `since` and all their ancestors, parents first.
-    /// An empty `since` visits all ready commits. Unknown or queued hashes are ignored.
+    /// Visit delivered commits excluding `since` and their ancestors, parents first.
+    /// An empty `since` visits all delivered commits. Unknown hashes are ignored.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
     pub fn traverse_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
         &self,
@@ -533,15 +493,22 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Ingest our own prepared commit for immediate local use.
+    /// Parents must already be delivered, but may still be unsigned local drafts.
+    /// Duplicate insertion preserves the existing payload and admission status.
+    ///
+    /// # Panics
+    /// Panics before mutation if any parent is missing. Commits prepared with
+    /// [`Self::commit_by`] on this graph already satisfy this precondition.
     pub fn ingest_local_commit(&mut self, meta: CommitMeta, data: P) {
-        if self.by_hash.contains_key(meta.hash())
-            || self
-                .pending
-                .iter()
-                .any(|(known, _, _)| known.hash() == meta.hash())
-        {
+        if self.by_hash.contains_key(meta.hash()) {
             return;
         }
+        assert!(
+            meta.parents()
+                .iter()
+                .all(|hash| self.by_hash.contains_key(hash)),
+            "local commit parents must already be delivered"
+        );
         self.pending_local.insert(*meta.hash());
         self.insert_commit(meta, data);
         self.finish_local_commits();
@@ -566,17 +533,9 @@ impl<P: Clone> CommitGraph<P> {
                 commit: hash,
             }
         })?;
-        let signatures = if let Some(&idx) = self.by_hash.get(&hash) {
-            &mut self.nodes[idx].signatures
-        } else {
-            &mut self
-                .pending
-                .iter_mut()
-                .find(|(meta, _, _)| meta.hash() == &hash)
-                .expect("known pending local commit")
-                .2
-        };
-        signatures.insert(author, signature);
+        self.nodes[self.by_hash[&hash]]
+            .signatures
+            .insert(author, signature);
         self.finish_local_commits();
         Ok(())
     }
@@ -587,79 +546,56 @@ impl<P: Clone> CommitGraph<P> {
         self.permissions = permissions.clone();
     }
 
-    /// Capture the working state, including our pending-signature local commits.
+    /// Capture the delivered working history, including pending local commits,
+    /// and the current write permissions. Signing does not change this snapshot.
     pub fn view_point(&self) -> ViewPoint {
-        let mut view_point = self.signed_view_point();
-        for hash in &self.pending_local {
-            if let Some(idx) = self.by_hash.get(hash) {
-                let author = *self.nodes[*idx].meta.author();
-                view_point
-                    .authentication_frontiers
-                    .entry(author)
-                    .or_default()
-                    .push(*hash);
-            }
-        }
-        for frontier in view_point.authentication_frontiers.values_mut() {
-            *frontier = self.frontier(frontier.iter().copied());
-        }
-        view_point
-    }
-
-    /// Capture the same history and permissions with signature-backed coverage.
-    pub fn signed_view_point(&self) -> ViewPoint {
-        let candidates: HashMap<Author, Vec<CommitHash>> = self
-            .signature_frontiers
-            .iter()
-            .map(|(author, signatures)| {
-                (
-                    *author,
-                    signatures
-                        .iter()
-                        .copied()
-                        .filter(|hash| self.by_hash.contains_key(hash))
-                        .collect(),
-                )
-            })
-            .collect();
-        let authentication_frontiers = candidates
-            .into_iter()
-            .filter_map(|(author, heads)| {
-                let heads = self.frontier(heads);
-                (!heads.is_empty()).then_some((author, heads))
-            })
-            .collect();
         ViewPoint {
             delivered_heads: self.delivered_heads().collect(),
             write_permissions: self.permissions.clone(),
-            authentication_frontiers,
         }
     }
 
-    /// Resolve commit metadata against actual signature evidence, not the opaque
-    /// payload values `P`. Pending signatures do not suffice, even for a viewpoint
-    /// captured locally. Later signatures may validate an
-    /// old frontier, but never expand its captured participation.
-    pub fn resolve(&self, view_point: &ViewPoint) -> Result<ResolvedViewPoint<'_>, ResolveError> {
-        let visible = self.participation(view_point)?;
-        for (author, frontier) in &view_point.authentication_frontiers {
-            for hash in frontier {
-                if !self.signature_covers(author, hash) {
-                    return Err(ResolveError::MissingSignature {
-                        author: *author,
-                        frontier: *hash,
-                    });
+    /// Capture only admitted history and the current write permissions.
+    /// Heads are the maximal admitted commits, including ancestors beneath local
+    /// drafts. Pending local commits cannot supply write-frontier proofs here.
+    pub fn signed_view_point(&self) -> ViewPoint {
+        let mut heads = BTreeSet::new();
+        // Node order is topological and admitted history is parent-closed.
+        for (_, node) in &self.nodes {
+            if !self.pending_local.contains(node.meta.hash()) {
+                for parent in node.meta.parents() {
+                    heads.remove(parent);
                 }
+                heads.insert(*node.meta.hash());
+            }
+        }
+        ViewPoint {
+            delivered_heads: heads.into_iter().collect(),
+            write_permissions: self.permissions.clone(),
+        }
+    }
+
+    /// Resolve a viewpoint against admitted history, not the opaque payloads `P`.
+    /// Every head must be admitted: verified, parent-closed admission establishes
+    /// authentication of its entire history. Pending local heads do not suffice,
+    /// even for a viewpoint captured locally or an author denied permission.
+    pub fn resolve(&self, view_point: &ViewPoint) -> Result<ResolvedViewPoint<'_>, ResolveError> {
+        for hash in &view_point.delivered_heads {
+            if !self.by_hash.contains_key(hash) {
+                return Err(ResolveError::MissingCommit(*hash));
+            }
+            if self.pending_local.contains(hash) {
+                return Err(ResolveError::PendingLocalCommit(*hash));
             }
         }
         Ok(ResolvedViewPoint {
             known: &self.by_hash,
-            visible,
+            visible: self.participation(view_point)?,
         })
     }
 
-    /// Compare participation without certifying signature evidence. Received viewpoints
-    /// must be resolved before they drive a materialized view.
+    /// Compare participation optimistically, including pending local history.
+    /// Received viewpoints must be resolved before they drive a materialized view.
     pub fn diff(
         &self,
         before: &ViewPoint,
@@ -672,41 +608,11 @@ impl<P: Clone> CommitGraph<P> {
         })
     }
 
-    // All candidates are delivered. Walk their strict ancestors together rather
-    // than testing every pair, which is costly for long local edit runs.
-    fn frontier(&self, hashes: impl IntoIterator<Item = CommitHash>) -> Vec<CommitHash> {
-        let hashes = hashes.into_iter().collect::<BTreeSet<_>>();
-        let mut ancestors = HashSet::new();
-        let mut stack = hashes
-            .iter()
-            .flat_map(|hash| self.parents(self.by_hash[hash]))
-            .collect::<Vec<_>>();
-        while let Some(idx) = stack.pop() {
-            if ancestors.insert(idx) {
-                stack.extend(self.parents(idx));
-            }
-        }
-        hashes
-            .into_iter()
-            .filter(|hash| !ancestors.contains(&self.by_hash[hash]))
-            .collect()
-    }
-
-    fn signature_covers(&self, author: &Author, hash: &CommitHash) -> bool {
-        self.signature_frontiers
-            .get(author)
-            .is_some_and(|signatures| {
-                signatures.iter().any(|tip| {
-                    self.by_hash.contains_key(tip) && (tip == hash || self.is_ancestor(hash, tip))
-                })
-            })
-    }
-
     fn publishable_nodes(&self) -> Vec<bool> {
         self.nodes
             .entries
             .iter()
-            .map(|node| self.authenticated.contains(node.meta.hash()))
+            .map(|node| !self.pending_local.contains(node.meta.hash()))
             .collect()
     }
 
@@ -715,7 +621,6 @@ impl<P: Clone> CommitGraph<P> {
     fn admit_certificate(&mut self, item: crate::VerifiedItem) {
         for meta in &item.commits {
             self.pending_local.remove(meta.hash());
-            self.authenticated.insert(*meta.hash());
             // A signed commit at a checkpoint is still just a commit. Only a
             // verified fragment supplies its canonical range's certificate.
             if let ItemId::Fragment(range) = &item.id {
@@ -731,21 +636,7 @@ impl<P: Clone> CommitGraph<P> {
             self.nodes[self.by_hash[&evidence.commit]]
                 .signatures
                 .insert(evidence.author, evidence.signature);
-            self.signature_frontiers
-                .entry(evidence.author)
-                .or_default()
-                .insert(evidence.commit);
         }
-        self.signature_frontiers = self
-            .signature_frontiers
-            .iter()
-            .map(|(author, targets)| {
-                (
-                    *author,
-                    self.frontier(targets.iter().copied()).into_iter().collect(),
-                )
-            })
-            .collect();
         if let ItemId::Fragment(range) = item.id {
             let idx = self.nodes[self.by_hash[&range.head]]
                 .canonical_fragment()
@@ -773,7 +664,7 @@ impl<P: Clone> CommitGraph<P> {
             let ready = self
                 .pending_local
                 .iter()
-                .filter_map(|hash| self.by_hash.get(hash).copied())
+                .map(|hash| self.by_hash[hash])
                 .filter(|&idx| !self.nodes[idx].signatures.is_empty())
                 .find_map(|idx| self.local_item(idx));
             let Some(item) = ready else { break };
@@ -802,7 +693,7 @@ impl<P: Clone> CommitGraph<P> {
             }
         }
         for (index, node) in self.nodes.entries.iter_mut().enumerate() {
-            if self.authenticated.contains(node.meta.hash()) {
+            if !self.pending_local.contains(node.meta.hash()) {
                 node.signatures
                     .retain(|author, _| needed.contains(&(NodeIdx(index), *author)));
             }
@@ -889,10 +780,6 @@ impl<P: Clone> CommitGraph<P> {
 
     fn participation(&self, view_point: &ViewPoint) -> Result<HashSet<CommitHash>, DiffError> {
         let history = self.history(&view_point.delivered_heads)?;
-        let mut authenticated = HashMap::new();
-        for (author, frontier) in &view_point.authentication_frontiers {
-            authenticated.insert(*author, self.history(frontier)?);
-        }
         let mut bounded = HashMap::new();
         for (author, permission) in &view_point.write_permissions {
             if let WritePermission::Bounded(frontier) = permission {
@@ -910,15 +797,11 @@ impl<P: Clone> CommitGraph<P> {
             .into_iter()
             .filter(|hash| {
                 let author = self.nodes[self.by_hash[hash]].meta.author();
-                let authenticated = authenticated
-                    .get(author)
-                    .is_some_and(|covered| covered.contains(hash));
-                let permitted = match view_point.write_permissions.get(author) {
+                match view_point.write_permissions.get(author) {
                     Some(WritePermission::Unbounded) => true,
                     Some(WritePermission::Bounded(_)) => bounded[author].contains(hash),
                     Some(WritePermission::Denied) | None => false,
-                };
-                authenticated && permitted
+                }
             })
             .collect())
     }
@@ -1226,10 +1109,7 @@ mod tests {
             graph.fragments[fragment].signature_boundary[&alice],
             vec![graph.by_hash[head.hash()]]
         );
-        assert_eq!(
-            graph.signature_frontiers[&alice],
-            BTreeSet::from([*head.hash()])
-        );
+        assert_eq!(graph.signed_view_point().delivered_heads(), &[*head.hash()]);
         assert!(graph.has_admitted_commit(root.hash()));
         assert!(
             graph
@@ -1263,11 +1143,11 @@ mod tests {
         let old_cover = graph.minimal_cover();
         let head = mined(alice, vec![*root.hash()], 1);
         let tip = mined(alice, vec![*head.hash()], 0);
-        // Signatures may accompany queued local work, but not unknown hashes.
+        // Local work is delivered parents-first, but signatures can arrive in
+        // the opposite order without publishing unsigned dependencies.
+        graph.ingest_local_commit(head.clone(), 2);
         graph.ingest_local_commit(tip.clone(), 3);
         sign(&mut graph, &key, &tip);
-        assert!(!graph.has_admitted_commit(tip.hash()));
-        graph.ingest_local_commit(head.clone(), 2);
         assert!(!graph.has_admitted_commit(head.hash()));
         assert!(!graph.has_admitted_commit(tip.hash()));
         assert!(

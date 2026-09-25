@@ -1,13 +1,16 @@
 //! Graph topology tests built from local signed commit fixtures.
 //!
-//! Arbitrary and reverse insertion orders exercise the local causal queue, not
-//! verified receipt: remote admission requires already-authenticated parents.
-//! Delivered fixtures are fully signed and can be exchanged by graph merges.
+//! Local insertion requires delivered parents; callers retry rejected children.
+//! Draft parents need not be signed, while verified receipt requires admitted
+//! dependencies. Signed fixtures can be exchanged by graph merges.
 mod support;
 
-use std::ops::ControlFlow;
+use std::{
+    ops::ControlFlow,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
 
-use stockfoil::{BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta};
+use stockfoil::{BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, SignatureError};
 use support::{key, sign};
 
 fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
@@ -18,8 +21,7 @@ fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
     })
 }
 
-/// Sign known local work, including when parents are still missing.
-/// These topology fixtures deliberately use the retained local causal queue.
+/// Sign local work after all of its parents have been delivered.
 fn ingest_local_signed(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) {
     let hash = *meta.hash();
     graph.ingest_local_commit(meta, value);
@@ -33,6 +35,22 @@ fn insert(graph: &mut CommitGraph<u8>, value: u8, parents: &[CommitHash]) -> Com
     let meta = meta(value, parents);
     let hash = *meta.hash();
     ingest_local_signed(graph, meta, value);
+    hash
+}
+
+/// A missing parent is a caller error, not a request to retain local work.
+fn reject_local(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) -> CommitHash {
+    let hash = *meta.hash();
+    assert!(catch_unwind(AssertUnwindSafe(|| graph.ingest_local_commit(meta, value))).is_err());
+    assert!(!graph.has_admitted_commit(&hash));
+    assert_eq!(
+        graph.ingest_signature(
+            support::author(&key(1)),
+            hash,
+            support::signature(&key(1), hash)
+        ),
+        Err(SignatureError::NotPendingLocalCommit(hash))
+    );
     hash
 }
 
@@ -95,25 +113,33 @@ fn heads_follow_chains_forks_merges_and_disconnected_roots() {
 }
 
 #[test]
-fn heads_change_only_when_local_queued_commits_become_ready() {
+fn rejected_children_change_heads_only_after_explicit_parents_first_retry() {
     let mut graph = CommitGraph::new();
     let first = *meta(1, &[]).hash();
     let second = *meta(2, &[]).hash();
     let merge = *meta(3, &[first, second]).hash();
-    let tip = insert(&mut graph, 4, &[merge]);
-    insert(&mut graph, 3, &[first, second]);
-    insert(&mut graph, 3, &[first, second]);
+    let tip = reject_local(&mut graph, meta(4, &[merge]), 40);
+    reject_local(&mut graph, meta(3, &[first, second]), 30);
+    reject_local(&mut graph, meta(3, &[first, second]), 99);
     assert_heads(&graph, &[]);
+    assert_eq!(graph.roots().count(), 0);
+    assert!(visited(&graph).is_empty());
 
     insert(&mut graph, 1, &[]);
     assert_heads(&graph, &[first]);
     let unrelated = insert(&mut graph, 5, &[]);
     assert_heads(&graph, &[first, unrelated]);
-
-    // This releases the local merge and its descendant, even though the
-    // descendant was queued first. Neither intermediate commit remains a head.
     insert(&mut graph, 2, &[]);
+    // Inserting parents does not resurrect either rejected payload.
+    assert_heads(&graph, &[first, second, unrelated]);
+    assert_eq!(visited(&graph), vec![1, 5, 2]);
+
+    insert(&mut graph, 3, &[first, second]);
+    assert_heads(&graph, &[merge, unrelated]);
+    assert_eq!(visited(&graph), vec![1, 5, 2, 3]);
+    insert(&mut graph, 4, &[merge]);
     assert_heads(&graph, &[tip, unrelated]);
+    assert_eq!(visited(&graph), vec![1, 5, 2, 3, 4]);
 }
 
 #[test]
@@ -219,43 +245,126 @@ fn repeated_parent_does_not_duplicate_children_or_visits() {
 }
 
 #[test]
-fn merge_waits_for_all_parents_then_releases_descendants() {
+fn missing_later_parent_rejects_before_any_graph_mutation() {
     let mut graph = CommitGraph::new();
-    let first = *meta(1, &[]).hash();
+    let root = insert(&mut graph, 0, &[]);
+    let first = insert(&mut graph, 1, &[root]);
     let second = *meta(2, &[]).hash();
-    let merge = insert(&mut graph, 3, &[first, second]);
-    insert(&mut graph, 4, &[merge]);
-    assert!(visited(&graph).is_empty());
-    assert_eq!(graph.roots().count(), 0);
+    let roots_before = graph.roots().collect::<Vec<_>>();
+    let first_idx = graph.children(roots_before[0]).next().unwrap();
+    let heads_before = graph.delivered_heads().collect::<Vec<_>>();
+    let cover_before = graph.minimal_cover();
+    let working_before = graph.view_point();
+    let signed_before = graph.signed_view_point();
+    let mut metadata_before = Vec::new();
+    graph.traverse(|meta, value| {
+        metadata_before.push((meta.clone(), *value));
+        ControlFlow::Continue(())
+    });
 
-    insert(&mut graph, 1, &[]);
-    assert_eq!(visited(&graph), vec![1]);
-    assert_eq!(graph.roots().count(), 1);
-    assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 0);
+    // The first parent exists: even parent links and heads must remain untouched
+    // when validation encounters the missing second parent.
+    let merge = reject_local(&mut graph, meta(3, &[first, second]), 30);
+    assert_eq!(graph.delivered_heads().collect::<Vec<_>>(), heads_before);
+    assert_eq!(graph.roots().collect::<Vec<_>>(), roots_before);
+    assert_eq!(
+        graph.children(roots_before[0]).collect::<Vec<_>>(),
+        vec![first_idx]
+    );
+    assert_eq!(graph.parents(first_idx).collect::<Vec<_>>(), roots_before);
+    assert_eq!(graph.children(first_idx).count(), 0);
+    assert_eq!(visited(&graph), vec![0, 1]);
+    assert_eq!(visited_since(&graph, &[root]), vec![1]);
+    let mut metadata_after = Vec::new();
+    graph.traverse(|meta, value| {
+        assert_ne!(*meta.hash(), merge);
+        metadata_after.push((meta.clone(), *value));
+        ControlFlow::Continue(())
+    });
+    assert_eq!(metadata_after.len(), metadata_before.len());
+    for ((after, after_value), (before, before_value)) in
+        metadata_after.iter().zip(&metadata_before)
+    {
+        assert_eq!(after.hash(), before.hash());
+        assert_eq!(after.parents(), before.parents());
+        assert_eq!(after.author(), before.author());
+        assert_eq!(after.payload_hash(), before.payload_hash());
+        assert_eq!(after_value, before_value);
+    }
+    assert!(graph.publishable_commit(&merge).is_none());
+    assert_eq!(graph.minimal_cover(), cover_before);
+    assert_eq!(graph.view_point(), working_before);
+    assert_eq!(graph.signed_view_point(), signed_before);
+    assert!(graph.resolve(&signed_before).is_ok());
 
     insert(&mut graph, 2, &[]);
-    assert_eq!(visited(&graph), vec![1, 2, 3, 4]);
+    assert_eq!(visited(&graph), vec![0, 1, 2]);
+    assert_heads(&graph, &[first, second]);
+    assert_eq!(graph.children(first_idx).count(), 0);
+    assert!(!graph.has_admitted_commit(&merge));
+    insert(&mut graph, 3, &[first, second]);
+    insert(&mut graph, 4, &[merge]);
+    assert_eq!(visited(&graph), vec![0, 1, 2, 3, 4]);
     let roots = graph.roots().collect::<Vec<_>>();
     assert_eq!(roots.len(), 2);
-    let merges = graph.children(roots[0]).collect::<Vec<_>>();
+    let merges = graph.children(first_idx).collect::<Vec<_>>();
     assert_eq!(merges.len(), 1);
     assert_eq!(graph.children(roots[1]).collect::<Vec<_>>(), merges);
-    assert_eq!(graph.parents(merges[0]).collect::<Vec<_>>(), roots);
+    assert_eq!(
+        graph.parents(merges[0]).collect::<Vec<_>>(),
+        vec![first_idx, roots[1]]
+    );
     assert_eq!(graph.children(merges[0]).count(), 1);
 }
 
 #[test]
-fn local_signed_queued_duplicates_preserve_first_payload() {
+fn local_draft_parents_are_sufficient_and_pending_duplicates_preserve_first_payload() {
     let mut graph = CommitGraph::new();
-    let root = *meta(1, &[]).hash();
-    insert(&mut graph, 2, &[root, root]);
-    ingest_local_signed(&mut graph, meta(2, &[root, root]), 99);
-    assert!(visited(&graph).is_empty());
+    let root_meta = meta(1, &[]);
+    let root = *root_meta.hash();
+    graph.ingest_local_commit(root_meta.clone(), 1);
+    graph.ingest_local_commit(root_meta, 99);
+    let child_meta = meta(2, &[root, root]);
+    let child = *child_meta.hash();
+    graph.ingest_local_commit(child_meta.clone(), 2);
+    graph.ingest_local_commit(child_meta.clone(), 99);
+    assert_eq!(visited(&graph), vec![1, 2]);
+    assert_heads(&graph, &[child]);
+    assert!(!graph.has_admitted_commit(&root));
+    assert!(!graph.has_admitted_commit(&child));
+    assert!(graph.signed_view_point().delivered_heads().is_empty());
 
-    insert(&mut graph, 1, &[]);
-    ingest_local_signed(&mut graph, meta(2, &[root, root]), 100);
+    // Signing a child before its delivered draft parent is allowed, but does
+    // not admit it. Duplicates must preserve both payload and signature.
+    sign(&mut graph, &key(1), child);
+    graph.ingest_local_commit(child_meta, 100);
+    assert!(!graph.has_admitted_commit(&child));
+    sign(&mut graph, &key(1), root);
+    assert!(graph.has_admitted_commit(&root));
+    assert!(graph.has_admitted_commit(&child));
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 1);
+}
+
+#[test]
+fn signature_before_local_insertion_is_rejected_not_retained() {
+    let mut graph = CommitGraph::new();
+    let root_meta = meta(1, &[]);
+    let root = *root_meta.hash();
+    assert_eq!(
+        graph.ingest_signature(
+            support::author(&key(1)),
+            root,
+            support::signature(&key(1), root)
+        ),
+        Err(SignatureError::NotPendingLocalCommit(root))
+    );
+    assert!(visited(&graph).is_empty());
+    graph.ingest_local_commit(root_meta, 1);
+    assert!(!graph.has_admitted_commit(&root));
+    assert!(graph.signed_view_point().delivered_heads().is_empty());
+    sign(&mut graph, &key(1), root);
+    assert!(graph.has_admitted_commit(&root));
 }
 
 #[test]
@@ -295,24 +404,30 @@ fn ancestry_follows_all_merge_parents_but_not_concurrent_branches() {
 }
 
 #[test]
-fn ancestry_ignores_unknown_and_queued_commits_until_ready() {
+fn ancestry_ignores_rejected_commits_until_explicit_retry() {
     let mut graph = CommitGraph::new();
     let missing = *meta(1, &[]).hash();
     assert!(!graph.is_ancestor(&missing, &missing));
     let root = insert(&mut graph, 0, &[]);
-    let queued = insert(&mut graph, 2, &[root, missing]);
-    let tip = insert(&mut graph, 3, &[queued]);
+    let rejected = reject_local(&mut graph, meta(2, &[root, missing]), 2);
+    let tip = reject_local(&mut graph, meta(3, &[rejected]), 3);
 
     assert!(!graph.is_ancestor(&root, &missing));
     assert!(!graph.is_ancestor(&missing, &root));
-    assert!(!graph.is_ancestor(&root, &queued));
-    assert!(!graph.is_ancestor(&queued, &root));
-    assert!(!graph.is_ancestor(&queued, &tip));
+    assert!(!graph.is_ancestor(&root, &rejected));
+    assert!(!graph.is_ancestor(&rejected, &root));
+    assert!(!graph.is_ancestor(&rejected, &tip));
 
     insert(&mut graph, 1, &[]);
+    assert!(!graph.is_ancestor(&root, &rejected));
+    assert!(!graph.is_ancestor(&missing, &tip));
+    insert(&mut graph, 2, &[root, missing]);
+    assert!(graph.is_ancestor(&root, &rejected));
+    assert!(!graph.is_ancestor(&rejected, &tip));
+    insert(&mut graph, 3, &[rejected]);
     assert!(graph.is_ancestor(&root, &tip));
     assert!(graph.is_ancestor(&missing, &tip));
-    assert!(graph.is_ancestor(&queued, &tip));
+    assert!(graph.is_ancestor(&rejected, &tip));
 }
 
 #[test]
@@ -358,17 +473,17 @@ fn traverse_since_delivers_only_new_history_after_merge() {
 }
 
 #[test]
-fn traverse_since_handles_empty_unknown_and_queued_heads() {
+fn traverse_since_handles_empty_unknown_and_rejected_heads() {
     let mut graph = CommitGraph::new();
     let unknown = *meta(99, &[]).hash();
     assert!(visited_since(&graph, &[]).is_empty());
     assert!(visited_since(&graph, &[unknown]).is_empty());
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);
-    let queued = insert(&mut graph, 3, &[child, unknown]);
+    let rejected = reject_local(&mut graph, meta(3, &[child, unknown]), 3);
 
     assert_eq!(visited_since(&graph, &[]), visited(&graph));
-    assert_eq!(visited_since(&graph, &[unknown, queued]), vec![1, 2]);
+    assert_eq!(visited_since(&graph, &[unknown, rejected]), vec![1, 2]);
     assert_eq!(visited_since(&graph, &[root, unknown]), vec![2]);
 }
 

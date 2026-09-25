@@ -1,6 +1,6 @@
 //! Authentication, permission snapshots, and verified receipt boundaries.
-//! Received history is authenticated before admission; only local work can wait
-//! inside the graph for signatures or causal delivery.
+//! Received history is authenticated before admission; local work must arrive
+//! in causal order and can wait inside the graph only for authentication.
 mod support;
 
 use support::{author, key, sign, signature};
@@ -8,6 +8,7 @@ use support::{author, key, sign, signature};
 use std::{
     collections::{BTreeSet, HashMap},
     ops::ControlFlow,
+    panic::{AssertUnwindSafe, catch_unwind},
 };
 
 use ed25519_dalek::SigningKey;
@@ -47,61 +48,201 @@ fn grant(graph: &mut CommitGraph<u8>, keys: &[&SigningKey]) {
 }
 
 #[test]
-fn signatures_require_known_local_work_but_can_precede_causal_delivery() {
+fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
+    let alice = key(1);
+    let root = commit(&alice, 1, &[]);
+    let missing = commit(&alice, 2, &[]);
+    let child = commit(&alice, 3, &[*root.hash(), *missing.hash()]);
+    let mut graph = CommitGraph::new();
+    grant(&mut graph, &[&alice]);
+    graph.ingest_local_commit(root.clone(), 1);
+    let before = graph.view_point();
+    let signed_before = graph.signed_view_point();
+
+    // Even with the first parent delivered, every parent must exist before
+    // insertion mutates topology, payload storage, or pending-local tracking.
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            graph.ingest_local_commit(child.clone(), 3);
+        }))
+        .is_err()
+    );
+    assert_eq!(graph.view_point(), before);
+    assert_eq!(graph.signed_view_point(), signed_before);
+    assert!(!graph.has_admitted_commit(child.hash()));
+    assert!(graph.publishable_commit(child.hash()).is_none());
+    assert!(graph.export(&ItemId::Commit(*child.hash())).is_err());
+    assert!(graph.minimal_cover().loose_commits.is_empty());
+    assert!(graph.minimal_cover().fragments.is_empty());
+    let rejected = ViewPoint::from_parts(vec![*child.hash()], HashMap::new());
+    assert!(matches!(
+        graph.resolve(&rejected),
+        Err(ResolveError::MissingCommit(hash)) if hash == *child.hash()
+    ));
+    assert_eq!(
+        graph.ingest_signature(
+            author(&alice),
+            *child.hash(),
+            signature(&alice, *child.hash())
+        ),
+        Err(SignatureError::NotPendingLocalCommit(*child.hash()))
+    );
+    let mut values = Vec::new();
+    graph.traverse(|_, value| {
+        values.push(*value);
+        ControlFlow::Continue(())
+    });
+    assert_eq!(values, vec![1]);
+
+    graph.ingest_local_commit(missing.clone(), 2);
+    sign(&mut graph, &alice, *root.hash());
+    sign(&mut graph, &alice, *missing.hash());
+    // Filling the gap never releases rejected local work or its signature.
+    assert_eq!(
+        graph.delivered_heads().collect::<BTreeSet<_>>(),
+        BTreeSet::from([*root.hash(), *missing.hash()])
+    );
+    assert_eq!(
+        graph.ingest_signature(
+            author(&alice),
+            *child.hash(),
+            signature(&alice, *child.hash())
+        ),
+        Err(SignatureError::NotPendingLocalCommit(*child.hash()))
+    );
+    let mut peer = CommitGraph::new();
+    peer.merge(&graph);
+    assert_eq!(peer.delivered_heads().count(), 2);
+    assert_eq!(
+        peer.resolve(&peer.signed_view_point())
+            .unwrap()
+            .visible(child.hash()),
+        Err(QueryError::UnknownCommit(*child.hash()))
+    );
+
+    // The caller must retry, and the retry supplies the payload actually kept.
+    graph.ingest_local_commit(child.clone(), 99);
+    assert!(!graph.has_admitted_commit(child.hash()));
+    sign(&mut graph, &alice, *child.hash());
+    values.clear();
+    graph.traverse(|_, value| {
+        values.push(*value);
+        ControlFlow::Continue(())
+    });
+    assert_eq!(values, vec![1, 2, 99]);
+    peer.merge(&graph);
+    assert!(peer.has_admitted_commit(child.hash()));
+    assert_eq!(
+        peer.delivered_heads().collect::<Vec<_>>(),
+        vec![*child.hash()]
+    );
+}
+
+#[test]
+fn signatures_require_delivered_local_work_but_can_precede_parent_admission() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
     let tip = commit(&alice, 2, &[*root.hash()]);
     let mut graph = CommitGraph::new();
     grant(&mut graph, &[&alice]);
+    let empty = graph.signed_view_point();
     assert_eq!(
         graph.ingest_signature(author(&alice), *tip.hash(), signature(&alice, *tip.hash())),
         Err(SignatureError::NotPendingLocalCommit(*tip.hash()))
     );
+    graph.ingest_local_commit(root.clone(), 1);
     graph.ingest_local_commit(tip.clone(), 2);
+    let working = graph.view_point();
+    assert_eq!(working.delivered_heads(), &[*tip.hash()]);
     sign(&mut graph, &alice, *tip.hash());
-    let detached = graph.view_point();
-    assert!(detached.delivered_heads().is_empty());
-    assert!(detached.authentication_frontiers().is_empty());
-    assert_eq!(
-        graph.resolve(&detached).unwrap().visible(tip.hash()),
-        Err(QueryError::UnknownCommit(*tip.hash()))
-    );
+    assert_eq!(graph.view_point(), working);
+    assert_eq!(graph.signed_view_point(), empty);
+    assert!(matches!(
+        graph.resolve(&working),
+        Err(ResolveError::PendingLocalCommit(hash)) if hash == *tip.hash()
+    ));
+    for meta in [&root, &tip] {
+        assert!(!graph.has_admitted_commit(meta.hash()));
+        assert!(graph.publishable_commit(meta.hash()).is_none());
+        assert!(graph.export(&ItemId::Commit(*meta.hash())).is_err());
+    }
 
-    // Queued local data and its signature are not forwarded before the root.
     let mut peer = CommitGraph::new();
     grant(&mut peer, &[&alice]);
     peer.merge(&graph);
     assert!(peer.delivered_heads().next().is_none());
-    assert!(
-        peer.signed_view_point()
-            .authentication_frontiers()
-            .is_empty()
-    );
-    graph.ingest_local_commit(root.clone(), 1);
-    assert!(!graph.has_admitted_commit(root.hash()));
-    assert!(graph.publishable_commit(root.hash()).is_none());
-    assert!(graph.export(&ItemId::Commit(*root.hash())).is_err());
-    peer.merge(&graph);
-    assert_eq!(peer.delivered_heads().count(), 0);
-    // Local authentication by the tip cannot synthesize a root receipt.
+    // Signing the delivered tip cannot synthesize an unsigned root receipt.
     sign(&mut graph, &alice, *root.hash());
+    assert_eq!(graph.view_point(), working);
     peer.merge(&graph);
     for doc in [&graph, &peer] {
-        let view_point = doc.view_point();
-        assert_eq!(
-            view_point.authentication_frontiers()[&author(&alice)],
-            vec![*tip.hash()]
-        );
-        let resolved = doc.resolve(&view_point).unwrap();
+        assert_eq!(doc.signed_view_point(), working);
+        let resolved = doc.resolve(&working).unwrap();
         assert!(resolved.visible(root.hash()).unwrap());
         assert!(resolved.visible(tip.hash()).unwrap());
-        assert!(
-            !doc.resolve(&detached)
-                .unwrap()
-                .visible(root.hash())
-                .unwrap()
-        );
+        assert!(!doc.resolve(&empty).unwrap().visible(root.hash()).unwrap());
     }
+    assert_eq!(
+        graph.ingest_signature(author(&alice), *tip.hash(), signature(&alice, *tip.hash())),
+        Err(SignatureError::NotPendingLocalCommit(*tip.hash()))
+    );
+}
+
+#[test]
+fn admission_excludes_unknown_and_pending_local_commits() {
+    let alice = key(1);
+    let root = commit(&alice, 1, &[]);
+    let child = commit(&alice, 2, &[*root.hash()]);
+    let mut graph = CommitGraph::new();
+    assert!(!graph.has_admitted_commit(root.hash()));
+
+    // Local drafts require delivered, not necessarily admitted, parents.
+    graph.ingest_local_commit(root.clone(), 1);
+    graph.ingest_local_commit(child.clone(), 2);
+    let child_receipt = receipt(child.clone(), &alice).verify().unwrap();
+    assert!(!graph.has_admitted_commit(child.hash()));
+    assert_eq!(
+        graph.delivered_heads().collect::<Vec<_>>(),
+        vec![*child.hash()]
+    );
+
+    // Delivery alone cannot discharge a received item's dependencies.
+    let mut graph = graph.clone();
+    assert!(!graph.has_admitted_commit(root.hash()));
+    assert!(!graph.has_admitted_commit(child.hash()));
+    assert!(matches!(
+        graph.ingest(child_receipt.clone(), |_| panic!("dependency must be admitted")),
+        Err(IngestError::MissingDependency(hash)) if hash == *root.hash()
+    ));
+    assert!(graph.minimal_cover().loose_commits.is_empty());
+    assert!(graph.minimal_cover().fragments.is_empty());
+
+    // Received evidence promotes local copies without replacing their payloads.
+    graph
+        .ingest(receipt(root.clone(), &alice).verify().unwrap(), |_| {
+            panic!("preserve local payload")
+        })
+        .unwrap();
+    assert!(graph.has_admitted_commit(root.hash()));
+    assert!(!graph.has_admitted_commit(child.hash()));
+    graph
+        .ingest(child_receipt, |_| panic!("preserve local payload"))
+        .unwrap();
+    assert!(graph.has_admitted_commit(child.hash()));
+
+    // Duplicate local insertion must not demote admitted history.
+    graph.ingest_local_commit(root.clone(), 99);
+    assert!(graph.has_admitted_commit(root.hash()));
+    let mut values = Vec::new();
+    graph.traverse(|_, value| {
+        values.push(*value);
+        ControlFlow::Continue(())
+    });
+    assert_eq!(values, vec![1, 2]);
+    let mut peer = CommitGraph::new();
+    peer.merge(&graph);
+    assert!(peer.has_admitted_commit(root.hash()));
+    assert!(peer.has_admitted_commit(child.hash()));
 }
 
 #[test]
@@ -169,7 +310,6 @@ fn pending_evidence_waits_for_admission_before_resolving_old_views() {
     let old = ViewPoint::from_parts(
         captured.delivered_heads().to_vec(),
         captured.write_permissions().clone(),
-        captured.authentication_frontiers().clone(),
     );
     source.ingest_local_commit(tip.clone(), 2);
     sign(&mut source, &alice, *tip.hash());
@@ -193,7 +333,7 @@ fn pending_evidence_waits_for_admission_before_resolving_old_views() {
     sign(&mut peer, &alice, *tip.hash());
     assert!(matches!(
         peer.resolve(&old),
-        Err(ResolveError::MissingSignature { .. })
+        Err(ResolveError::PendingLocalCommit(hash)) if hash == *root.hash()
     ));
     assert!(peer.minimal_cover().loose_commits.is_empty());
     sign(&mut peer, &alice, *root.hash());
@@ -295,14 +435,11 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_local_work() {
             .visible(child.hash())
             .unwrap()
     );
-    let forged = ViewPoint::from_parts(
-        view_point.delivered_heads().to_vec(),
-        view_point.write_permissions().clone(),
-        HashMap::from([(author(&alice), vec![*child.hash()])]),
-    );
+    let unadmitted =
+        ViewPoint::from_parts(vec![*child.hash()], view_point.write_permissions().clone());
     assert!(matches!(
-        graph.resolve(&forged),
-        Err(ResolveError::MissingSignature { .. })
+        graph.resolve(&unadmitted),
+        Err(ResolveError::PendingLocalCommit(hash)) if hash == *child.hash()
     ));
     // Local optimism does not make the signed snapshot or publication authentic.
     assert_eq!(
@@ -341,7 +478,7 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
     let mut peer = CommitGraph::new();
     peer.merge(&source);
     assert_eq!(peer.delivered_heads().count(), 0);
-    assert!(peer.view_point().authentication_frontiers().is_empty());
+    assert!(peer.view_point().delivered_heads().is_empty());
 
     // Revoking Alice while signing is pending doesn't stop the graph syncing
     // once signed, nor let the signature grant her write permission again.
@@ -379,7 +516,7 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
 }
 
 #[test]
-fn authentication_and_write_frontiers_can_have_multiple_heads() {
+fn history_and_write_frontiers_can_have_multiple_heads() {
     let alice = key(1);
     let root = commit(&alice, 0, &[]);
     let left = commit(&alice, 1, &[*root.hash()]);
@@ -399,7 +536,7 @@ fn authentication_and_write_frontiers_can_have_multiple_heads() {
     graph.set_write_permissions(&permissions);
     let bounded = graph.view_point();
     permissions.clear(); // Setter and viewpoint both own snapshots.
-    assert_eq!(bounded.authentication_frontiers()[&author(&alice)].len(), 3);
+    assert_eq!(bounded.delivered_heads().len(), 3);
     let resolved = graph.resolve(&bounded).unwrap();
     for meta in [&root, &left, &right] {
         assert!(resolved.visible(meta.hash()).unwrap());
@@ -448,35 +585,45 @@ fn authentication_and_write_frontiers_can_have_multiple_heads() {
 }
 
 #[test]
-fn merge_withholds_queued_descendants_of_local_work() {
+fn merge_withholds_delivered_descendants_of_unsigned_local_work() {
     let alice = key(1);
     let bob = key(2);
     let root = commit(&alice, 1, &[]);
-    let missing = commit(&bob, 2, &[]);
-    let queued = commit(&bob, 3, &[*root.hash(), *missing.hash()]);
-    let tip = commit(&bob, 4, &[*queued.hash()]);
+    let other_root = commit(&bob, 2, &[]);
+    let middle = commit(&bob, 3, &[*root.hash(), *other_root.hash()]);
+    let tip = commit(&bob, 4, &[*middle.hash()]);
     let mut source = CommitGraph::new();
     source.ingest_local_commit(root.clone(), 1);
+    source.ingest_local_commit(other_root.clone(), 2);
+    source.ingest_local_commit(middle.clone(), 3);
     source.ingest_local_commit(tip.clone(), 4);
-    source.ingest_local_commit(queued.clone(), 3);
+    assert_eq!(
+        source.delivered_heads().collect::<Vec<_>>(),
+        vec![*tip.hash()]
+    );
     sign(&mut source, &bob, *tip.hash());
     let mut peer = CommitGraph::new();
     peer.merge(&source);
-    // If queued local descendants leaked, these receipts would release them.
+    assert_eq!(peer.delivered_heads().count(), 0);
+    for meta in [&root, &other_root, &middle, &tip] {
+        assert!(!source.has_admitted_commit(meta.hash()));
+        assert!(!peer.has_admitted_commit(meta.hash()));
+    }
+    // The receiver having admitted parents cannot make source drafts exportable.
     support::receive_commit(&mut peer, root.clone(), 1);
-    support::receive_commit(&mut peer, missing.clone(), 2);
+    support::receive_commit(&mut peer, other_root.clone(), 2);
     assert_eq!(peer.delivered_heads().count(), 2);
 
     sign(&mut source, &alice, *root.hash());
     peer.merge(&source);
     assert_eq!(peer.delivered_heads().count(), 2);
-    // The source cannot export the queued branch until its own gap is filled.
-    source.ingest_local_commit(missing.clone(), 2);
+    sign(&mut source, &bob, *other_root.hash());
     peer.merge(&source);
-    // Delivery and tip coverage alone do not export the unsigned middle item.
+    // Delivered topology and a signed tip do not authenticate the middle item.
     assert_eq!(peer.delivered_heads().count(), 2);
-    sign(&mut source, &bob, *missing.hash());
-    sign(&mut source, &bob, *queued.hash());
+    assert!(!source.has_admitted_commit(middle.hash()));
+    assert!(!source.has_admitted_commit(tip.hash()));
+    sign(&mut source, &bob, *middle.hash());
     peer.merge(&source);
     assert_eq!(
         peer.delivered_heads().collect::<Vec<_>>(),

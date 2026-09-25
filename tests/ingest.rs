@@ -149,10 +149,7 @@ fn admission_refuses_unsigned_local_dependencies_even_in_the_working_view() {
     destination.ingest_local_commit(root.clone(), 7);
     destination.set_write_permissions(&HashMap::from([(author(1), WritePermission::Unbounded)]));
     let working = destination.view_point();
-    assert_eq!(
-        working.authentication_frontiers()[&author(1)],
-        vec![*root.hash()]
-    );
+    assert_eq!(working.delivered_heads(), &[*root.hash()]);
     assert!(destination.resolve(&working).is_err());
     assert_eq!(
         destination.delivered_heads().collect::<Vec<_>>(),
@@ -279,10 +276,7 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
         (author(2), WritePermission::Unbounded),
     ]));
     let captured = source.signed_view_point();
-    assert_eq!(
-        captured.authentication_frontiers()[&author(1)],
-        vec![*b.hash()]
-    );
+    assert_eq!(captured.delivered_heads(), &[*b.hash()]);
     assert!(
         source
             .resolve(&captured)
@@ -434,7 +428,7 @@ fn fragment_admission_preserves_pending_payloads_and_duplicate_receipts_are_noop
     let incoming = fragment(&range, vec![head.clone(), middle.clone(), root.clone()], 1);
     let verified = incoming.verify().unwrap();
     let mut graph = CommitGraph::new();
-    graph.ingest_local_commit(head.clone(), 9);
+    graph.ingest_local_commit(root.clone(), 7);
     graph.ingest_local_commit(middle.clone(), 8);
     let before = graph.view_point();
     let before_cover = graph.minimal_cover();
@@ -446,15 +440,19 @@ fn fragment_admission_preserves_pending_payloads_and_duplicate_receipts_are_noop
     );
     assert_eq!(graph.view_point(), before);
     assert_eq!(graph.minimal_cover(), before_cover);
-    assert_eq!(graph.delivered_heads().count(), 0);
+    assert_eq!(
+        graph.delivered_heads().collect::<Vec<_>>(),
+        vec![*middle.hash()]
+    );
+    assert!(!graph.has_admitted_commit(middle.hash()));
     assert!(!graph.has_admitted_commit(head.hash()));
 
     let mut calls = 0;
     graph
         .ingest(verified.clone(), |meta| {
-            assert_eq!(meta.hash(), root.hash());
+            assert_eq!(meta.hash(), head.hash());
             calls += 1;
-            7
+            9
         })
         .unwrap();
     assert_eq!(calls, 1);

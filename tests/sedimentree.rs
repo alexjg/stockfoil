@@ -1243,51 +1243,51 @@ fn boundary_bypass_edges_order_parents_before_lower_hash_boundaries_and_break_is
 }
 
 #[test]
-fn local_fragment_reads_wait_for_signatures_before_or_after_causal_delivery() {
+fn local_fragment_reads_require_delivery_then_verified_admission() {
     let case = &cases()[0];
     let range = case_range(case, 8);
-    for signature_first in [false, true] {
-        let mut graph = CommitGraph::new();
-        graph.ingest_local_commit(case.commits[8].clone(), range.head);
-        if signature_first {
-            sign(&mut graph, &key(1), range.head);
-        }
-        // Even a correctly signed queued head cannot be read.
-        assert!(graph.publishable_commit(&range.head).is_none());
-        assert_read_error(&graph, &range, FragmentReadError::MissingCommit(range.head));
-        for meta in &case.commits[..8] {
-            support::receive_commit(&mut graph, meta.clone(), hash(meta));
-        }
-        if !signature_first {
-            assert!(graph.publishable_commit(&range.head).is_none());
-            assert_read_error(
-                &graph,
-                &range,
-                FragmentReadError::NotPublishable(range.head),
-            );
-            // Another author's valid signature does not authenticate this head.
-            sign(&mut graph, &key(2), range.head);
-            assert_read_error(
-                &graph,
-                &range,
-                FragmentReadError::NotPublishable(range.head),
-            );
-            sign(&mut graph, &key(1), range.head);
-        }
-        let (meta, payload) = graph.publishable_commit(&range.head).unwrap();
-        assert_meta(meta, &case.commits[8]);
-        assert_eq!(*payload, range.head);
-        let mut seen = Vec::new();
-        graph
-            .traverse_fragment(&range, |meta, _| {
-                seen.push(hash(meta));
-                ControlFlow::Continue(())
-            })
-            .unwrap();
-        let all = case.commits.iter().map(hash).collect();
-        let (_, memberships) = oracle(&case.commits, &all);
-        assert_eq!(seen, export_order(&case.commits, &memberships[&range.head]));
+    let mut graph = CommitGraph::new();
+    assert!(graph.publishable_commit(&range.head).is_none());
+    assert_read_error(&graph, &range, FragmentReadError::MissingCommit(range.head));
+    assert_eq!(
+        graph.ingest_signature(
+            author(&key(1)),
+            range.head,
+            support::signature(&key(1), range.head),
+        ),
+        Err(stockfoil::SignatureError::NotPendingLocalCommit(range.head))
+    );
+    for meta in &case.commits[..8] {
+        support::receive_commit(&mut graph, meta.clone(), hash(meta));
     }
+    graph.ingest_local_commit(case.commits[8].clone(), range.head);
+    assert!(graph.publishable_commit(&range.head).is_none());
+    assert_read_error(
+        &graph,
+        &range,
+        FragmentReadError::NotPublishable(range.head),
+    );
+    // Another author's valid signature does not authenticate this head.
+    sign(&mut graph, &key(2), range.head);
+    assert_read_error(
+        &graph,
+        &range,
+        FragmentReadError::NotPublishable(range.head),
+    );
+    sign(&mut graph, &key(1), range.head);
+    let (meta, payload) = graph.publishable_commit(&range.head).unwrap();
+    assert_meta(meta, &case.commits[8]);
+    assert_eq!(*payload, range.head);
+    let mut seen = Vec::new();
+    graph
+        .traverse_fragment(&range, |meta, _| {
+            seen.push(hash(meta));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    let all = case.commits.iter().map(hash).collect();
+    let (_, memberships) = oracle(&case.commits, &all);
+    assert_eq!(seen, export_order(&case.commits, &memberships[&range.head]));
 }
 
 #[test]
