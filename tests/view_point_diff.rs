@@ -79,9 +79,9 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
         (bob_id, WritePermission::Unbounded),
     ]));
     let after = alice.view_point();
-    assert_eq!(before.delivered_heads(), after.delivered_heads());
+    assert_eq!(before.heads(), after.heads());
     let mut redelivered = 0;
-    alice.traverse_since(before.delivered_heads(), |_, _| {
+    alice.traverse_since(before.heads(), |_, _| {
         redelivered += 1;
         ControlFlow::Continue(())
     });
@@ -124,10 +124,7 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
     }
     alice.set_write_permissions(&allowed);
     assert_changes(&alice.diff(&before, &alice.view_point()).unwrap(), &[], &[]);
-    assert_eq!(
-        alice.view_point().delivered_heads(),
-        before.delivered_heads()
-    );
+    assert_eq!(alice.view_point().heads(), before.heads());
 }
 
 #[test]
@@ -150,8 +147,8 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     let signed = graph.signed_view_point();
     let mut expected = vec![left, right];
     expected.sort();
-    assert_eq!(working.delivered_heads(), &[joined]);
-    assert_eq!(signed.delivered_heads(), expected);
+    assert_eq!(working.heads(), &[joined]);
+    assert_eq!(signed.heads(), expected);
     assert_changes(
         &graph.diff(&signed, &working).unwrap(),
         &[],
@@ -160,7 +157,7 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
 
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
-    assert_eq!(peer.delivered_heads().collect::<Vec<_>>(), expected);
+    assert_eq!(peer.heads().collect::<Vec<_>>(), expected);
     assert!(peer.resolve(&signed).is_ok());
     assert!(matches!(
         peer.resolve(&working),
@@ -170,7 +167,7 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     sign(&mut graph, &alice, draft);
     expected = vec![draft, right];
     expected.sort();
-    assert_eq!(graph.signed_view_point().delivered_heads(), expected);
+    assert_eq!(graph.signed_view_point().heads(), expected);
     assert!(graph.resolve(&signed).unwrap().visible(&left).unwrap());
     assert!(!graph.resolve(&signed).unwrap().visible(&draft).unwrap());
     assert_eq!(graph.view_point(), working);
@@ -199,11 +196,11 @@ fn pending_write_bounds_apply_only_to_working_history() {
         WritePermission::Bounded(vec![bound]),
     )]));
     let working = ViewPoint::from_parts(
-        graph.view_point().delivered_heads().to_vec(),
+        graph.view_point().heads().to_vec(),
         graph.view_point().write_permissions().clone(),
     );
     let signed = graph.signed_view_point();
-    assert_eq!(signed.delivered_heads(), &[root]);
+    assert_eq!(signed.heads(), &[root]);
     assert!(!graph.resolve(&signed).unwrap().visible(&root).unwrap());
     assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
     assert!(matches!(
@@ -244,8 +241,8 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     let first = prepare(&mut graph, &key, 1);
     let first_working = graph.view_point();
     let first_signed = graph.signed_view_point();
-    assert_eq!(first_working.delivered_heads(), &[first]);
-    assert_eq!(first_signed.delivered_heads(), &[base]);
+    assert_eq!(first_working.heads(), &[first]);
+    assert_eq!(first_signed.heads(), &[base]);
     assert!(graph.resolve(&first_working).is_err());
     assert!(graph.resolve(&first_signed).is_ok());
     let pending = graph.diff(&first_signed, &first_working).unwrap();
@@ -278,7 +275,7 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     );
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
-    assert_eq!(peer.delivered_heads().collect::<Vec<_>>(), vec![base]);
+    assert_eq!(peer.heads().collect::<Vec<_>>(), vec![base]);
 
     sign(&mut graph, &key, tip);
     assert!(!graph.has_admitted_commit(&tip));
@@ -295,10 +292,7 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         &[],
         &[],
     );
-    assert_eq!(
-        batch_working.delivered_heads(),
-        graph.view_point().delivered_heads()
-    );
+    assert_eq!(batch_working.heads(), graph.view_point().heads());
     assert!(graph.resolve(&first_working).is_ok());
     assert!(graph.resolve(&batch_working).is_ok());
     let old_signed = graph.resolve(&batch_signed).unwrap();

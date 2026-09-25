@@ -15,7 +15,7 @@ use crate::{
 /// admitted history. Later admission never changes a captured snapshot's meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewPoint {
-    pub(crate) delivered_heads: Vec<CommitHash>,
+    pub(crate) heads: Vec<CommitHash>,
     pub(crate) write_permissions: HashMap<Author, WritePermission>,
 }
 
@@ -24,18 +24,18 @@ impl ViewPoint {
     /// This does not validate its claims; resolve received viewpoints against
     /// admitted history before using them to drive a materialized view.
     pub fn from_parts(
-        delivered_heads: Vec<CommitHash>,
+        heads: Vec<CommitHash>,
         write_permissions: HashMap<Author, WritePermission>,
     ) -> Self {
         Self {
-            delivered_heads,
+            heads,
             write_permissions,
         }
     }
 
     /// The captured causally complete history, including non-contributing commits.
-    pub fn delivered_heads(&self) -> &[CommitHash] {
-        &self.delivered_heads
+    pub fn heads(&self) -> &[CommitHash] {
+        &self.heads
     }
 
     /// Captured permissions, not the graph's current mutable permission map.

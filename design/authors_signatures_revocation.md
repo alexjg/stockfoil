@@ -65,7 +65,7 @@ Signing may require IO, but local edits should show up immediately. The flow is:
 2. Add it to the local working state and ask the application's signer to sign it.
 3. When the signature arrives and verifies, allow the commit to be published.
 
-`commit_by` chooses the delivered heads as parents, so normal prepared work
+`commit_by` chooses the graph heads as parents, so normal prepared work
 meets the local ingestion precondition. `ingest_local_commit` asserts that every
 parent is already delivered before any mutation and panics on misuse; it never
 buffers causally unready work. Delivered parents may be unsigned local drafts,
@@ -185,12 +185,12 @@ what that means for the document.
 
 A viewpoint captures only two things:
 
-* The delivered heads, identifying the selected causally complete commit history.
+* The history heads, identifying the selected causally complete commit history.
   Causally unready work remains outside the graph.
 * An immutable snapshot of the per-author write permissions
 
-The delivered hashes are heads, not an enumeration of the whole history.
-`ViewPoint::from_parts(delivered_heads, write_permissions)` reconstructs this
+The captured hashes are heads, not an enumeration of the whole history.
+`ViewPoint::from_parts(heads, write_permissions)` reconstructs this
 owned description without validating it. Neither field references the graph's
 mutable current state; there is no authentication-frontier field.
 
@@ -200,7 +200,7 @@ doesn't include future commits or commits outside that history. Authentication
 is enforced at admission, not as another participation predicate.
 
 Proofs of membership in a write frontier are evaluated using only the history
-selected by the delivered heads, not subsequently received commits or items
+selected by the history heads, not subsequently received commits or items
 buffered outside the graph awaiting dependencies. A pending draft outside the
 signed history cannot serve as a permission bound there. Signing may change the
 heads selected by a new signed viewpoint, but cannot change the history or
@@ -315,7 +315,7 @@ for commit in commits {
 // At this point the graph is loaded and the permissions have been applied.
 
 // This gives us the "current viewpoint" of the graph. A combination of:
-// * the delivered heads of the commit graph
+// * the heads of the commit graph
 // * an immutable snapshot of the per-author write permissions
 // This is the working viewpoint, including local drafts.
 // signed_view_point() instead selects the maximal admitted commits as heads.
@@ -326,7 +326,7 @@ graph.ingest_commit(new_commit)?;
 
 // Now incorporate new commits into the operation log
 let post_view_point = graph.view_point();
-graph.traverse_delivered_since(view_point.delivered_heads(), |commit| {
+graph.traverse_since(view_point.heads(), |commit| {
     // Newly delivered commits did not contribute under the source viewpoint.
     // Store their operations as inactive until we process the participation diff.
     log.add_operations_from(commit, false);

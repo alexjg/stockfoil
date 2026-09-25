@@ -74,7 +74,7 @@ fn visited_since(graph: &CommitGraph<u8>, since: &[CommitHash]) -> Vec<u8> {
 
 fn assert_heads(graph: &CommitGraph<u8>, expected: &[CommitHash]) {
     let actual = graph
-        .delivered_heads()
+        .heads()
         .map(|hash| *hash.as_bytes())
         .collect::<Vec<_>>();
     let mut expected = expected
@@ -252,7 +252,7 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     let second = *meta(2, &[]).hash();
     let roots_before = graph.roots().collect::<Vec<_>>();
     let first_idx = graph.children(roots_before[0]).next().unwrap();
-    let heads_before = graph.delivered_heads().collect::<Vec<_>>();
+    let heads_before = graph.heads().collect::<Vec<_>>();
     let cover_before = graph.minimal_cover();
     let working_before = graph.view_point();
     let signed_before = graph.signed_view_point();
@@ -265,7 +265,7 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     // The first parent exists: even parent links and heads must remain untouched
     // when validation encounters the missing second parent.
     let merge = reject_local(&mut graph, meta(3, &[first, second]), 30);
-    assert_eq!(graph.delivered_heads().collect::<Vec<_>>(), heads_before);
+    assert_eq!(graph.heads().collect::<Vec<_>>(), heads_before);
     assert_eq!(graph.roots().collect::<Vec<_>>(), roots_before);
     assert_eq!(
         graph.children(roots_before[0]).collect::<Vec<_>>(),
@@ -332,7 +332,7 @@ fn local_draft_parents_are_sufficient_and_pending_duplicates_preserve_first_payl
     assert_heads(&graph, &[child]);
     assert!(!graph.has_admitted_commit(&root));
     assert!(!graph.has_admitted_commit(&child));
-    assert!(graph.signed_view_point().delivered_heads().is_empty());
+    assert!(graph.signed_view_point().heads().is_empty());
 
     // Signing a child before its delivered draft parent is allowed, but does
     // not admit it. Duplicates must preserve both payload and signature.
@@ -362,7 +362,7 @@ fn signature_before_local_insertion_is_rejected_not_retained() {
     assert!(visited(&graph).is_empty());
     graph.ingest_local_commit(root_meta, 1);
     assert!(!graph.has_admitted_commit(&root));
-    assert!(graph.signed_view_point().delivered_heads().is_empty());
+    assert!(graph.signed_view_point().heads().is_empty());
     sign(&mut graph, &key(1), root);
     assert!(graph.has_admitted_commit(&root));
 }
@@ -456,7 +456,7 @@ fn traverse_since_delivers_only_new_history_after_merge() {
     let root = insert(&mut graph, 1, &[]);
     let mut other = graph.clone();
     insert(&mut graph, 2, &[root]);
-    let before = graph.delivered_heads().collect::<Vec<_>>();
+    let before = graph.heads().collect::<Vec<_>>();
     let branch = insert(&mut other, 3, &[root]);
     insert(&mut other, 4, &[branch]);
     insert(&mut other, 5, &[]);
@@ -469,7 +469,7 @@ fn traverse_since_delivers_only_new_history_after_merge() {
     let mut contents = visited;
     contents.sort_unstable();
     assert_eq!(contents, vec![3, 4, 5]);
-    assert!(visited_since(&graph, &graph.delivered_heads().collect::<Vec<_>>()).is_empty());
+    assert!(visited_since(&graph, &graph.heads().collect::<Vec<_>>()).is_empty());
 }
 
 #[test]

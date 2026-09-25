@@ -6,10 +6,10 @@
 commit graph. A general use case is diffing between different states of a
 document, represented by a combination of two things:
 
-- The delivered heads of the commit graph
+- The heads of the commit graph
 - The write permissions, including per-author write frontiers
 
-The delivered heads identify a causally complete history: the heads themselves
+The heads identify a causally complete history: the heads themselves
 and all their ancestors. Write permissions map author IDs (Ed25519 public keys)
 to an unbounded permission, a bounded frontier of commit hashes, or a denial.
 Missing authors are denied. A bounded frontier defines the down-set accepted
@@ -19,7 +19,7 @@ visible ancestors or descendants. Encountering it is not a reason to stop
 traversing the graph.
 
 This makes visibility diffs more complex than ancestry differences alone.
-Permissions can change while delivered heads remain identical, changing the
+Permissions can change while history heads remain identical, changing the
 visibility of old commits. There is no general traversal cut at the
 intersection of the before/after write-frontier down-sets: permissions are
 per author, and visible commits need not form a down-set. Each candidate commit

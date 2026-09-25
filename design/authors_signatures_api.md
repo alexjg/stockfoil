@@ -17,7 +17,7 @@ sketch: no compatibility APIs or format migrations.
 * Remove signatures from `CommitContents`, `CommitMeta`, and the hashed encoding.
   Deliver them separately as `(author, commit_hash, signature)`.
 * Add an authored commit builder, roughly `commit_by(author, payload)`. Parents
-  are the delivered heads, including unsigned drafts and commits that don't
+  are the graph heads, including unsigned drafts and commits that don't
   currently contribute, so normal prepared work meets the local ingestion
   precondition. Preparation fixes the author, parents, payload, and hash before
   any signing IO.
@@ -53,7 +53,7 @@ when signatures haven't arrived yet.
 
 ## Delivery and permissions
 
-* `delivered_heads`, `traverse_delivered`, and `traverse_delivered_since` expose
+* `heads`, `traverse`, and `traverse_since` expose
   causally delivered history, including local drafts. Received items must be
   verified before admission and delivery; permissions don't gate delivery.
   Admitted commits are exactly delivered commits not marked `pending_local`.
@@ -85,10 +85,10 @@ also exercises participation and explicit permission grants.
 
 ## Viewpoints and diffs
 
-`ViewPoint` is an owned, cloneable description containing only `delivered_heads`
-and `write_permissions`. Give it a `delivered_heads() -> &[CommitHash]` accessor
+`ViewPoint` is an owned, cloneable description containing only `heads`
+and `write_permissions`. Give it a `heads() -> &[CommitHash]` accessor
 and a read-only `write_permissions()` map.
-`ViewPoint::from_parts(delivered_heads, write_permissions)` reconstructs the
+`ViewPoint::from_parts(heads, write_permissions)` reconstructs the
 snapshot after transport or storage; it doesn't validate its claims. The
 viewpoint survives graph mutation and can be resolved elsewhere once its history
 has been admitted.

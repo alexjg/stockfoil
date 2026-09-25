@@ -55,7 +55,7 @@ impl OrSet {
     }
 
     fn commit(&mut self, op: Op) {
-        let before: Vec<_> = self.graph.delivered_heads().collect();
+        let before: Vec<_> = self.graph.heads().collect();
         let meta = self
             .graph
             .commit_by(self.author(), &bcs::to_bytes(&op).unwrap());
@@ -75,7 +75,7 @@ impl OrSet {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        let before: Vec<_> = self.graph.delivered_heads().collect();
+        let before: Vec<_> = self.graph.heads().collect();
         self.graph.merge(&other.graph);
         self.evaluate(&before);
     }

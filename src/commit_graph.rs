@@ -104,10 +104,10 @@ impl<P: Clone> CommitGraph<P> {
             .filter_map(|(i, node)| node.parents.is_empty().then_some(NodeIdx(i)))
     }
 
-    /// Return hashes of delivered commits with no children, in hash order.
+    /// Return hashes of commits with no children in the graph, in hash order.
     /// Includes local drafts awaiting signatures.
     /// Iterating all heads takes O(h) time for h heads, without scanning the graph.
-    pub fn delivered_heads(&self) -> impl Iterator<Item = CommitHash> + '_ {
+    pub fn heads(&self) -> impl Iterator<Item = CommitHash> + '_ {
         self.heads.iter().copied()
     }
 
@@ -545,7 +545,7 @@ impl<P: Clone> CommitGraph<P> {
     /// Sign the raw 32 bytes of its hash with Ed25519.
     pub fn commit_by(&self, author: Author, contents: &[u8]) -> CommitMeta {
         CommitMeta::new(CommitContents {
-            parents: self.delivered_heads().collect(),
+            parents: self.heads().collect(),
             author,
             payload: BlobHash::of_contents(contents),
         })
@@ -605,11 +605,11 @@ impl<P: Clone> CommitGraph<P> {
         self.permissions = permissions.clone();
     }
 
-    /// Capture the delivered working history, including pending local commits,
+    /// Capture the working history, including pending local commits,
     /// and the current write permissions. Signing does not change this snapshot.
     pub fn view_point(&self) -> ViewPoint {
         ViewPoint {
-            delivered_heads: self.delivered_heads().collect(),
+            heads: self.heads().collect(),
             write_permissions: self.permissions.clone(),
         }
     }
@@ -629,7 +629,7 @@ impl<P: Clone> CommitGraph<P> {
             }
         }
         ViewPoint {
-            delivered_heads: heads.into_iter().collect(),
+            heads: heads.into_iter().collect(),
             write_permissions: self.permissions.clone(),
         }
     }
@@ -639,7 +639,7 @@ impl<P: Clone> CommitGraph<P> {
     /// authentication of its entire history. Pending local heads do not suffice,
     /// even for a viewpoint captured locally or an author denied permission.
     pub fn resolve(&self, view_point: &ViewPoint) -> Result<ResolvedViewPoint<'_>, ResolveError> {
-        for hash in &view_point.delivered_heads {
+        for hash in &view_point.heads {
             if !self.by_hash.contains_key(hash) {
                 return Err(ResolveError::MissingCommit(*hash));
             }
@@ -846,7 +846,7 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     fn participation(&self, view_point: &ViewPoint) -> Result<PreparedView, DiffError> {
-        let history = self.history_clock(&view_point.delivered_heads)?;
+        let history = self.history_clock(&view_point.heads)?;
         let mut bounded = HashMap::new();
         let mut unbounded = HashSet::new();
         for (&author, permission) in &view_point.write_permissions {
@@ -1247,7 +1247,7 @@ mod tests {
             graph.fragments[fragment].signature_boundary[&alice],
             vec![graph.by_hash[head.hash()]]
         );
-        assert_eq!(graph.signed_view_point().delivered_heads(), &[*head.hash()]);
+        assert_eq!(graph.signed_view_point().heads(), &[*head.hash()]);
         assert!(graph.has_admitted_commit(root.hash()));
         assert!(
             graph

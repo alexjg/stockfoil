@@ -92,7 +92,7 @@ fn assert_ingest_rejected_without_changes(
     let cover = graph.minimal_cover();
     let view = graph.view_point();
     let signed = graph.signed_view_point();
-    let heads = graph.delivered_heads().collect::<Vec<_>>();
+    let heads = graph.heads().collect::<Vec<_>>();
     let mut callbacks = 0;
     assert_eq!(
         graph.ingest(verified, |_| {
@@ -105,7 +105,7 @@ fn assert_ingest_rejected_without_changes(
     assert_eq!(graph.minimal_cover(), cover);
     assert_eq!(graph.view_point(), view);
     assert_eq!(graph.signed_view_point(), signed);
-    assert_eq!(graph.delivered_heads().collect::<Vec<_>>(), heads);
+    assert_eq!(graph.heads().collect::<Vec<_>>(), heads);
     for ((hash, admitted), payload) in members.iter().zip(admitted).zip(payloads) {
         assert_eq!(graph.has_admitted_commit(hash), admitted);
         assert_eq!(
@@ -176,7 +176,7 @@ fn stateless_verification_precedes_dependency_admission() {
         Err(IngestError::MissingDependency(*root.hash())),
     );
     assert_eq!(callbacks, 0);
-    assert_eq!(destination.delivered_heads().count(), 0);
+    assert_eq!(destination.heads().count(), 0);
     assert_eq!(destination.minimal_cover(), before);
     assert!(!destination.has_admitted_commit(child.hash()));
 
@@ -198,12 +198,9 @@ fn admission_refuses_unsigned_local_dependencies_even_in_the_working_view() {
     destination.ingest_local_commit(root.clone(), 7);
     destination.set_write_permissions(&HashMap::from([(author(1), WritePermission::Unbounded)]));
     let working = destination.view_point();
-    assert_eq!(working.delivered_heads(), &[*root.hash()]);
+    assert_eq!(working.heads(), &[*root.hash()]);
     assert!(destination.resolve(&working).is_err());
-    assert_eq!(
-        destination.delivered_heads().collect::<Vec<_>>(),
-        vec![*root.hash()]
-    );
+    assert_eq!(destination.heads().collect::<Vec<_>>(), vec![*root.hash()]);
     assert!(!destination.has_admitted_commit(root.hash()));
     let cover = destination.minimal_cover();
     assert_eq!(
@@ -325,7 +322,7 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
         (author(2), WritePermission::Unbounded),
     ]));
     let captured = source.signed_view_point();
-    assert_eq!(captured.delivered_heads(), &[*b.hash()]);
+    assert_eq!(captured.heads(), &[*b.hash()]);
     assert!(
         source
             .resolve(&captured)
@@ -339,10 +336,7 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
     assert!(source.minimal_cover().loose_commits.is_empty());
     let mut receiver = CommitGraph::new();
     receiver.merge(&source);
-    assert_eq!(
-        receiver.delivered_heads().collect::<Vec<_>>(),
-        vec![*b.hash()]
-    );
+    assert_eq!(receiver.heads().collect::<Vec<_>>(), vec![*b.hash()]);
 
     source.ingest_local_commit(c.clone(), ());
     sign(&mut source, 1, *c.hash());
@@ -489,10 +483,7 @@ fn fragment_admission_preserves_pending_payloads_and_duplicate_receipts_are_noop
     );
     assert_eq!(graph.view_point(), before);
     assert_eq!(graph.minimal_cover(), before_cover);
-    assert_eq!(
-        graph.delivered_heads().collect::<Vec<_>>(),
-        vec![*middle.hash()]
-    );
+    assert_eq!(graph.heads().collect::<Vec<_>>(), vec![*middle.hash()]);
     assert!(!graph.has_admitted_commit(middle.hash()));
     assert!(!graph.has_admitted_commit(head.hash()));
 
@@ -556,10 +547,7 @@ fn payload_panic_after_partial_preparation_leaves_all_graph_state_unchanged() {
     assert_eq!(calls, vec![*middle.hash(), *head.hash()]);
     assert_eq!(graph.minimal_cover(), cover);
     assert_eq!(graph.signed_view_point(), view);
-    assert_eq!(
-        graph.delivered_heads().collect::<Vec<_>>(),
-        vec![*root.hash()]
-    );
+    assert_eq!(graph.heads().collect::<Vec<_>>(), vec![*root.hash()]);
     assert_eq!(*graph.publishable_commit(root.hash()).unwrap().1, 7);
     for meta in [&middle, &head] {
         assert!(!graph.has_admitted_commit(meta.hash()));

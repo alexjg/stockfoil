@@ -109,7 +109,7 @@ impl Oracle {
     }
 
     fn visible(&self, view: &ViewPoint) -> HashSet<CommitHash> {
-        let history = self.history(view.delivered_heads());
+        let history = self.history(view.heads());
         history
             .iter()
             .copied()
@@ -172,10 +172,10 @@ fn assert_views(
 ) {
     let expected: Vec<_> = views.iter().map(|v| oracle.visible(v)).collect();
     for (i, view) in views.iter().enumerate() {
-        if drafts && !view.delivered_heads().is_empty() {
+        if drafts && !view.heads().is_empty() {
             assert_eq!(
                 graph.resolve(view).unwrap_err(),
-                ResolveError::PendingLocalCommit(view.delivered_heads()[0])
+                ResolveError::PendingLocalCommit(view.heads()[0])
             );
         } else {
             let resolved = graph.resolve(view).unwrap();
