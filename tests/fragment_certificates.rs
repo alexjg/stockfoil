@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
-    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
+    Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
     FragmentRange, FragmentReadError, ItemId, Signature, SignatureEvidence, UnverifiedItem,
     VerificationError,
 };
@@ -265,9 +265,27 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
             |_| 4,
         )
         .unwrap();
-    assert!(source.minimal_cover().loose_commits.is_empty());
-    assert_eq!(source.minimal_cover().fragments.len(), 1);
-    assert_eq!(source.minimal_cover().fragments[0].range, range);
+    // The former bare checkpoint was indexed after `middle`, even though it
+    // precedes it in the commit array. Both remain in the non-minimal summary.
+    let summary = source.as_sedimentree().summary();
+    assert_eq!(
+        summary
+            .fragments
+            .iter()
+            .map(|f| f.range.head)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*boundary.hash(), *middle.hash(), *head.hash()])
+    );
+    let cover = source.minimal_cover();
+    assert!(cover.loose_commits.is_empty());
+    assert_eq!(cover.fragments.len(), 1);
+    assert_eq!(cover.fragments[0].range, range);
+    assert_eq!(
+        cover.fragments[0].checkpoints,
+        [&boundary, &middle]
+            .map(|m| Checkpoint(m.hash().as_bytes()[..12].try_into().unwrap()))
+            .into()
+    );
     assert!(source.export(&ItemId::Commit(*boundary.hash())).is_err());
 
     let announcement = source
@@ -283,12 +301,16 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
     receiver.ingest(announcement, |_| 40).unwrap();
     // Learning the signed head reveals its link to the previous chain, but does
     // not claim to have the larger fragment's per-author certificate yet.
-    assert!(
-        receiver
-            .minimal_cover()
+    let announced = receiver.minimal_cover();
+    assert_eq!(announced.fragments.len(), 1);
+    assert_eq!(announced.fragments[0].range, middle_range);
+    assert_eq!(
+        announced
             .loose_commits
             .iter()
-            .any(|c| c.commit == *head.hash())
+            .map(|c| c.commit)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*root.hash(), *boundary.hash(), *head.hash()])
     );
     assert!(receiver.export(&ItemId::Fragment(range.clone())).is_err());
     receiver

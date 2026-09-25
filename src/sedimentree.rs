@@ -2,9 +2,9 @@
 //!
 //! Encoding, blob metadata, sealing, and reconciliation are out of scope.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
-use crate::{CommitHash, commit_graph::NodeIdx};
+use crate::CommitHash;
 
 /// Inclusive head and boundary commits of a canonical fragment.
 /// A walk stops at ancestors at least as deep as the head, or at roots.
@@ -66,7 +66,6 @@ pub struct MinimalCover {
 pub struct SedimentreeView<'graph> {
     pub(crate) nodes: &'graph crate::commit_graph::NodeStore,
     pub(crate) fragments: &'graph crate::commit_graph::FragmentStore,
-    pub(crate) by_hash: &'graph HashMap<CommitHash, NodeIdx>,
     pub(crate) publishable: Vec<bool>,
 }
 
@@ -77,17 +76,13 @@ impl SedimentreeView<'_> {
     /// Lower-level records at the same head are internal traversal structure,
     /// not separate summary entries.
     ///
-    /// Walks fragment links to collect checkpoints and level-one commit parents
-    /// to identify covered commits. Boundaries are read from the maintained
-    /// index. No payload access, encoding, or IO is performed.
+    /// A reverse pass over nodes and their parent slices determines coverage.
+    /// Checkpoints are then collected through level-one boundary links, without
+    /// expanding ordinary fragment members. Boundaries come from the index.
+    /// Graph coverage work is linear in nodes and parent edges; checkpoint output
+    /// and deterministic sorting have additional costs. No payloads are accessed.
     pub fn summary(&self) -> SedimentreeSummary {
-        self.fragments.summary(
-            self.nodes,
-            self.by_hash,
-            &self.publishable,
-            &self.publishable,
-            false,
-        )
+        self.fragments.summary(self.nodes, &self.publishable, false)
     }
 
     /// Return the minimal cover under structural containment: recursively,
@@ -98,12 +93,6 @@ impl SedimentreeView<'_> {
     /// This is not minimum set cover or exhaustive commit-set containment
     /// reduction. Uses the same metadata-only traversals as [`Self::summary`].
     pub fn minimized_summary(&self) -> SedimentreeSummary {
-        self.fragments.summary(
-            self.nodes,
-            self.by_hash,
-            &self.publishable,
-            &self.publishable,
-            true,
-        )
+        self.fragments.summary(self.nodes, &self.publishable, true)
     }
 }

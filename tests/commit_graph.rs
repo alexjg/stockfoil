@@ -202,10 +202,20 @@ fn duplicate_ingestion_preserves_original_payload_and_edges() {
 #[test]
 fn repeated_parent_does_not_duplicate_children_or_visits() {
     let mut graph = CommitGraph::new();
-    let root = insert(&mut graph, 1, &[]);
-    insert(&mut graph, 2, &[root, root]);
-    assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 1);
-    assert_eq!(visited(&graph), vec![1, 2]);
+    let first = insert(&mut graph, 1, &[]);
+    let second = insert(&mut graph, 2, &[]);
+    insert(&mut graph, 3, &[second, first, second]);
+    let roots = graph.roots().collect::<Vec<_>>();
+    let child = graph.children(roots[0]).next().unwrap();
+    // Parent slices preserve envelope order and duplicates, not node-index order.
+    assert_eq!(
+        graph.parents(child).collect::<Vec<_>>(),
+        vec![roots[1], roots[0], roots[1]]
+    );
+    for root in roots {
+        assert_eq!(graph.children(root).collect::<Vec<_>>(), vec![child]);
+    }
+    assert_eq!(visited(&graph), vec![1, 2, 3]);
 }
 
 #[test]
