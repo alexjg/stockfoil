@@ -167,8 +167,8 @@ fn envelope(meta: &CommitMeta) -> UnverifiedItem {
     }
 }
 
-// Nonzero heads travel as canonical certificates with inclusive membership,
-// not as commit items. Sign every member so mixed-author fixtures are valid too.
+// Nonzero heads travel as canonical certificates with normalized payloads,
+// not as commit items. Sign only payload members, including mixed-author ones.
 fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
     if depth(hash(meta)) == 0 {
         return envelope(meta);
@@ -187,8 +187,14 @@ fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
         .cloned()
         .collect();
     let signatures = members.iter().map(evidence).collect();
+    let additional_dependencies = members
+        .iter()
+        .flat_map(|meta| meta.parents().iter().copied())
+        .filter(|p| !memberships[&range.head].contains(p) && !range.boundary.contains(p))
+        .collect();
     UnverifiedItem::Fragment {
         range,
+        additional_dependencies,
         commits: members,
         signatures,
     }
@@ -241,6 +247,7 @@ impl<P: Clone> Receiver<P> {
                         assert_eq!(payloads.len(), item.commits().count());
                         waiting.push((item, payloads));
                     }
+                    Err(error) => panic!("canonical fixture rejected: {error:?}"),
                 }
             }
             self.pending = waiting;
@@ -314,21 +321,22 @@ impl Model {
                 if !self.local.contains(&h) || !self.signatures.contains(&(*meta.author(), h)) {
                     continue;
                 }
-                let mut members = BTreeSet::new();
-                let mut dependencies = BTreeSet::new();
-                let mut stack = vec![h];
-                while let Some(next) = stack.pop() {
-                    if !members.insert(next) {
-                        continue;
-                    }
-                    if depth(h) == 0 {
-                        dependencies.extend(known[&next].parents());
-                    } else if next != h && depth(next) >= depth(h) {
-                        dependencies.insert(next);
-                    } else {
-                        stack.extend(known[&next].parents());
-                    }
-                }
+                let (members, dependencies) = if depth(h) == 0 {
+                    (
+                        BTreeSet::from([h]),
+                        meta.parents().iter().copied().collect(),
+                    )
+                } else {
+                    let (members, boundary) = normalized_walk(&known, h);
+                    let mut dependencies = boundary;
+                    dependencies.extend(
+                        members
+                            .iter()
+                            .flat_map(|h| known[h].parents().iter().copied())
+                            .filter(|p| !members.contains(p)),
+                    );
+                    (members, dependencies)
+                };
                 if !dependencies.is_subset(&published) {
                     continue;
                 }
@@ -357,10 +365,51 @@ impl Model {
     }
 }
 
-// Intentionally a plain parent walk for EVERY publishable nonzero head. There
-// is no fragment reuse, covering index, subset reduction, or production helper.
-// Keep full-hash membership alongside the unchanged canonical summary oracle;
-// reduction must not infer membership from truncated checkpoint metadata.
+// Independent inclusive history, using only fixture parent metadata.
+fn history(
+    known: &HashMap<CommitHash, &CommitMeta>,
+    heads: impl IntoIterator<Item = CommitHash>,
+) -> BTreeSet<CommitHash> {
+    let mut seen = BTreeSet::new();
+    let mut stack: Vec<_> = heads.into_iter().collect();
+    while let Some(h) = stack.pop() {
+        if seen.insert(h) {
+            stack.extend(known[&h].parents().iter().copied());
+        }
+    }
+    seen
+}
+
+// Discover raw >=-depth stops first, retaining even redundant ancestor stops.
+// Then normalize by subtracting their full histories from the head's history.
+fn normalized_walk(
+    known: &HashMap<CommitHash, &CommitMeta>,
+    head: CommitHash,
+) -> (BTreeSet<CommitHash>, BTreeSet<CommitHash>) {
+    let mut seen = BTreeSet::new();
+    let mut boundary = BTreeSet::new();
+    let mut stack = vec![head];
+    while let Some(h) = stack.pop() {
+        if !seen.insert(h) {
+            continue;
+        }
+        if h != head && depth(h) >= depth(head) {
+            boundary.insert(h);
+        } else {
+            stack.extend(known[&h].parents().iter().copied());
+        }
+    }
+    let excluded = history(known, boundary.iter().copied());
+    let members = history(known, [head])
+        .difference(&excluded)
+        .copied()
+        .collect();
+    (members, boundary)
+}
+
+// Plain parent walks for EVERY publishable nonzero head: no fragment reuse,
+// graph index, or production helper. Keep full hashes for subset reduction;
+// truncated checkpoint metadata must never stand in for payload membership.
 fn oracle(
     commits: &[CommitMeta],
     published: &BTreeSet<CommitHash>,
@@ -377,27 +426,16 @@ fn oracle(
         if head_depth == 0 {
             continue;
         }
-        let mut members = BTreeSet::new();
-        let mut boundary = BTreeSet::new();
-        let mut checkpoints = BTreeSet::new();
-        let mut stack = vec![head];
-        while let Some(h) = stack.pop() {
-            assert!(published.contains(&h), "oracle input must be parent-closed");
-            if !members.insert(h) {
-                continue;
-            }
-            if h != head {
-                if depth(h) >= head_depth {
-                    boundary.insert(h);
-                    continue;
-                }
-                if depth(h) != 0 {
-                    checkpoints.insert(Checkpoint(h.as_bytes()[..12].try_into().unwrap()));
-                }
-            }
-            // Shallow roots naturally end the walk without becoming boundaries.
-            stack.extend(known[&h].parents());
-        }
+        assert!(
+            history(&known, [head]).is_subset(published),
+            "oracle input must be parent-closed"
+        );
+        let (members, boundary) = normalized_walk(&known, head);
+        let checkpoints = members
+            .iter()
+            .filter(|&&h| h != head && depth(h) != 0)
+            .map(|h| Checkpoint(h.as_bytes()[..12].try_into().unwrap()))
+            .collect();
         covered.extend(members.iter().copied());
         memberships.insert(head, members);
         fragments.push(Fragment {
@@ -459,12 +497,20 @@ fn minimized_oracle(
         let head = fragment.range.head;
         let head_depth = depth(head);
         assert!(head_depth > 0);
-        // Strict depth excludes both the other head and its inclusive >=-depth
-        // boundaries, so this is precisely nonzero interior membership. In
-        // particular, equal-depth set containment must NOT remove a fragment.
-        !memberships
-            .iter()
-            .any(|(&other_head, members)| head_depth < depth(other_head) && members.contains(&head))
+        // Head containment alone is insufficient after boundary normalization.
+        // Retain equal-depth overlaps and any shallower fragment with a payload
+        // or explicit boundary that the deeper candidate cannot account for.
+        !canonical.fragments.iter().any(|other| {
+            let members = &memberships[&other.range.head];
+            head_depth < depth(other.range.head)
+                && members.contains(&head)
+                && memberships[&head].is_subset(members)
+                && fragment
+                    .range
+                    .boundary
+                    .iter()
+                    .all(|b| members.contains(b) || other.range.boundary.contains(b))
+        })
     });
     minimized
 }
@@ -479,6 +525,7 @@ fn cover_ids<'a>(
         .chain(fragments.iter().map(|f| ItemId::Fragment(f.range.clone())))
 }
 
+// Use only when the fixture establishes certificates for every surviving range.
 fn assert_structural_cover(graph: &CommitGraph<CommitHash>, expected: SedimentreeSummary) {
     let cover = graph.minimal_cover();
     assert_eq!(cover.loose_commits, expected.loose_commits);
@@ -492,6 +539,7 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
     let inventory = graph.minimal_cover();
     let mut covered = BTreeSet::new();
     let mut dependencies = BTreeSet::new();
+    let mut items = Vec::new();
     for id in cover_ids(&inventory.loose_commits, &inventory.fragments) {
         let expected = match &id {
             ItemId::Commit(h) => {
@@ -506,19 +554,44 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
         assert_eq!(actual, export_order(&case.commits, &expected));
         dependencies.extend(verified.dependencies().copied());
         covered.extend(actual);
+        items.push(verified);
     }
-    assert!(covered.is_subset(&published));
+    assert_eq!(
+        covered, published,
+        "the cover must relay every admitted node"
+    );
     assert!(dependencies.is_subset(&covered));
     for meta in case.commits.iter().filter(|m| covered.contains(m.hash())) {
         assert!(meta.parents().iter().all(|p| covered.contains(p)));
     }
     let (canonical, memberships) = oracle(&case.commits, &covered);
-    assert_structural_cover(graph, minimized_oracle(&canonical, &memberships));
+    let minimized = minimized_oracle(&canonical, &memberships);
+    // Structural ranges include interior checkpoints without their own export
+    // certificates. Their canonical payloads can extend outside the item that
+    // introduced them, so transport need not equal this structural minimum.
+    assert_eq!(summaries(graph), (canonical, minimized));
+    // Relay the actual inventory, not individual fixture commits, choosing
+    // envelopes only once every explicit boundary and extra is already present.
     let mut destination = CommitGraph::new();
-    destination.merge(graph);
+    let mut admitted = BTreeSet::new();
+    while !items.is_empty() {
+        let ready = items
+            .iter()
+            .position(|item| item.dependencies().all(|h| admitted.contains(h)))
+            .expect("the complete cover must have an acyclic dependency order");
+        let item = items.remove(ready);
+        let members: Vec<_> = item.commits().map(hash).collect();
+        destination.ingest(item, hash).unwrap();
+        admitted.extend(members);
+    }
+    assert_eq!(admitted, published);
+    assert_eq!(destination.minimal_cover(), inventory);
+    let mut relay = CommitGraph::new();
+    relay.merge(&destination);
+    assert_eq!(relay.minimal_cover(), inventory);
     let mut received = BTreeSet::new();
-    destination.traverse(|meta, _| {
-        assert!(destination.has_admitted_commit(meta.hash()));
+    relay.traverse(|meta, _| {
+        assert!(relay.has_admitted_commit(meta.hash()));
         received.insert(hash(meta));
         ControlFlow::Continue(())
     });
@@ -604,7 +677,7 @@ fn check(graph: &CommitGraph<CommitHash>, model: &Model, case: &Case, event: &st
 }
 
 #[test]
-fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_chain() {
+fn backbone_normalizes_bypasses_and_closes_a_checkpoint_free_loose_chain() {
     for case in cases() {
         let mut graph = CommitGraph::new();
         let mut model = Model::default();
@@ -619,18 +692,19 @@ fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_c
                 let larger = hash(&case.commits[6]);
                 let (_, memberships) = oracle(&case.commits, &model.published(&case.commits));
                 assert_eq!(depth(smaller), depth(larger));
-                assert!(
-                    memberships[&smaller].is_subset(&memberships[&larger]),
-                    "seed={:#x}, backbone must witness equal-depth containment",
-                    case.seed,
-                );
-                // The redundant edge to 3 reaches 0 behind boundary 4. Thus
-                // fragment 4 is wholly contained in 6 but neither is removable.
+                assert_eq!(memberships[&larger], BTreeSet::from([larger]));
+                assert!(memberships[&smaller].is_disjoint(&memberships[&larger]));
+                let sibling = hash(&case.commits[5]);
+                assert!(!memberships[&smaller].is_disjoint(&memberships[&sibling]));
+                assert!(minimized.fragments.iter().any(|f| f.range.head == sibling));
+                // Equal-depth sibling payloads overlap, but both survive.
+                // The redundant edge to 3 reaches 0 behind boundary 4, but
+                // normalization removes both. Boundary 4 remains its own item.
                 for summary in [&canonical, &minimized] {
                     for head in [smaller, larger] {
                         assert!(
                             summary.fragments.iter().any(|f| f.range.head == head),
-                            "seed={:#x}, equal-depth contained fragments must survive",
+                            "seed={:#x}, boundary fragments must survive separately",
                             case.seed,
                         );
                     }
@@ -653,7 +727,7 @@ fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_c
                 let (_, memberships) = oracle(&case.commits, &model.published(&case.commits));
                 assert_eq!(
                     memberships[&head],
-                    [8, 9, 11, 12, 13].map(|i| hash(&case.commits[i])).into(),
+                    [9, 11, 12, 13].map(|i| hash(&case.commits[i])).into(),
                     "seed={:#x}, depth-2 head must close a checkpoint-free loose chain",
                     case.seed,
                 );
@@ -675,6 +749,288 @@ fn backbone_retains_equal_depth_containment_and_closes_a_checkpoint_free_loose_c
             }
         }
     }
+}
+
+#[test]
+fn long_same_depth_checkpoint_chain_preserves_every_boundary_fragment() {
+    const LENGTH: usize = 128;
+    let seed = 0xc4a1_0128;
+    let mut commits = Vec::with_capacity(LENGTH);
+    for node in 0..LENGTH {
+        let parents = commits.last().map(hash).into_iter().collect();
+        commits.push(mine(parents, 1, seed, node));
+    }
+    let case = Case { seed, commits };
+    let mut graph = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits {
+        assert_eq!(depth(hash(meta)), 1);
+        support::receive_commit(&mut graph, meta.clone(), hash(meta));
+        model.ingest(meta, false);
+    }
+
+    // Many disjoint singleton covers exercise candidate indexing without mining
+    // expensive deeper checkpoints or running the full oracle after each arrival.
+    // Equal-depth ancestors are dependencies, never containment candidates.
+    let mut expected = SedimentreeSummary {
+        loose_commits: Vec::new(),
+        fragments: case
+            .commits
+            .iter()
+            .map(|meta| Fragment {
+                range: FragmentRange {
+                    head: hash(meta),
+                    boundary: meta.parents().iter().copied().collect(),
+                },
+                checkpoints: BTreeSet::new(),
+            })
+            .collect(),
+    };
+    expected.fragments.sort_by(|a, b| a.range.cmp(&b.range));
+    let (canonical, minimized) = summaries(&graph);
+    assert_eq!(canonical, expected);
+    assert_eq!(minimized, expected);
+    assert_structural_cover(&graph, expected);
+
+    for fragment in &canonical.fragments {
+        let range = &fragment.range;
+        let mut members = Vec::new();
+        graph
+            .traverse_fragment(range, |meta, payload| {
+                assert_eq!(payload, meta.hash());
+                members.push(hash(meta));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(members, [range.head]);
+        let UnverifiedItem::Fragment {
+            range: exported_range,
+            additional_dependencies,
+            commits,
+            ..
+        } = graph.export(&ItemId::Fragment(range.clone())).unwrap()
+        else {
+            panic!("checkpoint must export as a fragment")
+        };
+        assert_eq!(&exported_range, range);
+        assert!(additional_dependencies.is_empty());
+        assert_eq!(commits.iter().map(hash).collect::<Vec<_>>(), [range.head]);
+    }
+    // Verify the actual inventory and admit only dependency-ready items into an
+    // empty peer, then relay again. Every previous checkpoint must travel first
+    // as its own item rather than being swallowed by its child's payload.
+    check_direct_inventory(&graph, &model, &case);
+}
+
+fn deeper_head_containment_case() -> Case {
+    let seed = 0xdecaf;
+    let root = mine(vec![], 0, seed, 0);
+    let checkpoint = mine(vec![hash(&root)], 1, seed, 1);
+    let boundary = mine(vec![hash(&checkpoint)], 2, seed, 2);
+    let with_boundary = mine(vec![hash(&checkpoint)], 1, seed, 3);
+    let with_root = mine(vec![hash(&root)], 1, seed, 4);
+    let head = mine(
+        vec![hash(&boundary), hash(&with_boundary), hash(&with_root)],
+        2,
+        seed,
+        5,
+    );
+    Case {
+        seed,
+        commits: vec![root, checkpoint, boundary, with_boundary, with_root, head],
+    }
+}
+
+#[test]
+fn deeper_head_containment_does_not_hide_uncovered_payloads_or_boundaries() {
+    let case = deeper_head_containment_case();
+    let h = |i: usize| hash(&case.commits[i]);
+    let all = case.commits.iter().map(hash).collect();
+    let (canonical, memberships) = oracle(&case.commits, &all);
+    assert_eq!(memberships[&h(5)], [h(3), h(4), h(5)].into());
+    let fragment = canonical
+        .fragments
+        .iter()
+        .find(|f| f.range.head == h(5))
+        .unwrap();
+    assert_eq!(fragment.range.boundary, [h(2)].into());
+    assert_eq!(
+        fragment.checkpoints,
+        [3, 4]
+            .map(|i| Checkpoint(h(i).as_bytes()[..12].try_into().unwrap()))
+            .into()
+    );
+    // Both shallower heads are in the deeper payload. One has an uncovered
+    // explicit boundary; the other has an uncovered payload ancestor.
+    assert_eq!(memberships[&h(3)], [h(3)].into());
+    assert_eq!(memberships[&h(4)], [h(0), h(4)].into());
+    let expected = minimized_oracle(&canonical, &memberships);
+    assert_eq!(
+        expected
+            .fragments
+            .iter()
+            .map(|f| f.range.head)
+            .collect::<BTreeSet<_>>(),
+        [h(2), h(3), h(4), h(5)].into()
+    );
+    let mut graph = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits {
+        support::receive_commit(&mut graph, meta.clone(), hash(meta));
+        model.ingest(meta, false);
+        check(&graph, &model, &case, "partial deeper coverage");
+    }
+    let item = graph
+        .export(&ItemId::Fragment(fragment.range.clone()))
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert_eq!(
+        item.dependencies().copied().collect::<BTreeSet<_>>(),
+        [h(0), h(1), h(2)].into()
+    );
+    // All four surviving ranges were received with their own certificates.
+    assert_structural_cover(&graph, expected);
+    check_direct_inventory(&graph, &model, &case);
+}
+
+#[test]
+fn received_interior_checkpoint_is_readable_but_cannot_export_an_excluded_ancestor() {
+    let case = deeper_head_containment_case();
+    let h = |i: usize| hash(&case.commits[i]);
+    let mut graph = CommitGraph::new();
+    let mut model = Model::default();
+    // Admit the boundary's history, but never receive either interior child's
+    // own fragment. Only the higher fragment introduces those checkpoints.
+    for meta in &case.commits[..3] {
+        support::receive_commit(&mut graph, meta.clone(), hash(meta));
+        model.ingest(meta, false);
+    }
+    let higher = fixture_item(&case.commits, &case.commits[5])
+        .verify()
+        .unwrap();
+    assert_eq!(
+        higher.commits().map(hash).collect::<BTreeSet<_>>(),
+        [h(3), h(4), h(5)].into()
+    );
+    assert_eq!(
+        higher.dependencies().copied().collect::<BTreeSet<_>>(),
+        [h(0), h(1), h(2)].into()
+    );
+    let accepted = higher.commits().cloned().collect();
+    graph.ingest(higher, hash).unwrap();
+    model.accepted(accepted);
+    check(
+        &graph,
+        &model,
+        &case,
+        "higher fragment introduces uncertified interiors",
+    );
+
+    let child = case_range(&case, 4);
+    assert!(child.boundary.is_empty());
+    let mut read = Vec::new();
+    graph
+        .traverse_fragment(&child, |meta, payload| {
+            assert_eq!(payload, meta.hash());
+            read.push(hash(meta));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    // The child's canonical payload includes root, which the higher fragment
+    // excluded via its boundary. Readability must not manufacture a certificate.
+    assert_eq!(read, [h(0), h(4)]);
+    let structural = summaries(&graph).1;
+    assert_eq!(
+        structural
+            .fragments
+            .iter()
+            .map(|f| f.range.head)
+            .collect::<BTreeSet<_>>(),
+        [h(2), h(3), h(4), h(5)].into()
+    );
+    let inventory = graph.minimal_cover();
+    assert!(inventory.loose_commits.is_empty());
+    assert_eq!(
+        inventory
+            .fragments
+            .iter()
+            .map(|f| f.range.clone())
+            .collect::<BTreeSet<_>>(),
+        [case_range(&case, 2), case_range(&case, 5)].into()
+    );
+    for node in [3, 4] {
+        let id = ItemId::Fragment(case_range(&case, node));
+        assert_eq!(
+            graph.export(&id).unwrap_err(),
+            ExportError::NotInMinimalCover(id)
+        );
+    }
+    check_direct_inventory(&graph, &model, &case);
+
+    let mut relay = CommitGraph::new();
+    relay.merge(&graph);
+    check(
+        &relay,
+        &model,
+        &case,
+        "uncertified interior stays readable after relay",
+    );
+    assert_eq!(relay.minimal_cover(), inventory);
+    let id = ItemId::Fragment(child);
+    assert_eq!(
+        relay.export(&id).unwrap_err(),
+        ExportError::NotInMinimalCover(id)
+    );
+    check_direct_inventory(&relay, &model, &case);
+}
+
+#[test]
+fn redundant_ancestor_boundary_is_retained_even_when_normalization_excludes_its_history() {
+    let seed = 0xb0_0d_a;
+    let root = mine(vec![], 0, seed, 0);
+    let older = mine(vec![hash(&root)], 1, seed, 1);
+    let newer = mine(vec![hash(&older)], 1, seed, 2);
+    let head = mine(vec![hash(&newer), hash(&older), hash(&root)], 1, seed, 3);
+    let case = Case {
+        seed,
+        commits: vec![root, older, newer, head],
+    };
+    let mut graph = CommitGraph::new();
+    let mut model = Model::default();
+    for meta in &case.commits {
+        // Exercise the shared graph-history fixture as well as the walk oracle.
+        let item = support::received_item(&graph, meta.clone());
+        if hash(meta) == hash(&case.commits[3]) {
+            let UnverifiedItem::Fragment {
+                range,
+                additional_dependencies,
+                commits,
+                signatures,
+            } = &item
+            else {
+                panic!("nonzero fixture must be a fragment")
+            };
+            assert_eq!(
+                range.boundary,
+                [1, 2].map(|i| hash(&case.commits[i])).into()
+            );
+            assert_eq!(
+                additional_dependencies,
+                &BTreeSet::from([hash(&case.commits[0])])
+            );
+            assert_eq!(commits.iter().map(hash).collect::<Vec<_>>(), [hash(meta)]);
+            assert_eq!(
+                signatures.iter().map(|s| s.commit).collect::<Vec<_>>(),
+                [hash(meta)]
+            );
+        }
+        graph.ingest(item.verify().unwrap(), hash).unwrap();
+        model.ingest(meta, false);
+    }
+    check(&graph, &model, &case, "redundant raw boundary retained");
+    assert_eq!(graph.minimal_cover().fragments.len(), 3);
+    check_direct_inventory(&graph, &model, &case);
 }
 
 #[test]
@@ -1194,13 +1550,13 @@ fn fragment_reads_validate_heads_and_exact_max_level_boundaries_before_callbacks
 }
 
 #[test]
-fn boundary_bypass_edges_order_parents_before_lower_hash_boundaries_and_break_is_global() {
+fn boundary_bypass_ancestors_are_dependencies_not_payload_and_break_is_global() {
     for case in cases() {
         let mut graph = CommitGraph::new();
-        for meta in &case.commits {
+        for meta in &case.commits[..=18] {
             support::receive_commit(&mut graph, meta.clone(), hash(meta));
         }
-        let range = case_range(case, 6);
+        let range = case_range(case, 18);
         let mut actual = Vec::new();
         graph
             .traverse_fragment(&range, |meta, _| {
@@ -1208,23 +1564,29 @@ fn boundary_bypass_edges_order_parents_before_lower_hash_boundaries_and_break_is
                 ControlFlow::Continue(())
             })
             .unwrap();
-        let parent = hash(&case.commits[3]);
-        for node in [4, 5] {
-            let boundary = hash(&case.commits[node]);
-            assert!(range.boundary.contains(&boundary));
-            assert!(
-                boundary < parent,
-                "fixture must defeat hash-only boundary scheduling"
-            );
-            assert!(
-                actual.iter().position(|h| *h == parent).unwrap()
-                    < actual.iter().position(|h| *h == boundary).unwrap()
-            );
-        }
-        // Parent 1 of boundary 5 is outside the range: it is neither exported
-        // nor a prerequisite, unlike bypass-reachable parent 3.
-        assert!(!actual.contains(&hash(&case.commits[1])));
-        assert_eq!(actual.len(), 5);
+        let boundary = hash(&case.commits[16]);
+        let bypass = hash(&case.commits[0]);
+        assert_eq!(range.boundary, BTreeSet::from([boundary]));
+        assert_eq!(actual, [17, 18].map(|i| hash(&case.commits[i])));
+        assert!(!actual.contains(&bypass));
+        assert!(!actual.contains(&boundary));
+        let verified = graph
+            .export(&ItemId::Fragment(range.clone()))
+            .unwrap()
+            .verify()
+            .unwrap();
+        assert_eq!(verified.commits().map(hash).collect::<Vec<_>>(), actual);
+        assert_eq!(
+            verified.dependencies().copied().collect::<BTreeSet<_>>(),
+            [boundary, bypass].into()
+        );
+        assert!(
+            graph
+                .minimal_cover()
+                .fragments
+                .iter()
+                .any(|f| f.range.head == boundary)
+        );
         for stop_after in 1..=actual.len() {
             let mut prefix = Vec::new();
             graph
@@ -1333,7 +1695,7 @@ fn signed_descendant_stays_withheld_behind_another_authors_local_ancestor() {
                 ControlFlow::Continue(())
             })
             .unwrap();
-        assert_eq!(seen, [hash(ancestor), range.head]);
+        assert_eq!(seen, [range.head]);
         assert_meta(
             graph.publishable_commit(&range.head).unwrap().0,
             &descendant,
@@ -1356,7 +1718,7 @@ fn repeated_parent_edges_export_each_member_once() {
         .find(|f| f.range.head == hash(&head))
         .unwrap()
         .range;
-    assert_eq!(memberships[&hash(&head)].len(), 4);
+    assert_eq!(memberships[&hash(&head)], BTreeSet::from([hash(&head)]));
     for reverse in [false, true] {
         let mut graph = CommitGraph::new();
         let mut order: Vec<_> = commits.iter().collect();

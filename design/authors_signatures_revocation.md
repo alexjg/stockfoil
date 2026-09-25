@@ -122,8 +122,10 @@ signed history that excludes it.
 
 Only admitted history is exported through sync or merge. Received verified
 items first check that external dependencies are admitted, then insert commits
-parents-first. Fragment boundary dependencies must also be admitted. Every
-insertion is therefore causally ready by invariant; missing dependencies are
+parents-first. Fragment boundaries and explicit additional dependencies must
+all be admitted; normalized range placement is checked against their history
+before payload callbacks or mutation. Every insertion is therefore causally
+ready by invariant; missing dependencies are
 buffered outside the graph, not queued inside it. Write-frontier proofs gate
 participation, not forwarding of admitted commits.
 

@@ -56,8 +56,6 @@ pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> Unve
     let mut pending = vec![head];
     let mut visited = BTreeSet::new();
     let mut boundary = BTreeSet::new();
-    let mut commits = Vec::new();
-    let mut signatures = Vec::new();
     while let Some(hash) = pending.pop() {
         if !visited.insert(hash) {
             continue;
@@ -69,12 +67,28 @@ pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> Unve
             boundary.insert(hash);
         } else {
             pending.extend(meta.parents().iter().copied());
-            signatures.extend(received_signatures(meta));
         }
-        commits.push(meta.clone());
     }
+    // A bypass edge can reach behind a boundary. Subtract its entire inclusive
+    // history, not just the nodes at which the raw discovery walk stopped.
+    let mut excluded = BTreeSet::new();
+    let mut pending: Vec<_> = boundary.iter().copied().collect();
+    while let Some(hash) = pending.pop() {
+        if excluded.insert(hash) {
+            pending.extend(known[&hash].parents().iter().copied());
+        }
+    }
+    let members: BTreeSet<_> = visited.difference(&excluded).copied().collect();
+    let commits: Vec<_> = members.iter().map(|hash| known[hash].clone()).collect();
+    let signatures = commits.iter().flat_map(received_signatures).collect();
+    let additional_dependencies = commits
+        .iter()
+        .flat_map(|meta| meta.parents().iter().copied())
+        .filter(|parent| !members.contains(parent) && !boundary.contains(parent))
+        .collect();
     UnverifiedItem::Fragment {
         range: FragmentRange { head, boundary },
+        additional_dependencies,
         commits,
         signatures,
     }

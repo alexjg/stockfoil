@@ -62,9 +62,11 @@ when signatures haven't arrived yet.
   `signature_frontiers`.
 * `CommitGraph` has no causal queue. Received verified items first check that
   external dependencies are admitted, then insert their commits parents-first;
-  every insertion is causally ready by invariant. Fragment boundary dependencies
-  must likewise be admitted. All missing-dependency buffering stays outside the
-  graph, for both local work and received items.
+  every insertion is causally ready by invariant. Fragment boundaries and explicit
+  additional dependencies must all be admitted. Admission also checks normalized
+  range placement against their history before payload callbacks or mutation.
+  All missing-dependency buffering stays outside the graph, for both local work
+  and received items.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.

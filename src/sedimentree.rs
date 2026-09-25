@@ -6,9 +6,11 @@ use std::collections::BTreeSet;
 
 use crate::CommitHash;
 
-/// Inclusive head and boundary commits of a canonical fragment.
-/// A walk stops at ancestors at least as deep as the head, or at roots.
-/// Roots below the head's depth are included without becoming boundaries.
+/// The head and exclusive boundary of a canonical fragment.
+/// Boundaries are discovered by stopping a parent walk at ancestors at least as
+/// deep as the head. Payload members are the head's inclusive history minus
+/// the union of the boundaries' inclusive histories, even on bypass paths.
+/// Boundaries need not be an antichain; shallow roots do not become boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FragmentRange {
     pub head: CommitHash,
@@ -52,7 +54,8 @@ pub struct SedimentreeSummary {
     pub fragments: Vec<Fragment>,
 }
 
-/// An owned inventory of the current certified structural minimal cover.
+/// An owned inventory of the current certified export cover.
+/// Structural summaries may additionally describe uncertified subfragments.
 /// Every entry is exportable while it remains in the graph's current cover.
 /// This snapshot does not retain replaced entries or their certificates.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -76,23 +79,24 @@ impl SedimentreeView<'_> {
     /// Lower-level records at the same head are internal traversal structure,
     /// not separate summary entries.
     ///
-    /// A reverse pass over nodes and their parent slices determines coverage.
-    /// Checkpoints are then collected through level-one boundary links, without
-    /// expanding ordinary fragment members. Boundaries come from the index.
-    /// Graph coverage work is linear in nodes and parent edges; checkpoint output
-    /// and deterministic sorting have additional costs. No payloads are accessed.
+    /// Boundaries come from the index. Members are enumerated from differences
+    /// of ancestry-clock chain intervals; checkpoints and coverage use precisely
+    /// those normalized members. No payloads are accessed. Structural ranges do
+    /// not imply an independently exportable certificate.
     pub fn summary(&self) -> SedimentreeSummary {
-        self.fragments.summary(self.nodes, &self.publishable, false)
+        self.fragments
+            .summary(self.nodes, &self.publishable, false, false)
     }
 
-    /// Return the minimal cover under structural containment: recursively,
-    /// higher-level fragments contain their lower-level constituent fragments.
-    /// Boundary commits are included without including the fragments they head.
+    /// Minimize the structural summary by complete normalized range containment.
+    /// A deeper fragment must contain the shallower one's entire payload and
+    /// account for its boundaries; containing its head alone is insufficient.
     ///
     /// Same-level overlaps (even accidental whole-range containment) are kept.
     /// This is not minimum set cover or exhaustive commit-set containment
     /// reduction. Uses the same metadata-only traversals as [`Self::summary`].
     pub fn minimized_summary(&self) -> SedimentreeSummary {
-        self.fragments.summary(self.nodes, &self.publishable, true)
+        self.fragments
+            .summary(self.nodes, &self.publishable, true, false)
     }
 }

@@ -133,6 +133,20 @@ through `Arc`. Uninitialized entries can be filled independently after cloning.
 This does not make clocks interchangeable between independently built replicas,
 or between divergent suffixes of graph clones.
 
+== Normalized Fragment Membership
+
+A fragment carries the head's inclusive history minus the union of all boundary
+histories. This difference is not itself a down-set: test inclusion in the head
+clock and exclusion from the boundary clock. Boundary discovery still uses the
+raw depth-stopped parent walk and retains redundant ancestor boundaries.
+
+Each chain also stores its nodes in increasing position order. For each head
+clock coordinate, binary searches select the interval above the boundary clock's
+coordinate and at or below the head's coordinate. Enumerating these intervals
+visits normalized members without scanning the excluded history or unrelated
+nodes. Traversal, summaries, export, and local certificate construction use the
+same member calculation.
+
 == Prepared Viewpoints
 
 The portable `ViewPoint` is unchanged: it owns delivered commit hashes and

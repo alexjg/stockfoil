@@ -1,6 +1,7 @@
-//! Stateless verification of received history. Fragment boundaries are assumed
-//! authenticated; admission establishes that premise. Signatures cover each
-//! author's causal frontier among the members introduced by the item.
+//! Stateless verification of received history. Dependencies are assumed
+//! authenticated; admission establishes that premise and checks canonical fragment
+//! placement against their history before mutation. Signatures cover each
+//! author's causal frontier among all supplied members.
 //! Payload bytes and application-specific decoding remain separate.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +38,10 @@ pub enum UnverifiedItem {
     },
     Fragment {
         range: FragmentRange,
+        /// External parents other than boundaries, excluded with boundary history.
+        additional_dependencies: BTreeSet<CommitHash>,
+        /// Normalized members: the head and its ancestry minus boundaries and
+        /// all boundary ancestry. Admission checks this canonical placement.
         commits: Vec<CommitMeta>,
         signatures: Vec<SignatureEvidence>,
     },
@@ -55,14 +60,23 @@ impl UnverifiedItem {
     pub fn dependencies(&self) -> impl Iterator<Item = CommitHash> + '_ {
         let hashes: BTreeSet<_> = match self {
             Self::Commit { meta, .. } => meta.parents().iter().copied().collect(),
-            Self::Fragment { range, .. } => range.boundary.clone(),
+            Self::Fragment {
+                range,
+                additional_dependencies,
+                ..
+            } => range
+                .boundary
+                .union(additional_dependencies)
+                .copied()
+                .collect(),
         };
         hashes.into_iter()
     }
 
     /// Verify already-decoded contents. A standalone commit is valid at any depth;
     /// its own certificate does not certify a fragment headed at that commit.
-    /// The result assumes authenticated dependencies; admission checks that premise.
+    /// The result assumes authenticated dependencies and canonical fragment
+    /// placement; admission checks both against dependency history before mutation.
     pub fn verify(self) -> Result<VerifiedItem, VerificationError> {
         match self {
             Self::Commit { meta, signatures } => {
@@ -76,9 +90,15 @@ impl UnverifiedItem {
             }
             Self::Fragment {
                 range,
+                additional_dependencies,
                 commits,
                 signatures,
-            } => Self::verify_fragment(range, signatures, commits.into_iter().map(Ok)),
+            } => Self::verify_fragment(
+                range,
+                additional_dependencies,
+                signatures,
+                commits.into_iter().map(Ok),
+            ),
         }
     }
 
@@ -89,12 +109,25 @@ impl UnverifiedItem {
     ///
     /// No graph or dependency provider is consulted. Metadata is retained for
     /// structural checks and admission, but payload bytes need not be retained.
+    /// Supply the head and normalized members, excluding boundaries and all their
+    /// ancestry. `additional_dependencies` must exactly name external member
+    /// parents other than boundaries. Stateless checks cannot prove that excluded
+    /// parents belong to boundary history, or that supplied members do not;
+    /// admission checks full canonical placement before mutation.
     pub fn verify_fragment(
         range: FragmentRange,
+        additional_dependencies: BTreeSet<CommitHash>,
         signatures: Vec<SignatureEvidence>,
         commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
     ) -> Result<VerifiedItem, VerificationError> {
-        let dependencies = range.boundary.clone();
+        if !range.boundary.is_disjoint(&additional_dependencies) {
+            return Err(VerificationError::InvalidItem);
+        }
+        let dependencies = range
+            .boundary
+            .union(&additional_dependencies)
+            .copied()
+            .collect();
         verify_metadata(ItemId::Fragment(range), dependencies, signatures, commits)
     }
 }
@@ -115,12 +148,9 @@ fn verify_metadata(
         }
     }
     let sorted = topological_order(&members)?;
-    let boundary = if let ItemId::Fragment(range) = &id {
-        validate_fragment(range, &members)?;
-        range.boundary.clone()
-    } else {
-        BTreeSet::new()
-    };
+    if let ItemId::Fragment(range) = &id {
+        validate_fragment(range, &dependencies, &members)?;
+    }
 
     // Check every signature, even redundant evidence. Targets must be members;
     // neither dependency claims nor decoder state extend signature coverage.
@@ -146,12 +176,10 @@ fn verify_metadata(
 
     let mut introduced: BTreeMap<Author, BTreeSet<CommitHash>> = BTreeMap::new();
     for meta in members.values() {
-        if !boundary.contains(meta.hash()) {
-            introduced
-                .entry(*meta.author())
-                .or_default()
-                .insert(*meta.hash());
-        }
+        introduced
+            .entry(*meta.author())
+            .or_default()
+            .insert(*meta.hash());
     }
     let mut signature_boundary = BTreeMap::new();
     for (author, authored) in introduced {
@@ -224,30 +252,34 @@ fn depth(hash: &CommitHash) -> usize {
         .count()
 }
 
-/// Plain canonical traversal, independent of the graph's fragment index.
+/// Check item-local closure, not canonical placement in excluded history.
 fn validate_fragment(
     range: &FragmentRange,
+    dependencies: &BTreeSet<CommitHash>,
     members: &BTreeMap<CommitHash, CommitMeta>,
 ) -> Result<(), VerificationError> {
     let head_depth = depth(&range.head);
-    if head_depth == 0 {
+    if head_depth == 0
+        || !members.contains_key(&range.head)
+        || range.boundary.iter().any(|hash| depth(hash) < head_depth)
+        || dependencies
+            .difference(&range.boundary)
+            .any(|hash| depth(hash) >= head_depth)
+        || members.keys().any(|hash| {
+            dependencies.contains(hash) || (*hash != range.head && depth(hash) >= head_depth)
+        })
+    {
         return Err(VerificationError::InvalidItem);
     }
-    let mut pending = vec![range.head];
-    let mut visited = BTreeSet::new();
-    let mut boundary = BTreeSet::new();
-    while let Some(hash) = pending.pop() {
-        if !visited.insert(hash) {
-            continue;
-        }
-        let meta = members.get(&hash).ok_or(VerificationError::InvalidItem)?;
-        if hash != range.head && depth(&hash) >= head_depth {
-            boundary.insert(hash);
-        } else {
-            pending.extend(meta.parents().iter().copied());
-        }
-    }
-    if boundary != range.boundary || visited.len() != members.len() {
+    let external: BTreeSet<_> = members
+        .values()
+        .flat_map(|meta| meta.parents().iter().copied())
+        .filter(|hash| !members.contains_key(hash) && !range.boundary.contains(hash))
+        .collect();
+    let additional: BTreeSet<_> = dependencies.difference(&range.boundary).copied().collect();
+    // Boundaries can also be discovered through excluded history, so they need
+    // not be referenced directly. Additional dependencies must be exact.
+    if external != additional || ancestry(members, [range.head]).len() != members.len() {
         return Err(VerificationError::InvalidItem);
     }
     Ok(())
@@ -296,8 +328,10 @@ fn topological_order(
     Ok(sorted)
 }
 
-/// A conditional certificate, not proof that dependencies or payloads are available.
-/// There is deliberately no unchecked public constructor.
+/// A conditional authentication and closure certificate, not proof that
+/// dependencies or payloads are available. Canonical fragment placement cannot
+/// be proven statelessly; admission checks it against authenticated dependency
+/// history before mutation. There is deliberately no unchecked public constructor.
 ///
 /// ```compile_fail
 /// use stockfoil::VerifiedItem;
@@ -316,7 +350,7 @@ impl VerifiedItem {
     pub fn id(&self) -> &ItemId {
         &self.id
     }
-    /// Distinct prerequisites whose authentication admission must establish.
+    /// Sorted, distinct prerequisites whose authentication admission must establish.
     pub fn dependencies(&self) -> impl Iterator<Item = &CommitHash> {
         self.dependencies.iter()
     }
@@ -324,8 +358,8 @@ impl VerifiedItem {
     pub fn commits(&self) -> impl Iterator<Item = &CommitMeta> {
         self.commits.iter()
     }
-    /// Signed targets whose per-author frontiers dominate the author's latest
-    /// introduced commits. Already-authenticated boundaries add no obligation.
+    /// Signed member targets whose per-author frontiers dominate the author's
+    /// latest supplied commits. Boundaries are dependencies, never members.
     pub fn signature_boundary(&self) -> &BTreeMap<Author, BTreeSet<CommitHash>> {
         &self.signature_boundary
     }

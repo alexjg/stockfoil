@@ -14,10 +14,15 @@ pub(crate) struct AncestorClock {
 }
 
 impl AncestorClock {
-    pub(crate) fn contains(&self, chain: usize, position: NodeIdx) -> bool {
+    pub(crate) fn position(&self, chain: usize) -> Option<NodeIdx> {
         self.entries
             .binary_search_by_key(&chain, |&(chain, _)| chain)
-            .is_ok_and(|i| self.entries[i].1 >= position)
+            .ok()
+            .map(|i| self.entries[i].1)
+    }
+
+    pub(crate) fn contains(&self, chain: usize, position: NodeIdx) -> bool {
+        self.position(chain).is_some_and(|tip| tip >= position)
     }
 
     pub(crate) fn entries(&self) -> impl Iterator<Item = (usize, NodeIdx)> + '_ {

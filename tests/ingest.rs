@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
     Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
-    FragmentRange, IngestError, ItemId, Signature, SignatureEvidence, UnverifiedItem,
+    FragmentRange, IngestError, ItemId, Signature, SignatureEvidence, UnverifiedItem, VerifiedItem,
     WritePermission,
 };
 
@@ -59,10 +59,59 @@ fn item(meta: &CommitMeta, seed: u8) -> UnverifiedItem {
 }
 
 fn fragment(range: &FragmentRange, commits: Vec<CommitMeta>, seed: u8) -> UnverifiedItem {
+    // Fill transport prerequisites, but never normalize/filter the supplied
+    // members: deliberately malformed fragments must remain malformed.
+    let members: BTreeSet<_> = commits.iter().map(|meta| *meta.hash()).collect();
+    let additional_dependencies = commits
+        .iter()
+        .flat_map(|meta| meta.parents().iter().copied())
+        .filter(|hash| !members.contains(hash) && !range.boundary.contains(hash))
+        .collect();
     UnverifiedItem::Fragment {
         range: range.clone(),
+        additional_dependencies,
         commits,
         signatures: vec![proof(seed, range.head)],
+    }
+}
+
+fn assert_ingest_rejected_without_changes(
+    graph: &mut CommitGraph<usize>,
+    verified: VerifiedItem,
+    expected: IngestError,
+) {
+    let members: Vec<_> = verified.commits().map(|meta| *meta.hash()).collect();
+    let admitted: Vec<_> = members
+        .iter()
+        .map(|hash| graph.has_admitted_commit(hash))
+        .collect();
+    let payloads: Vec<_> = members
+        .iter()
+        .map(|hash| graph.publishable_commit(hash).map(|(_, payload)| *payload))
+        .collect();
+    let cover = graph.minimal_cover();
+    let view = graph.view_point();
+    let signed = graph.signed_view_point();
+    let heads = graph.delivered_heads().collect::<Vec<_>>();
+    let mut callbacks = 0;
+    assert_eq!(
+        graph.ingest(verified, |_| {
+            callbacks += 1;
+            99
+        }),
+        Err(expected)
+    );
+    assert_eq!(callbacks, 0);
+    assert_eq!(graph.minimal_cover(), cover);
+    assert_eq!(graph.view_point(), view);
+    assert_eq!(graph.signed_view_point(), signed);
+    assert_eq!(graph.delivered_heads().collect::<Vec<_>>(), heads);
+    for ((hash, admitted), payload) in members.iter().zip(admitted).zip(payloads) {
+        assert_eq!(graph.has_admitted_commit(hash), admitted);
+        assert_eq!(
+            graph.publishable_commit(hash).map(|(_, payload)| *payload),
+            payload
+        );
     }
 }
 
@@ -187,9 +236,9 @@ fn fragment_boundary_is_a_real_admission_dependency_not_just_local_metadata() {
         head: *head.hash(),
         boundary: BTreeSet::from([*boundary.hash()]),
     };
-    let verified = fragment(&range, vec![head.clone(), boundary.clone()], 1)
-        .verify()
-        .unwrap();
+    let verified = fragment(&range, vec![head.clone()], 1).verify().unwrap();
+    assert_eq!(verified.commits().count(), 1);
+    assert_eq!(verified.signature_boundary().len(), 1);
     let mut receiver = CommitGraph::new();
     assert_eq!(
         receiver.ingest(verified.clone(), |_| panic!("missing boundary")),
@@ -523,4 +572,358 @@ fn payload_panic_after_partial_preparation_leaves_all_graph_state_unchanged() {
         .unwrap();
     graph.ingest(verified, |_| 8).unwrap();
     assert!(graph.has_admitted_commit(head.hash()));
+}
+
+#[test]
+fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof_member() {
+    // h -> m -> b -> x, with the bypass m -> x. The normalized h fragment
+    // contains only m,h; b's authenticated history supplies x as well as b.
+    let x = at_depth(2, vec![], 0);
+    let b = at_depth(2, vec![*x.hash()], 1);
+    let middle = at_depth(1, vec![*b.hash(), *x.hash(), *x.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash()]),
+    };
+    let incoming = fragment(&range, vec![head.clone(), middle.clone()], 1);
+    let expected_dependencies: Vec<_> =
+        BTreeSet::from([*b.hash(), *x.hash()]).into_iter().collect();
+    assert_eq!(
+        incoming.dependencies().collect::<Vec<_>>(),
+        expected_dependencies
+    );
+    let UnverifiedItem::Fragment {
+        additional_dependencies,
+        commits,
+        signatures,
+        ..
+    } = &incoming
+    else {
+        panic!("expected fragment");
+    };
+    assert_eq!(additional_dependencies, &BTreeSet::from([*x.hash()]));
+    assert_eq!(commits.len(), 2);
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(signatures[0].commit, *head.hash());
+
+    // Neither decoder API receives x or b metadata, nor their author's proof.
+    let streamed = UnverifiedItem::verify_fragment(
+        range.clone(),
+        additional_dependencies.clone(),
+        signatures.clone(),
+        commits.iter().cloned().map(Ok),
+    )
+    .unwrap();
+    let verified = incoming.verify().unwrap();
+    for verified in [&verified, &streamed] {
+        assert_eq!(
+            verified.dependencies().copied().collect::<Vec<_>>(),
+            expected_dependencies
+        );
+        assert_eq!(
+            verified
+                .commits()
+                .map(|meta| *meta.hash())
+                .collect::<Vec<_>>(),
+            vec![*middle.hash(), *head.hash()]
+        );
+        assert_eq!(verified.signature_boundary().len(), 1);
+        assert_eq!(
+            verified.signature_boundary()[&author(1)],
+            BTreeSet::from([*head.hash()])
+        );
+    }
+
+    let mut receiver = CommitGraph::new();
+    assert_ingest_rejected_without_changes(
+        &mut receiver,
+        verified.clone(),
+        IngestError::MissingDependency(expected_dependencies[0]),
+    );
+    receiver
+        .ingest(item(&x, 2).verify().unwrap(), |_| 1)
+        .unwrap();
+    receiver.ingest_local_commit(b.clone(), 2);
+    assert_ingest_rejected_without_changes(
+        &mut receiver,
+        verified.clone(),
+        IngestError::MissingDependency(*b.hash()),
+    );
+    let base_range = FragmentRange {
+        head: *b.hash(),
+        boundary: BTreeSet::new(),
+    };
+    receiver
+        .ingest(
+            fragment(&base_range, vec![b.clone(), x.clone()], 2)
+                .verify()
+                .unwrap(),
+            |_| panic!("preserve existing dependency payloads"),
+        )
+        .unwrap();
+    let mut callbacks = Vec::new();
+    receiver
+        .ingest(verified, |meta| {
+            callbacks.push(*meta.hash());
+            if meta.hash() == middle.hash() { 3 } else { 4 }
+        })
+        .unwrap();
+    assert_eq!(callbacks, vec![*middle.hash(), *head.hash()]);
+
+    let exported = receiver.export(&ItemId::Fragment(range.clone())).unwrap();
+    let UnverifiedItem::Fragment {
+        range: exported_range,
+        additional_dependencies,
+        commits,
+        signatures,
+    } = &exported
+    else {
+        panic!("expected fragment");
+    };
+    assert_eq!(exported_range, &range);
+    assert_eq!(additional_dependencies, &BTreeSet::from([*x.hash()]));
+    assert_eq!(
+        commits.iter().map(|meta| *meta.hash()).collect::<Vec<_>>(),
+        vec![*middle.hash(), *head.hash()]
+    );
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(signatures[0].author, author(1));
+    assert_eq!(signatures[0].commit, *head.hash());
+    let exported = exported.verify().unwrap();
+    assert_eq!(
+        exported.dependencies().copied().collect::<Vec<_>>(),
+        expected_dependencies
+    );
+
+    let mut relay = CommitGraph::new();
+    relay.merge(&receiver);
+    assert_eq!(relay.minimal_cover(), receiver.minimal_cover());
+    assert_eq!(relay.signed_view_point(), receiver.signed_view_point());
+    for (meta, payload) in [(&x, 1), (&b, 2), (&middle, 3), (&head, 4)] {
+        assert!(relay.has_admitted_commit(meta.hash()));
+        assert_eq!(*relay.publishable_commit(meta.hash()).unwrap().1, payload);
+    }
+    relay
+        .ingest(exported, |_| panic!("duplicate payload"))
+        .unwrap();
+    let relayed = relay
+        .export(&ItemId::Fragment(range))
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert_eq!(relayed.commits().count(), 2);
+    assert_eq!(
+        relayed.dependencies().copied().collect::<Vec<_>>(),
+        expected_dependencies
+    );
+    let mut complete_relay = CommitGraph::new();
+    complete_relay.merge(&relay);
+    assert_eq!(complete_relay.minimal_cover(), receiver.minimal_cover());
+    for meta in [&x, &b, &middle, &head] {
+        assert!(complete_relay.has_admitted_commit(meta.hash()));
+    }
+}
+
+#[test]
+fn declaring_an_in_range_parent_as_extra_passes_stateless_checks_but_not_admission() {
+    // Unlike the valid bypass, x is NOT in b's history. A sender cannot omit
+    // in-range x (and its author's signature) merely by declaring it an extra.
+    let x = at_depth(2, vec![], 0);
+    let b = at_depth(2, vec![], 1);
+    let middle = at_depth(1, vec![*b.hash(), *x.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash()]),
+    };
+    let incoming = UnverifiedItem::Fragment {
+        range: range.clone(),
+        additional_dependencies: BTreeSet::from([*x.hash()]),
+        commits: vec![head.clone(), middle.clone()],
+        signatures: vec![proof(1, *head.hash())],
+    };
+    let verified = incoming
+        .verify()
+        .expect("auth and declared closure are valid");
+    assert_eq!(verified.commits().count(), 2);
+    assert_eq!(verified.signature_boundary().len(), 1);
+    let mut graph = CommitGraph::new();
+    graph.ingest(item(&b, 2).verify().unwrap(), |_| 1).unwrap();
+    assert_ingest_rejected_without_changes(
+        &mut graph,
+        verified.clone(),
+        IngestError::MissingDependency(*x.hash()),
+    );
+    graph.ingest_local_commit(x.clone(), 2);
+    assert_ingest_rejected_without_changes(
+        &mut graph,
+        verified.clone(),
+        IngestError::MissingDependency(*x.hash()),
+    );
+    sign(&mut graph, 2, *x.hash());
+    graph.ingest_local_commit(middle.clone(), 3);
+    assert!(!graph.has_admitted_commit(middle.hash()));
+    assert_ingest_rejected_without_changes(
+        &mut graph,
+        verified.clone(),
+        IngestError::InvalidFragment,
+    );
+    assert!(!graph.has_admitted_commit(middle.hash()));
+    assert!(!graph.has_admitted_commit(head.hash()));
+    assert_not_exportable(&graph, ItemId::Fragment(range.clone()));
+
+    // Supplying x and its proof instead is canonical; the earlier rejection
+    // neither authenticated pending m nor changed its stored payload.
+    let valid = UnverifiedItem::Fragment {
+        range,
+        additional_dependencies: BTreeSet::new(),
+        commits: vec![head.clone(), middle.clone(), x.clone()],
+        signatures: vec![proof(1, *head.hash()), proof(2, *x.hash())],
+    }
+    .verify()
+    .unwrap();
+    graph
+        .ingest(valid, |meta| {
+            assert_eq!(meta.hash(), head.hash());
+            4
+        })
+        .unwrap();
+    assert_eq!(*graph.publishable_commit(middle.hash()).unwrap().1, 3);
+    // Even an apparent duplicate must not bypass canonical validation.
+    assert_ingest_rejected_without_changes(&mut graph, verified, IngestError::InvalidFragment);
+}
+
+#[test]
+fn spurious_authenticated_boundary_is_rejected_before_payloads_or_state_changes() {
+    let b = at_depth(1, vec![], 1);
+    let unrelated = at_depth(2, vec![], 1);
+    let head = at_depth(1, vec![*b.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash(), *unrelated.hash()]),
+    };
+    let verified = fragment(&range, vec![head.clone()], 1).verify().unwrap();
+    let mut graph = CommitGraph::new();
+    graph.ingest(item(&b, 1).verify().unwrap(), |_| 1).unwrap();
+    graph
+        .ingest(item(&unrelated, 2).verify().unwrap(), |_| 2)
+        .unwrap();
+    assert_ingest_rejected_without_changes(&mut graph, verified, IngestError::InvalidFragment);
+    assert!(!graph.has_admitted_commit(head.hash()));
+    assert_not_exportable(&graph, ItemId::Fragment(range));
+}
+
+#[test]
+fn supplying_a_boundary_ancestor_as_a_member_is_not_normalized() {
+    let x = at_depth(1, vec![], 0);
+    let b = at_depth(1, vec![*x.hash()], 1);
+    let middle = at_depth(1, vec![*b.hash(), *x.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash()]),
+    };
+    // x is a reachable, low-depth member with valid signature coverage. Only
+    // b's omitted metadata reveals that x belongs to the excluded history.
+    let incoming = fragment(&range, vec![head.clone(), middle.clone(), x.clone()], 1);
+    let verified = incoming.verify().unwrap();
+    assert_eq!(verified.commits().count(), 3);
+    assert_eq!(
+        verified.dependencies().copied().collect::<Vec<_>>(),
+        vec![*b.hash()]
+    );
+    let mut graph = CommitGraph::new();
+    graph.ingest(item(&x, 1).verify().unwrap(), |_| 1).unwrap();
+    graph.ingest(item(&b, 1).verify().unwrap(), |_| 2).unwrap();
+    assert_ingest_rejected_without_changes(&mut graph, verified, IngestError::InvalidFragment);
+    assert!(!graph.has_admitted_commit(middle.hash()));
+    assert!(!graph.has_admitted_commit(head.hash()));
+    graph
+        .ingest(
+            fragment(&range, vec![head.clone(), middle.clone()], 1)
+                .verify()
+                .unwrap(),
+            |_| 3,
+        )
+        .unwrap();
+    assert_eq!(*graph.publishable_commit(x.hash()).unwrap().1, 1);
+}
+
+#[test]
+fn raw_stopped_walk_keeps_a_boundary_reached_through_excluded_history() {
+    // h -> m -> b -> x -> old, plus m -> x. Stopping at b alone is wrong:
+    // the bypass reaches old, even though both x and old are b's ancestors.
+    let old = at_depth(2, vec![], 1);
+    let x = at_depth(2, vec![*old.hash()], 0);
+    let b = at_depth(2, vec![*x.hash()], 1);
+    let middle = at_depth(1, vec![*b.hash(), *x.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash(), *old.hash()]),
+    };
+    let mut graph = CommitGraph::new();
+    for (range, members) in [
+        (
+            FragmentRange {
+                head: *old.hash(),
+                boundary: BTreeSet::new(),
+            },
+            vec![old.clone()],
+        ),
+        (
+            FragmentRange {
+                head: *b.hash(),
+                boundary: BTreeSet::from([*old.hash()]),
+            },
+            vec![b.clone(), x.clone()],
+        ),
+    ] {
+        graph
+            .ingest(fragment(&range, members, 2).verify().unwrap(), |_| 1)
+            .unwrap();
+    }
+    let missing_boundary = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash()]),
+    };
+    let malformed = fragment(&missing_boundary, vec![head.clone(), middle.clone()], 1)
+        .verify()
+        .unwrap();
+    assert_ingest_rejected_without_changes(&mut graph, malformed, IngestError::InvalidFragment);
+
+    let verified = fragment(&range, vec![head.clone(), middle.clone()], 1)
+        .verify()
+        .unwrap();
+    let dependencies: Vec<_> = BTreeSet::from([*b.hash(), *old.hash(), *x.hash()])
+        .into_iter()
+        .collect();
+    assert_eq!(
+        verified.dependencies().copied().collect::<Vec<_>>(),
+        dependencies
+    );
+    graph.ingest(verified, |_| 2).unwrap();
+    let exported = graph.export(&ItemId::Fragment(range.clone())).unwrap();
+    let UnverifiedItem::Fragment {
+        additional_dependencies,
+        commits,
+        ..
+    } = &exported
+    else {
+        panic!("expected fragment");
+    };
+    assert_eq!(additional_dependencies, &BTreeSet::from([*x.hash()]));
+    assert_eq!(
+        commits.iter().map(|meta| *meta.hash()).collect::<Vec<_>>(),
+        vec![*middle.hash(), *head.hash()]
+    );
+    assert_eq!(exported.id(), ItemId::Fragment(range));
+    exported.verify().unwrap();
+    let mut relay = CommitGraph::new();
+    relay.merge(&graph);
+    assert_eq!(relay.minimal_cover(), graph.minimal_cover());
+    for meta in [&old, &x, &b, &middle, &head] {
+        assert!(relay.has_admitted_commit(meta.hash()));
+    }
 }

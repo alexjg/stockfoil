@@ -93,6 +93,7 @@ fn a_decoder_reconstructs_omitted_hashes_and_parent_references_as_verification_p
     });
     let verified = UnverifiedItem::verify_fragment(
         root_range(&head),
+        BTreeSet::new(),
         vec![sig(1, &head), sig(2, &middle)],
         decoder,
     )
@@ -126,8 +127,13 @@ fn decoder_failure_stops_consumption_without_producing_a_certificate() {
         })
     });
     assert_eq!(
-        UnverifiedItem::verify_fragment(root_range(&head), vec![sig(1, &head)], decoder)
-            .unwrap_err(),
+        UnverifiedItem::verify_fragment(
+            root_range(&head),
+            BTreeSet::new(),
+            vec![sig(1, &head)],
+            decoder
+        )
+        .unwrap_err(),
         VerificationError::InvalidItem
     );
     assert_eq!(calls, 2);
@@ -144,6 +150,7 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
     let verify = |signatures| {
         UnverifiedItem::Fragment {
             range: range.clone(),
+            additional_dependencies: BTreeSet::new(),
             commits: members.clone(),
             signatures,
         }
@@ -237,7 +244,8 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         .ingest(
             UnverifiedItem::Fragment {
                 range: middle_range.clone(),
-                commits: vec![middle.clone(), boundary.clone()],
+                additional_dependencies: BTreeSet::new(),
+                commits: vec![middle.clone()],
                 signatures: vec![sig(2, &middle)],
             }
             .verify()
@@ -257,6 +265,7 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         .ingest(
             UnverifiedItem::Fragment {
                 range: range.clone(),
+                additional_dependencies: BTreeSet::new(),
                 commits: vec![head.clone(), middle.clone(), boundary.clone(), root.clone()],
                 signatures: vec![sig(3, &head), sig(2, &middle), sig(1, &root)],
             }
@@ -407,6 +416,7 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
         members.shuffle(&mut rng);
         let verified = UnverifiedItem::verify_fragment(
             range.clone(),
+            BTreeSet::new(),
             signatures.clone(),
             members.clone().into_iter().map(Ok),
         )
@@ -429,8 +439,13 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
             .cloned()
             .collect();
         assert_eq!(
-            UnverifiedItem::verify_fragment(range.clone(), incomplete, members.into_iter().map(Ok))
-                .unwrap_err(),
+            UnverifiedItem::verify_fragment(
+                range.clone(),
+                BTreeSet::new(),
+                incomplete,
+                members.into_iter().map(Ok)
+            )
+            .unwrap_err(),
             VerificationError::MissingSignature {
                 author: missing.author,
                 commit: missing.commit

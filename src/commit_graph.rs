@@ -134,8 +134,8 @@ impl<P: Clone> CommitGraph<P> {
     /// item's authenticated dependencies; stateless verification does not imply
     /// that those dependencies are present here.
     ///
-    /// Checks dependencies before graph mutation or payload
-    /// callbacks. For each newly admitted commit, `payload` supplies application
+    /// Checks boundary and additional dependencies, then canonical fragment
+    /// placement, before graph mutation or payload callbacks. For each newly admitted commit, `payload` supplies application
     /// data or a storage handle; duplicates preserve existing data. Neither this
     /// method nor metadata verification checks the bytes of an opaque `P`.
     /// Uses the item's evidence to maintain the published minimal cover.
@@ -159,6 +159,7 @@ impl<P: Clone> CommitGraph<P> {
                 return Err(crate::IngestError::MissingDependency(*dependency));
             }
         }
+        self.validate_fragment_admission(&item)?;
         // Prepare all new payloads before changing state. A pending local copy
         // also owns its original payload; admission must not overwrite it.
         let prepared: Vec<_> = item
@@ -174,6 +175,65 @@ impl<P: Clone> CommitGraph<P> {
         }
         self.admit_certificate(item);
         self.finish_local_commits();
+        Ok(())
+    }
+
+    // Stateless verification proves signatures and declared closure, not that
+    // omitted parents really lie below the declared boundaries. Check that
+    // premise and exact canonical membership using a read-only metadata overlay.
+    fn validate_fragment_admission(
+        &self,
+        item: &crate::VerifiedItem,
+    ) -> Result<(), crate::IngestError> {
+        let ItemId::Fragment(range) = &item.id else {
+            return Ok(());
+        };
+        let invalid = crate::IngestError::InvalidFragment;
+        let boundary_nodes = range
+            .boundary
+            .iter()
+            .map(|h| self.by_hash[h])
+            .collect::<Vec<_>>();
+        let excluded = self.nodes.clock_for_heads(&boundary_nodes);
+        let in_excluded = |hash: &CommitHash| {
+            self.by_hash
+                .get(hash)
+                .is_some_and(|&idx| excluded.contains(self.nodes[idx].chain, idx))
+        };
+        if item.dependencies.iter().any(|hash| !in_excluded(hash))
+            || item.commits.iter().any(|meta| in_excluded(meta.hash()))
+        {
+            return Err(invalid);
+        }
+        let supplied: BTreeMap<_, _> = item.commits.iter().map(|m| (*m.hash(), m)).collect();
+        let mut visited = HashSet::new();
+        let mut boundary = BTreeSet::new();
+        let mut members = BTreeSet::new();
+        let mut stack = vec![range.head];
+        let depth = sedimentree_depth(&range.head);
+        while let Some(hash) = stack.pop() {
+            if !visited.insert(hash) {
+                continue;
+            }
+            if hash != range.head && sedimentree_depth(&hash) >= depth {
+                boundary.insert(hash);
+                continue;
+            }
+            let meta = if let Some(meta) = supplied.get(&hash) {
+                members.insert(hash);
+                *meta
+            } else if in_excluded(&hash) {
+                &self.nodes[self.by_hash[&hash]].meta
+            } else {
+                // Locally knowing a commit outside dependency history does not
+                // excuse its omission from this independently exportable item.
+                return Err(invalid);
+            };
+            stack.extend(meta.parents());
+        }
+        if boundary != range.boundary || members.len() != supplied.len() {
+            return Err(invalid);
+        }
         Ok(())
     }
 
@@ -229,22 +289,7 @@ impl<P: Clone> CommitGraph<P> {
     fn insert_fragments(&mut self, head: NodeIdx) {
         let depth = self.nodes[head].depth;
         for level in 1..=depth {
-            let boundary: BTreeSet<_> = if level == 1 {
-                self.nodes
-                    .level_one_members(head)
-                    .into_iter()
-                    .filter(|&idx| idx != head && self.nodes[idx].depth > 0)
-                    .collect()
-            } else {
-                // The same head's lower-level fragment was just inserted.
-                // Every other constituent belongs to an older commit.
-                self.fragments
-                    .lower_fragments(&self.nodes, head, level)
-                    .into_iter()
-                    .flat_map(|idx| self.fragments.boundary(idx).iter().copied())
-                    .filter(|&idx| self.nodes[idx].depth >= level)
-                    .collect()
-            };
+            let boundary = self.nodes.fragment_boundary(head, level);
             let start = self.fragments.boundary_ids.len();
             self.fragments.boundary_ids.extend(boundary);
             let idx = FragmentIdx(self.fragments.entries.len());
@@ -267,8 +312,8 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Visit a canonical fragment's commits, including its head and boundaries,
-    /// exactly once. Parents within the fragment precede their children; among
+    /// Visit a canonical fragment's normalized members exactly once: include the
+    /// head, but exclude boundaries and all their ancestors. Parents within the fragment precede their children; among
     /// currently eligible commits, the smallest full commit hash is visited first.
     /// This order is independent of ingestion order and local node indices.
     pub fn traverse_fragment<'graph>(
@@ -299,15 +344,15 @@ impl<P: Clone> CommitGraph<P> {
             return Err(FragmentReadError::BoundaryMismatch(range.head));
         }
 
-        // Derive membership through the fragment hierarchy, not from the caller's
-        // boundary set. A publishable head guarantees publishable ancestors.
+        // Use the indexed range, not an unchecked caller-supplied boundary.
+        // Clocks subtract the complete boundary history, including bypass paths.
         let members = self.fragments.members(&self.nodes, fragment_idx);
         let mut remaining = HashMap::new();
         let mut children: HashMap<NodeIdx, Vec<NodeIdx>> = HashMap::new();
         let mut ready = BTreeSet::new();
         for &idx in &members {
-            // Use ALL edges between members, even outgoing parent edges of a
-            // boundary reached through another path. Repeated parents count once.
+            // External parents are admitted dependencies, not payload members.
+            // Repeated internal parent edges count once.
             let parents: HashSet<_> = self
                 .parents(idx)
                 .filter(|parent| members.contains(parent))
@@ -351,7 +396,7 @@ impl<P: Clone> CommitGraph<P> {
     /// Readability does not guarantee standalone exportability; see [`Self::export`].
     pub fn publishable_commit(&self, hash: &CommitHash) -> Option<(&CommitMeta, &P)> {
         let idx = *self.by_hash.get(hash)?;
-        self.publishable_nodes()[idx.0].then(|| (&self.nodes[idx].meta, &self.store[&idx]))
+        (!self.pending_local.contains(hash)).then(|| (&self.nodes[idx].meta, &self.store[&idx]))
     }
 
     /// Read a cover item or its signed head announcement at any depth. Fragment
@@ -384,6 +429,7 @@ impl<P: Clone> CommitGraph<P> {
                 .expect("cover fragment is indexed");
                 Ok(UnverifiedItem::Fragment {
                     range: range.clone(),
+                    additional_dependencies: fragment_additional_dependencies(range, &commits),
                     commits,
                     signatures: self.fragments[fragment]
                         .signature_boundary
@@ -405,9 +451,12 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Compute the structural minimal cover using the authenticated fragment index.
+    /// Compute a complete export cover from retained fragment certificates and
+    /// signed standalone commits. Structural subfragments alone do not suffice.
     pub fn minimal_cover(&self) -> MinimalCover {
-        let summary = self.as_sedimentree().minimized_summary();
+        let summary = self
+            .fragments
+            .summary(&self.nodes, &self.publishable_nodes(), true, true);
         MinimalCover {
             loose_commits: summary.loose_commits,
             fragments: summary.fragments,
@@ -637,13 +686,12 @@ impl<P: Clone> CommitGraph<P> {
     fn admit_certificate(&mut self, item: crate::VerifiedItem) {
         for meta in &item.commits {
             self.pending_local.remove(meta.hash());
-            // A signed commit at a checkpoint is still just a commit. Only a
-            // verified fragment supplies its canonical range's certificate.
-            if let ItemId::Fragment(range) = &item.id {
+            // Interior checkpoints are indexed for structural inspection, not
+            // granted export certificates. Their normalized ranges may extend
+            // outside this item's payload. Only the actual head gets evidence.
+            if let ItemId::Fragment(_) = &item.id {
                 let idx = self.by_hash[meta.hash()];
-                if !range.boundary.contains(meta.hash())
-                    && self.nodes[idx].headed_fragments.is_empty()
-                {
+                if self.nodes[idx].headed_fragments.is_empty() {
                     self.insert_fragments(idx);
                 }
             }
@@ -725,22 +773,18 @@ impl<P: Clone> CommitGraph<P> {
                 signatures: node.signature_evidence().collect(),
             }
         } else {
-            // The pending head is not indexed yet. Read its canonical range
-            // from working metadata, stopping at already-admitted boundaries.
-            let mut members = BTreeSet::new();
-            let mut boundary = BTreeSet::new();
-            let mut stack = vec![head];
-            while let Some(idx) = stack.pop() {
-                if !members.insert(idx) {
-                    continue;
-                }
-                let meta = &self.nodes[idx].meta;
-                if idx != head && self.nodes[idx].depth >= depth {
-                    boundary.insert(*meta.hash());
-                } else {
-                    stack.extend(self.parents(idx));
-                }
+            // Boundary discovery is path-sensitive, but payload membership is
+            // the difference of complete histories, not a stopped walk.
+            let boundary = self.nodes.fragment_boundary(head, depth);
+            if boundary
+                .iter()
+                .any(|&idx| !self.has_admitted_commit(self.nodes[idx].meta.hash()))
+            {
+                return None;
             }
+            let members = self
+                .nodes
+                .fragment_members(head, &boundary.iter().copied().collect::<Vec<_>>());
             // Read only signatures attached to actual member nodes. A head
             // signature supersedes older signatures by that author. No inherited
             // arbitrary-target certificate or target-membership filter is needed.
@@ -754,15 +798,21 @@ impl<P: Clone> CommitGraph<P> {
                         .filter(|evidence| !node.signatures.contains_key(&evidence.author)),
                 )
                 .collect();
-            UnverifiedItem::Fragment {
-                range: FragmentRange {
-                    head: *node.meta.hash(),
-                    boundary,
-                },
-                commits: members
-                    .into_iter()
-                    .map(|idx| self.nodes[idx].meta.clone())
+            let range = FragmentRange {
+                head: *node.meta.hash(),
+                boundary: boundary
+                    .iter()
+                    .map(|&idx| *self.nodes[idx].meta.hash())
                     .collect(),
+            };
+            let commits: Vec<_> = members
+                .into_iter()
+                .map(|idx| self.nodes[idx].meta.clone())
+                .collect();
+            UnverifiedItem::Fragment {
+                additional_dependencies: fragment_additional_dependencies(&range, &commits),
+                range,
+                commits,
                 signatures,
             }
         };
@@ -840,6 +890,8 @@ pub(crate) struct NodeStore {
     entries: Vec<Node>,
     parent_ids: Vec<NodeIdx>,
     chain_tips: Vec<NodeIdx>,
+    // Sorted positions allow clock differences to enumerate just their intervals.
+    chain_nodes: Vec<Vec<NodeIdx>>,
 }
 
 impl NodeStore {
@@ -866,10 +918,12 @@ impl NodeStore {
         });
         if let Some(chain) = reusable {
             self.chain_tips[chain] = position;
+            self.chain_nodes[chain].push(position);
             chain
         } else {
             let chain = self.chain_tips.len();
             self.chain_tips.push(position);
+            self.chain_nodes.push(vec![position]);
             chain
         }
     }
@@ -912,17 +966,37 @@ impl NodeStore {
         &self.parent_ids[self[node].parents.clone()]
     }
 
-    // Inclusive membership of the level-one fragment at `head`. Stop at any
-    // other checkpoint, including one received only as a standalone commit.
-    fn level_one_members(&self, head: NodeIdx) -> HashSet<NodeIdx> {
-        let mut members = HashSet::new();
+    // Discover raw depth-based stops, including redundant ancestor boundaries.
+    // This is intentionally independent of normalized payload membership.
+    fn fragment_boundary(&self, head: NodeIdx, level: usize) -> BTreeSet<NodeIdx> {
+        let mut seen = HashSet::new();
+        let mut boundary = BTreeSet::new();
         let mut stack = vec![head];
         while let Some(idx) = stack.pop() {
-            if !members.insert(idx) {
+            if !seen.insert(idx) {
                 continue;
             }
-            if idx == head || self[idx].depth == 0 {
+            if idx != head && self[idx].depth >= level {
+                boundary.insert(idx);
+            } else {
                 stack.extend(self.parents(idx));
+            }
+        }
+        boundary
+    }
+
+    fn fragment_members(&self, head: NodeIdx, boundary: &[NodeIdx]) -> HashSet<NodeIdx> {
+        let included = self.clock(head);
+        let excluded = self.clock_for_heads(boundary);
+        let mut members = HashSet::new();
+        for (chain, tip) in included.entries() {
+            let nodes = &self.chain_nodes[chain];
+            let start = excluded
+                .position(chain)
+                .map_or(0, |pos| nodes.partition_point(|&idx| idx <= pos));
+            let end = nodes.partition_point(|&idx| idx <= tip);
+            if start < end {
+                members.extend(nodes[start..end].iter().copied());
             }
         }
         members
@@ -982,52 +1056,8 @@ impl FragmentStore {
         &self.boundary_ids[self[fragment].boundary.clone()]
     }
 
-    // Expand constituent links to level zero. Inclusive boundary commits may
-    // appear in multiple level-one fragments; union their membership by node ID.
     fn members(&self, nodes: &NodeStore, fragment: FragmentIdx) -> HashSet<NodeIdx> {
-        let mut members = HashSet::new();
-        let mut visited = HashSet::new();
-        let mut stack = vec![fragment];
-        while let Some(idx) = stack.pop() {
-            if !visited.insert(idx) {
-                continue;
-            }
-            let fragment = &self[idx];
-            if fragment.level == 1 {
-                members.extend(nodes.level_one_members(fragment.head));
-            } else {
-                stack.extend(self.lower_fragments(nodes, fragment.head, fragment.level));
-            }
-        }
-        members
-    }
-
-    // Derive the immediate constituents of a level > 1 fragment. Stop at
-    // boundaries of that level, following only level-(n-1) fragment links.
-    // No contents are stored, and overlapping paths are visited just once.
-    //
-    // Includes the same head's level-(n-1) fragment, then follows ancestors at
-    // that level, stopping at boundaries of depth at least n.
-    fn lower_fragments(&self, nodes: &NodeStore, head: NodeIdx, level: usize) -> Vec<FragmentIdx> {
-        debug_assert!(level > 1);
-        let mut result = Vec::new();
-        let mut visited = HashSet::new();
-        let mut stack = vec![nodes[head].headed_fragments[level - 2]];
-        while let Some(idx) = stack.pop() {
-            if !visited.insert(idx) {
-                continue;
-            }
-            result.push(idx);
-            for &boundary in self.boundary(idx) {
-                let headed = &nodes[boundary].headed_fragments;
-                if nodes[boundary].depth < level {
-                    // A level-(n-1) boundary is at least that deep, so this
-                    // boundary has depth exactly n-1 and heads that fragment.
-                    stack.push(headed[level - 2]);
-                }
-            }
-        }
-        result
+        nodes.fragment_members(self[fragment].head, self.boundary(fragment))
     }
 
     pub(crate) fn summary(
@@ -1035,64 +1065,73 @@ impl FragmentStore {
         nodes: &NodeStore,
         eligible: &[bool],
         minimize: bool,
+        certified_only: bool,
     ) -> crate::SedimentreeSummary {
-        // Coverage needs only the deepest fragment reaching each node. Greater
-        // levels dominate smaller ones; equal/deeper ancestors are boundaries.
-        // Parent indices precede children, so all incoming coverage is available
-        // when we visit a node. No fragment member lists are needed.
-        let mut covering_level = vec![0; nodes.entries.len()];
-        let mut selected = Vec::new();
-        for (index, node) in nodes.entries.iter().enumerate().rev() {
-            if let Some(fragment) = node.canonical_fragment().filter(|_| eligible[index]) {
-                if !minimize || covering_level[index] <= node.depth {
-                    selected.push(fragment);
-                }
-                covering_level[index] = covering_level[index].max(node.depth);
-            }
-            let level = covering_level[index];
-            if level == 0 {
-                continue;
-            }
-            for &parent in nodes.parents(NodeIdx(index)) {
-                if nodes[parent].depth < level {
-                    covering_level[parent.0] = covering_level[parent.0].max(level);
+        // A stopped walk overstates coverage when an edge bypasses a boundary.
+        // Enumerate normalized chain intervals once for each indexed range.
+        let candidates: Vec<_> = nodes
+            .into_iter()
+            .filter_map(|(idx, node)| {
+                node.canonical_fragment()
+                    .filter(|&fragment| {
+                        eligible[idx.0]
+                            && (!certified_only || !self[fragment].signature_boundary.is_empty())
+                    })
+                    .map(|fragment| (fragment, self.members(nodes, fragment)))
+            })
+            .collect();
+        let mut redundant = HashSet::new();
+        if minimize {
+            let by_head: HashMap<_, _> = candidates
+                .iter()
+                .map(|(idx, members)| (self[*idx].head, (*idx, members)))
+                .collect();
+            for (cover_idx, cover_members) in &candidates {
+                let cover_boundary: HashSet<_> =
+                    self.boundary(*cover_idx).iter().copied().collect();
+                // Only heads actually in this payload can be contained. Avoid
+                // an all-pairs scan, especially for long same-depth chains.
+                for head in cover_members {
+                    let Some(&(idx, members)) = by_head.get(head) else {
+                        continue;
+                    };
+                    // Preserve equal-depth overlaps. Head membership is only a
+                    // candidate: require the whole payload and its boundaries.
+                    if self[idx].level < self[*cover_idx].level
+                        && !redundant.contains(&idx)
+                        && members.is_subset(cover_members)
+                        && self
+                            .boundary(idx)
+                            .iter()
+                            .all(|b| cover_members.contains(b) || cover_boundary.contains(b))
+                    {
+                        redundant.insert(idx);
+                    }
                 }
             }
         }
-
-        // Level-one boundaries are the edges of the checkpoint DAG. Enumerate
-        // only checkpoints, never depth-zero contents or auxiliary levels. Reuse
-        // a visitation array, stamped by output fragment, across overlapping walks.
-        let mut visited = vec![0; nodes.entries.len()];
-        let mut stack = Vec::new();
-        let mut fragments = Vec::with_capacity(selected.len());
-        for (epoch, idx) in selected.into_iter().enumerate() {
-            let fragment = &self[idx];
-            let mut checkpoints = BTreeSet::new();
-            stack.extend_from_slice(self.boundary(nodes[fragment.head].headed_fragments[0]));
-            while let Some(checkpoint) = stack.pop() {
-                if visited[checkpoint.0] == epoch + 1 {
-                    continue;
-                }
-                visited[checkpoint.0] = epoch + 1;
-                let node = &nodes[checkpoint];
-                if node.depth >= fragment.level {
-                    continue;
-                }
-                checkpoints.insert(crate::Checkpoint(
-                    node.meta.hash().as_bytes()[..12].try_into().unwrap(),
-                ));
-                // An interior checkpoint is indexed by admission of its enclosing
-                // fragment. Unindexed standalone checkpoints can only be boundaries.
-                stack.extend_from_slice(self.boundary(node.headed_fragments[0]));
+        let mut covered = HashSet::new();
+        let mut fragments = Vec::new();
+        for (idx, members) in &candidates {
+            covered.extend(members.iter().copied());
+            let fragment = &self[*idx];
+            if redundant.contains(idx) {
+                continue;
             }
+            let checkpoints = members
+                .iter()
+                .filter(|&&idx| idx != fragment.head && nodes[idx].depth > 0)
+                .map(|&idx| {
+                    crate::Checkpoint(nodes[idx].meta.hash().as_bytes()[..12].try_into().unwrap())
+                })
+                .collect();
             fragments.push(crate::Fragment {
                 range: crate::FragmentRange {
                     head: *nodes[fragment.head].meta.hash(),
                     boundary: self
-                        .boundary(idx)
+                        .boundary(*idx)
                         .iter()
-                        .map(|&node| *nodes[node].meta.hash())
+                        .map(|&idx| *nodes[idx].meta.hash())
                         .collect(),
                 },
                 checkpoints,
@@ -1100,7 +1139,7 @@ impl FragmentStore {
         }
         let mut loose_commits = Vec::new();
         for (idx, node) in nodes {
-            if eligible[idx.0] && covering_level[idx.0] == 0 {
+            if eligible[idx.0] && !covered.contains(&idx) {
                 loose_commits.push(crate::LooseCommit {
                     commit: *node.meta.hash(),
                     parents: node.meta.parents().iter().copied().collect(),
@@ -1125,6 +1164,18 @@ impl Index<FragmentIdx> for FragmentStore {
     fn index(&self, index: FragmentIdx) -> &Self::Output {
         &self.entries[index.0]
     }
+}
+
+fn fragment_additional_dependencies(
+    range: &FragmentRange,
+    commits: &[CommitMeta],
+) -> BTreeSet<CommitHash> {
+    let members: HashSet<_> = commits.iter().map(|meta| *meta.hash()).collect();
+    commits
+        .iter()
+        .flat_map(|meta| meta.parents().iter().copied())
+        .filter(|hash| !members.contains(hash) && !range.boundary.contains(hash))
+        .collect()
 }
 
 fn sedimentree_depth(hash: &CommitHash) -> usize {
@@ -1309,6 +1360,7 @@ mod tests {
         // The second received fragment carries its own certificate, including
         // evidence shared with the first. No historical signature insertion.
         let incoming = UnverifiedItem::Fragment {
+            additional_dependencies: BTreeSet::new(),
             range: FragmentRange {
                 head: *right.hash(),
                 boundary: BTreeSet::new(),
