@@ -154,7 +154,7 @@ impl<P: Clone> CommitGraph<P> {
         item: crate::VerifiedItem,
         mut payload: impl FnMut(&CommitMeta) -> P,
     ) -> Result<(), crate::IngestError> {
-        for dependency in &item.dependencies {
+        for dependency in item.dependencies() {
             if !self.has_admitted_commit(dependency) {
                 return Err(crate::IngestError::MissingDependency(*dependency));
             }
@@ -204,10 +204,7 @@ impl<P: Clone> CommitGraph<P> {
             return Err(invalid);
         }
         let mut stack = Vec::new();
-        for hash in &item.dependencies {
-            if range.boundary.contains(hash) {
-                continue;
-            }
+        for hash in item.additional_dependencies() {
             if !in_excluded(hash) {
                 return Err(invalid);
             }

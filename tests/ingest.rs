@@ -618,6 +618,13 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
     let verified = incoming.verify().unwrap();
     for verified in [&verified, &streamed] {
         assert_eq!(
+            verified
+                .additional_dependencies()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![*x.hash()]
+        );
+        assert_eq!(
             verified.dependencies().copied().collect::<Vec<_>>(),
             expected_dependencies
         );
@@ -892,6 +899,15 @@ fn extra_dependency_walks_share_history_but_stop_at_the_first_checkpoint() {
     );
 
     let incoming = fragment(&range, members, 1).verify().unwrap();
+    assert_eq!(
+        incoming
+            .additional_dependencies()
+            .copied()
+            .collect::<Vec<_>>(),
+        BTreeSet::from([*x.hash(), *y.hash()])
+            .into_iter()
+            .collect::<Vec<_>>(),
+    );
     assert_eq!(
         incoming.dependencies().copied().collect::<BTreeSet<_>>(),
         BTreeSet::from([*b.hash(), *stop.hash(), *x.hash(), *y.hash()]),

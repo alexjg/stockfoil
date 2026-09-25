@@ -84,6 +84,7 @@ impl UnverifiedItem {
                 verify_metadata(
                     ItemId::Commit(*meta.hash()),
                     dependencies,
+                    BTreeSet::new(),
                     signatures,
                     std::iter::once(Ok(meta)),
                 )
@@ -123,18 +124,21 @@ impl UnverifiedItem {
         if !range.boundary.is_disjoint(&additional_dependencies) {
             return Err(VerificationError::InvalidItem);
         }
-        let dependencies = range
-            .boundary
-            .union(&additional_dependencies)
-            .copied()
-            .collect();
-        verify_metadata(ItemId::Fragment(range), dependencies, signatures, commits)
+        let dependencies = range.boundary.clone();
+        verify_metadata(
+            ItemId::Fragment(range),
+            dependencies,
+            additional_dependencies,
+            signatures,
+            commits,
+        )
     }
 }
 
 fn verify_metadata(
     id: ItemId,
     dependencies: BTreeSet<CommitHash>,
+    additional_dependencies: BTreeSet<CommitHash>,
     signatures: Vec<SignatureEvidence>,
     commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
 ) -> Result<VerifiedItem, VerificationError> {
@@ -149,7 +153,7 @@ fn verify_metadata(
     }
     let sorted = topological_order(&members)?;
     let direct_boundary = match &id {
-        ItemId::Fragment(range) => validate_fragment(range, &dependencies, &members)?,
+        ItemId::Fragment(range) => validate_fragment(range, &additional_dependencies, &members)?,
         ItemId::Commit(_) => BTreeSet::new(),
     };
 
@@ -210,7 +214,8 @@ fn verify_metadata(
             .into_iter()
             .map(|hash| members.remove(&hash).unwrap())
             .collect(),
-        dependencies: dependencies.into_iter().collect(),
+        dependencies,
+        additional_dependencies,
         direct_boundary,
         signatures,
         signature_boundary,
@@ -258,18 +263,20 @@ fn depth(hash: &CommitHash) -> usize {
 /// Canonical placement in excluded history still requires the destination graph.
 fn validate_fragment(
     range: &FragmentRange,
-    dependencies: &BTreeSet<CommitHash>,
+    additional_dependencies: &BTreeSet<CommitHash>,
     members: &BTreeMap<CommitHash, CommitMeta>,
 ) -> Result<BTreeSet<CommitHash>, VerificationError> {
     let head_depth = depth(&range.head);
     if head_depth == 0
         || !members.contains_key(&range.head)
         || range.boundary.iter().any(|hash| depth(hash) < head_depth)
-        || dependencies
-            .difference(&range.boundary)
+        || additional_dependencies
+            .iter()
             .any(|hash| depth(hash) >= head_depth)
         || members.keys().any(|hash| {
-            dependencies.contains(hash) || (*hash != range.head && depth(hash) >= head_depth)
+            range.boundary.contains(hash)
+                || additional_dependencies.contains(hash)
+                || (*hash != range.head && depth(hash) >= head_depth)
         })
     {
         return Err(VerificationError::InvalidItem);
@@ -283,10 +290,11 @@ fn validate_fragment(
             external.insert(*parent);
         }
     }
-    let additional: BTreeSet<_> = dependencies.difference(&range.boundary).copied().collect();
     // Boundaries can also be discovered through excluded history, so they need
     // not be referenced directly. Additional dependencies must be exact.
-    if external != additional || ancestry(members, [range.head]).len() != members.len() {
+    if &external != additional_dependencies
+        || ancestry(members, [range.head]).len() != members.len()
+    {
         return Err(VerificationError::InvalidItem);
     }
     Ok(direct_boundary)
@@ -348,7 +356,10 @@ fn topological_order(
 pub struct VerifiedItem {
     pub(crate) id: ItemId,
     pub(crate) commits: Vec<CommitMeta>,
-    pub(crate) dependencies: Vec<CommitHash>,
+    // Standalone parents or fragment boundaries, separate from external parents
+    // excluded through boundary history.
+    dependencies: BTreeSet<CommitHash>,
+    additional_dependencies: BTreeSet<CommitHash>,
     // Boundary hashes referenced by member parents, computed during verification.
     // Empty for standalone commits. Admission only needs to discover the stops
     // reached through additional dependencies, without rewalking member edges.
@@ -361,9 +372,16 @@ impl VerifiedItem {
     pub fn id(&self) -> &ItemId {
         &self.id
     }
-    /// Sorted, distinct prerequisites whose authentication admission must establish.
+    /// Sorted, distinct prerequisites whose authentication admission must establish:
+    /// standalone parents, or the union of fragment boundaries and additional dependencies.
     pub fn dependencies(&self) -> impl Iterator<Item = &CommitHash> {
-        self.dependencies.iter()
+        self.dependencies.union(&self.additional_dependencies)
+    }
+    /// Exact external member parents other than fragment boundaries, sorted and distinct.
+    /// These must lie in boundary history; admission checks that placement.
+    /// Empty for standalone commits.
+    pub fn additional_dependencies(&self) -> impl Iterator<Item = &CommitHash> {
+        self.additional_dependencies.iter()
     }
     /// Member envelopes in lexicographically smallest parents-first order.
     pub fn commits(&self) -> impl Iterator<Item = &CommitMeta> {

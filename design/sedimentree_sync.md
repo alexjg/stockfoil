@@ -41,7 +41,10 @@ parents(members) - members - boundary
 ```
 
 They account for parents excluded through boundary history, including bypass
-edges. Declared prerequisites are the distinct union of boundaries and extras.
+edges. `VerifiedItem` retains additional dependencies separately from boundaries;
+its `additional_dependencies()` accessor exposes the exact external parents.
+The `dependencies()` accessor still returns all prerequisites as the sorted,
+distinct union of boundaries and extras (or parents for a standalone commit).
 Signatures cover every supplied member; signature targets must themselves be
 members, not prerequisites.
 

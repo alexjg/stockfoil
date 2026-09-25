@@ -171,6 +171,7 @@ fn dependencies_are_sorted_distinct_hashes_not_verification_prerequisites() {
     // Neither parent has been verified or admitted anywhere.
     let verified = incoming.verify().unwrap();
     assert_eq!(verified.id(), &ItemId::Commit(*child.hash()));
+    assert_eq!(verified.additional_dependencies().count(), 0);
     assert_eq!(
         verified.dependencies().copied().collect::<Vec<_>>(),
         expected
@@ -227,6 +228,7 @@ fn standalone_commit_and_fragment_certificates_are_distinct_at_nonzero_depth() {
     let verified = fragment(&range, vec![head.clone()], 1).verify().unwrap();
     assert_eq!(verified.id(), &ItemId::Fragment(range));
     assert_eq!(verified.dependencies().count(), 0);
+    assert_eq!(verified.additional_dependencies().count(), 0);
     assert_eq!(verified.commits().next().unwrap().hash(), head.hash());
 }
 
@@ -292,6 +294,7 @@ fn boundaries_are_exclusive_assumptions_without_external_parent_metadata() {
     // No boundary metadata, evidence for its author, or metadata for its parent.
     let verified = incoming.verify().unwrap();
     assert!(!verified.signature_boundary().contains_key(&author(2)));
+    assert_eq!(verified.additional_dependencies().count(), 0);
     assert_eq!(
         verified.dependencies().copied().collect::<Vec<_>>(),
         vec![*boundary.hash()]
@@ -362,6 +365,13 @@ fn additional_dependencies_are_exact_external_parents_and_sorted_with_boundaries
     assert_eq!(incoming.dependencies().collect::<Vec<_>>(), expected);
     let verified = incoming.verify().unwrap();
     assert_eq!(
+        verified
+            .additional_dependencies()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![*external.hash()]
+    );
+    assert_eq!(
         verified.dependencies().copied().collect::<Vec<_>>(),
         expected
     );
@@ -428,6 +438,13 @@ fn boundaries_discovered_only_through_excluded_history_are_allowed_statelessly()
     .verify()
     .unwrap();
     assert_eq!(verified.dependencies().count(), 3);
+    assert_eq!(
+        verified
+            .additional_dependencies()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![*excluded.hash()]
+    );
     assert_eq!(verified.commits().count(), 1);
     // Whether these dependencies actually occupy the claimed history is checked
     // only by graph admission; the verifier never reads their metadata.
