@@ -61,7 +61,6 @@ fn at_depth(seed: u8, parents: Vec<CommitHash>, wanted: usize) -> CommitMeta {
 fn fragment(range: &FragmentRange, commits: Vec<CommitMeta>, seed: u8) -> UnverifiedItem {
     UnverifiedItem::Fragment {
         range: range.clone(),
-        additional_dependencies: BTreeSet::new(),
         commits,
         signatures: vec![evidence(seed, range.head)],
     }
@@ -171,7 +170,10 @@ fn dependencies_are_sorted_distinct_hashes_not_verification_prerequisites() {
     // Neither parent has been verified or admitted anywhere.
     let verified = incoming.verify().unwrap();
     assert_eq!(verified.id(), &ItemId::Commit(*child.hash()));
-    assert_eq!(verified.additional_dependencies().count(), 0);
+    assert_eq!(
+        verified.external_parents().copied().collect::<Vec<_>>(),
+        expected
+    );
     assert_eq!(
         verified.dependencies().copied().collect::<Vec<_>>(),
         expected
@@ -217,6 +219,8 @@ fn standalone_commit_and_fragment_certificates_are_distinct_at_nonzero_depth() {
     let head = at_depth(1, vec![], 1);
     let commit = signed(&head, 1).verify().unwrap();
     assert_eq!(commit.id(), &ItemId::Commit(*head.hash()));
+    assert_eq!(commit.external_parents().count(), 0);
+    assert_eq!(commit.dependencies().count(), 0);
     assert_eq!(
         commit.signature_boundary()[&author(1)],
         BTreeSet::from([*head.hash()])
@@ -228,12 +232,12 @@ fn standalone_commit_and_fragment_certificates_are_distinct_at_nonzero_depth() {
     let verified = fragment(&range, vec![head.clone()], 1).verify().unwrap();
     assert_eq!(verified.id(), &ItemId::Fragment(range));
     assert_eq!(verified.dependencies().count(), 0);
-    assert_eq!(verified.additional_dependencies().count(), 0);
+    assert_eq!(verified.external_parents().count(), 0);
     assert_eq!(verified.commits().next().unwrap().hash(), head.hash());
 }
 
 #[test]
-fn fragment_members_must_be_exact_and_input_order_does_not_matter() {
+fn fragment_members_must_be_reachable_and_input_order_does_not_matter() {
     let root = at_depth(1, vec![], 0);
     let middle = at_depth(1, vec![*root.hash()], 0);
     let head = at_depth(1, vec![*middle.hash()], 1);
@@ -246,7 +250,6 @@ fn fragment_members_must_be_exact_and_input_order_does_not_matter() {
         vec![],
         vec![head.clone(), root.clone()],
         vec![middle.clone(), root.clone()],
-        vec![head.clone(), middle.clone()],
         vec![root.clone(), middle.clone(), head.clone(), extra],
         vec![root.clone(), middle.clone(), head.clone(), root.clone()],
     ] {
@@ -260,12 +263,25 @@ fn fragment_members_must_be_exact_and_input_order_does_not_matter() {
         vec![head.clone(), root.clone(), middle.clone()],
         vec![middle.clone(), head.clone(), root.clone()],
     ] {
-        let verified = fragment(&range, records, 1).verify().unwrap();
-        assert_eq!(verified.id(), &ItemId::Fragment(range.clone()));
-        assert_eq!(
-            verified.commits().map(|m| *m.hash()).collect::<Vec<_>>(),
-            vec![*root.hash(), *middle.hash(), *head.hash()]
-        );
+        let incoming = fragment(&range, records.clone(), 1);
+        assert_eq!(incoming.dependencies().count(), 0);
+        let streamed = UnverifiedItem::verify_fragment(
+            range.clone(),
+            vec![evidence(1, *head.hash())],
+            records.into_iter().map(Ok),
+        )
+        .unwrap();
+        let owned = incoming.verify().unwrap();
+        for verified in [&owned, &streamed] {
+            assert_eq!(verified.id(), &ItemId::Fragment(range.clone()));
+            assert_eq!(verified.external_parents().count(), 0);
+            assert_eq!(verified.dependencies().count(), 0);
+            assert_eq!(
+                verified.commits().map(|m| *m.hash()).collect::<Vec<_>>(),
+                vec![*root.hash(), *middle.hash(), *head.hash()]
+            );
+        }
+        assert_eq!(owned.signature_boundary(), streamed.signature_boundary());
     }
     let zero_range = FragmentRange {
         head: *root.hash(),
@@ -294,7 +310,10 @@ fn boundaries_are_exclusive_assumptions_without_external_parent_metadata() {
     // No boundary metadata, evidence for its author, or metadata for its parent.
     let verified = incoming.verify().unwrap();
     assert!(!verified.signature_boundary().contains_key(&author(2)));
-    assert_eq!(verified.additional_dependencies().count(), 0);
+    assert_eq!(
+        verified.external_parents().copied().collect::<Vec<_>>(),
+        vec![*boundary.hash()]
+    );
     assert_eq!(
         verified.dependencies().copied().collect::<Vec<_>>(),
         vec![*boundary.hash()]
@@ -316,7 +335,6 @@ fn boundaries_are_exclusive_assumptions_without_external_parent_metadata() {
     assert_eq!(
         UnverifiedItem::Fragment {
             range: range.clone(),
-            additional_dependencies: BTreeSet::new(),
             commits: vec![head.clone()],
             signatures: vec![evidence(1, *head.hash()), evidence(2, *boundary.hash())],
         }
@@ -339,85 +357,88 @@ fn boundaries_are_exclusive_assumptions_without_external_parent_metadata() {
 }
 
 #[test]
-fn additional_dependencies_are_exact_external_parents_and_sorted_with_boundaries() {
+fn external_parents_are_derived_exactly_after_collecting_all_members() {
     let external = at_depth(2, vec![], 0);
     let boundary = at_depth(2, vec![*external.hash()], 1);
-    let head = at_depth(
+    let middle = at_depth(
         1,
         vec![*boundary.hash(), *external.hash(), *external.hash()],
-        1,
+        0,
     );
-    let unrelated = at_depth(3, vec![], 0);
+    let head = at_depth(1, vec![*middle.hash(), *middle.hash()], 1);
     let range = FragmentRange {
         head: *head.hash(),
         boundary: BTreeSet::from([*boundary.hash()]),
     };
-    let item = |additional_dependencies| UnverifiedItem::Fragment {
-        range: range.clone(),
-        additional_dependencies,
-        commits: vec![head.clone()],
-        signatures: vec![evidence(1, *head.hash())],
-    };
-    let incoming = item(BTreeSet::from([*external.hash()]));
     let expected: Vec<_> = BTreeSet::from([*boundary.hash(), *external.hash()])
         .into_iter()
         .collect();
-    assert_eq!(incoming.dependencies().collect::<Vec<_>>(), expected);
-    let verified = incoming.verify().unwrap();
-    assert_eq!(
-        verified
-            .additional_dependencies()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![*external.hash()]
-    );
-    assert_eq!(
-        verified.dependencies().copied().collect::<Vec<_>>(),
-        expected
-    );
-    assert_eq!(
-        verified.commits().map(|m| *m.hash()).collect::<Vec<_>>(),
-        vec![*head.hash()]
-    );
-    for additional in [
-        BTreeSet::new(),                                       // Missing external parent.
-        BTreeSet::from([*unrelated.hash()]),                   // Wrong external parent.
-        BTreeSet::from([*external.hash(), *unrelated.hash()]), // Spurious extra.
-        BTreeSet::from([*external.hash(), *boundary.hash()]),  // Boundary overlap.
-        BTreeSet::from([*external.hash(), *head.hash()]),      // Member overlap.
+    for commits in [
+        vec![head.clone(), middle.clone()], // Parent arrives after its child.
+        vec![middle.clone(), head.clone()],
     ] {
+        let incoming = fragment(&range, commits.clone(), 1);
+        assert_eq!(incoming.dependencies().collect::<Vec<_>>(), expected);
+        let streamed = UnverifiedItem::verify_fragment(
+            range.clone(),
+            vec![evidence(1, *head.hash())],
+            commits.into_iter().map(Ok),
+        )
+        .unwrap();
+        let owned = incoming.verify().unwrap();
+        for verified in [&owned, &streamed] {
+            assert_eq!(
+                verified.external_parents().copied().collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                verified.dependencies().copied().collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                verified.commits().map(|m| *m.hash()).collect::<Vec<_>>(),
+                vec![*middle.hash(), *head.hash()]
+            );
+        }
+        assert_eq!(owned.signature_boundary(), streamed.signature_boundary());
+    }
+
+    // A supplied member ceases to be external, even when it arrives last.
+    // Admission, not stateless verification, detects that it is excluded history.
+    let verified = UnverifiedItem::Fragment {
+        range,
+        commits: vec![head.clone(), middle, external],
+        signatures: vec![evidence(1, *head.hash()), evidence(2, *head.hash())],
+    }
+    .verify()
+    .unwrap();
+    assert_eq!(
+        verified.external_parents().copied().collect::<Vec<_>>(),
+        vec![*boundary.hash()]
+    );
+}
+
+#[test]
+fn external_parent_at_or_above_boundary_depth_requires_a_declared_boundary() {
+    for parent_depth in [1, 2] {
+        let parent = at_depth(2, vec![], parent_depth);
+        let head = at_depth(1, vec![*parent.hash()], 1);
+        let range = FragmentRange {
+            head: *head.hash(),
+            boundary: BTreeSet::new(),
+        };
         assert_eq!(
-            item(additional).verify().unwrap_err(),
+            fragment(&range, vec![head.clone()], 1)
+                .verify()
+                .unwrap_err(),
+            VerificationError::InvalidItem
+        );
+        assert_eq!(
+            UnverifiedItem::verify_fragment(range, vec![evidence(1, *head.hash())], [Ok(head)])
+                .unwrap_err(),
             VerificationError::InvalidItem
         );
     }
-    // Even an exact external parent cannot be an extra at boundary depth.
-    assert_eq!(
-        UnverifiedItem::Fragment {
-            range: FragmentRange {
-                head: *head.hash(),
-                boundary: BTreeSet::new()
-            },
-            additional_dependencies: BTreeSet::from([*boundary.hash(), *external.hash()]),
-            commits: vec![head.clone()],
-            signatures: vec![evidence(1, *head.hash())],
-        }
-        .verify()
-        .unwrap_err(),
-        VerificationError::InvalidItem
-    );
-    // Nor may a supplied low-depth member also be a dependency.
-    assert_eq!(
-        UnverifiedItem::Fragment {
-            range,
-            additional_dependencies: BTreeSet::from([*external.hash()]),
-            commits: vec![external, head.clone()],
-            signatures: vec![evidence(1, *head.hash()), evidence(2, *head.hash())],
-        }
-        .verify()
-        .unwrap_err(),
-        VerificationError::InvalidItem
-    );
 }
 
 #[test]
@@ -431,19 +452,22 @@ fn boundaries_discovered_only_through_excluded_history_are_allowed_statelessly()
             head: *head.hash(),
             boundary: BTreeSet::from([*boundary.hash(), *older_boundary.hash()]),
         },
-        additional_dependencies: BTreeSet::from([*excluded.hash()]),
         commits: vec![head.clone()],
         signatures: vec![evidence(1, *head.hash())],
     }
     .verify()
     .unwrap();
-    assert_eq!(verified.dependencies().count(), 3);
     assert_eq!(
-        verified
-            .additional_dependencies()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![*excluded.hash()]
+        verified.dependencies().copied().collect::<Vec<_>>(),
+        BTreeSet::from([*boundary.hash(), *older_boundary.hash(), *excluded.hash()])
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        verified.external_parents().copied().collect::<Vec<_>>(),
+        BTreeSet::from([*boundary.hash(), *excluded.hash()])
+            .into_iter()
+            .collect::<Vec<_>>()
     );
     assert_eq!(verified.commits().count(), 1);
     // Whether these dependencies actually occupy the claimed history is checked
@@ -474,7 +498,6 @@ fn coverage_crosses_other_authors_and_order_is_lexicographic_topological() {
     for _ in 0..2 {
         let verified = UnverifiedItem::Fragment {
             range: range.clone(),
-            additional_dependencies: BTreeSet::new(),
             commits: records.clone(),
             signatures: signatures.clone(),
         }
@@ -526,7 +549,6 @@ fn coverage_cannot_run_forward_or_sideways_between_members() {
     assert_eq!(
         UnverifiedItem::Fragment {
             range,
-            additional_dependencies: BTreeSet::new(),
             commits: vec![left.clone(), right.clone(), head.clone()],
             signatures: vec![evidence(1, *right.hash()), evidence(2, *head.hash())],
         }
@@ -544,7 +566,6 @@ fn coverage_cannot_run_forward_or_sideways_between_members() {
                 head: *same_author_head.hash(),
                 boundary: BTreeSet::new(),
             },
-            additional_dependencies: BTreeSet::new(),
             commits: vec![left.clone(), same_author_head.clone()],
             signatures: vec![evidence(1, *left.hash())],
         }
@@ -568,7 +589,6 @@ fn fragment_rejects_signature_targets_outside_its_members() {
                 head: *head.hash(),
                 boundary: BTreeSet::new(),
             },
-            additional_dependencies: BTreeSet::new(),
             commits: vec![head.clone(), root],
             signatures: vec![evidence(1, *head.hash()), evidence(1, *later.hash())],
         }

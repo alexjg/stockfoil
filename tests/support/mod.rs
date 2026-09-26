@@ -81,14 +81,8 @@ pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> Unve
     let members: BTreeSet<_> = visited.difference(&excluded).copied().collect();
     let commits: Vec<_> = members.iter().map(|hash| known[hash].clone()).collect();
     let signatures = commits.iter().flat_map(received_signatures).collect();
-    let additional_dependencies = commits
-        .iter()
-        .flat_map(|meta| meta.parents().iter().copied())
-        .filter(|parent| !members.contains(parent) && !boundary.contains(parent))
-        .collect();
     UnverifiedItem::Fragment {
         range: FragmentRange { head, boundary },
-        additional_dependencies,
         commits,
         signatures,
     }

@@ -59,17 +59,9 @@ fn item(meta: &CommitMeta, seed: u8) -> UnverifiedItem {
 }
 
 fn fragment(range: &FragmentRange, commits: Vec<CommitMeta>, seed: u8) -> UnverifiedItem {
-    // Fill transport prerequisites, but never normalize/filter the supplied
-    // members: deliberately malformed fragments must remain malformed.
-    let members: BTreeSet<_> = commits.iter().map(|meta| *meta.hash()).collect();
-    let additional_dependencies = commits
-        .iter()
-        .flat_map(|meta| meta.parents().iter().copied())
-        .filter(|hash| !members.contains(hash) && !range.boundary.contains(hash))
-        .collect();
+    // Do not normalize/filter members: malformed fragments must remain malformed.
     UnverifiedItem::Fragment {
         range: range.clone(),
-        additional_dependencies,
         commits,
         signatures: vec![proof(seed, range.head)],
     }
@@ -563,7 +555,7 @@ fn payload_panic_after_partial_preparation_leaves_all_graph_state_unchanged() {
 }
 
 #[test]
-fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof_member() {
+fn bypass_parent_below_boundary_is_an_external_parent_not_a_payload_or_proof_member() {
     // h -> m -> b -> x, with the bypass m -> x. The normalized h fragment
     // contains only m,h; b's authenticated history supplies x as well as b.
     let x = at_depth(2, vec![], 0);
@@ -582,7 +574,6 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
         expected_dependencies
     );
     let UnverifiedItem::Fragment {
-        additional_dependencies,
         commits,
         signatures,
         ..
@@ -590,7 +581,6 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
     else {
         panic!("expected fragment");
     };
-    assert_eq!(additional_dependencies, &BTreeSet::from([*x.hash()]));
     assert_eq!(commits.len(), 2);
     assert_eq!(signatures.len(), 1);
     assert_eq!(signatures[0].commit, *head.hash());
@@ -598,7 +588,6 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
     // Neither decoder API receives x or b metadata, nor their author's proof.
     let streamed = UnverifiedItem::verify_fragment(
         range.clone(),
-        additional_dependencies.clone(),
         signatures.clone(),
         commits.iter().cloned().map(Ok),
     )
@@ -606,11 +595,8 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
     let verified = incoming.verify().unwrap();
     for verified in [&verified, &streamed] {
         assert_eq!(
-            verified
-                .additional_dependencies()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![*x.hash()]
+            verified.external_parents().copied().collect::<Vec<_>>(),
+            expected_dependencies
         );
         assert_eq!(
             verified.dependencies().copied().collect::<Vec<_>>(),
@@ -669,7 +655,6 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
     let exported = receiver.export(&ItemId::Fragment(range.clone())).unwrap();
     let UnverifiedItem::Fragment {
         range: exported_range,
-        additional_dependencies,
         commits,
         signatures,
     } = &exported
@@ -677,7 +662,6 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
         panic!("expected fragment");
     };
     assert_eq!(exported_range, &range);
-    assert_eq!(additional_dependencies, &BTreeSet::from([*x.hash()]));
     assert_eq!(
         commits.iter().map(|meta| *meta.hash()).collect::<Vec<_>>(),
         vec![*middle.hash(), *head.hash()]
@@ -686,6 +670,10 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
     assert_eq!(signatures[0].author, author(1));
     assert_eq!(signatures[0].commit, *head.hash());
     let exported = exported.verify().unwrap();
+    assert_eq!(
+        exported.external_parents().copied().collect::<Vec<_>>(),
+        expected_dependencies
+    );
     assert_eq!(
         exported.dependencies().copied().collect::<Vec<_>>(),
         expected_dependencies
@@ -721,9 +709,9 @@ fn bypass_parent_below_boundary_is_an_explicit_dependency_not_a_payload_or_proof
 }
 
 #[test]
-fn declaring_an_in_range_parent_as_extra_passes_stateless_checks_but_not_admission() {
+fn omitted_in_range_parent_passes_stateless_checks_but_not_admission_even_when_admitted() {
     // Unlike the valid bypass, x is NOT in b's history. A sender cannot omit
-    // in-range x (and its author's signature) merely by declaring it an extra.
+    // in-range x (and its author's signature), even if x is already admitted.
     let x = at_depth(2, vec![], 0);
     let b = at_depth(2, vec![], 1);
     let middle = at_depth(1, vec![*b.hash(), *x.hash()], 0);
@@ -734,13 +722,29 @@ fn declaring_an_in_range_parent_as_extra_passes_stateless_checks_but_not_admissi
     };
     let incoming = UnverifiedItem::Fragment {
         range: range.clone(),
-        additional_dependencies: BTreeSet::from([*x.hash()]),
         commits: vec![head.clone(), middle.clone()],
         signatures: vec![proof(1, *head.hash())],
     };
+    let streamed = UnverifiedItem::verify_fragment(
+        range.clone(),
+        vec![proof(1, *head.hash())],
+        [Ok(head.clone()), Ok(middle.clone())],
+    )
+    .unwrap();
     let verified = incoming
         .verify()
-        .expect("auth and declared closure are valid");
+        .expect("auth and item-local structure are valid");
+    assert_eq!(
+        streamed.external_parents().collect::<Vec<_>>(),
+        verified.external_parents().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        verified
+            .external_parents()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*b.hash(), *x.hash()])
+    );
     assert_eq!(verified.commits().count(), 2);
     assert_eq!(verified.signature_boundary().len(), 1);
     let mut graph = CommitGraph::new();
@@ -757,6 +761,7 @@ fn declaring_an_in_range_parent_as_extra_passes_stateless_checks_but_not_admissi
         IngestError::MissingDependency(*x.hash()),
     );
     sign(&mut graph, 2, *x.hash());
+    assert!(graph.has_admitted_commit(x.hash()));
     graph.ingest_local_commit(middle.clone(), 3);
     assert!(!graph.has_admitted_commit(middle.hash()));
     assert_ingest_rejected_without_changes(
@@ -764,6 +769,7 @@ fn declaring_an_in_range_parent_as_extra_passes_stateless_checks_but_not_admissi
         verified.clone(),
         IngestError::InvalidFragment,
     );
+    assert_ingest_rejected_without_changes(&mut graph, streamed, IngestError::InvalidFragment);
     assert!(!graph.has_admitted_commit(middle.hash()));
     assert!(!graph.has_admitted_commit(head.hash()));
     assert_not_exportable(&graph, ItemId::Fragment(range.clone()));
@@ -772,7 +778,6 @@ fn declaring_an_in_range_parent_as_extra_passes_stateless_checks_but_not_admissi
     // neither authenticated pending m nor changed its stored payload.
     let valid = UnverifiedItem::Fragment {
         range,
-        additional_dependencies: BTreeSet::new(),
         commits: vec![head.clone(), middle.clone(), x.clone()],
         signatures: vec![proof(1, *head.hash()), proof(2, *x.hash())],
     }
@@ -799,6 +804,14 @@ fn spurious_authenticated_boundary_is_rejected_before_payloads_or_state_changes(
         boundary: BTreeSet::from([*b.hash(), *unrelated.hash()]),
     };
     let verified = fragment(&range, vec![head.clone()], 1).verify().unwrap();
+    assert_eq!(
+        verified.external_parents().copied().collect::<Vec<_>>(),
+        vec![*b.hash()]
+    );
+    assert_eq!(
+        verified.dependencies().copied().collect::<BTreeSet<_>>(),
+        range.boundary
+    );
     let mut graph = CommitGraph::new();
     graph.ingest(item(&b, 1).verify().unwrap(), |_| 1).unwrap();
     graph
@@ -846,14 +859,14 @@ fn supplying_a_boundary_ancestor_as_a_member_is_not_normalized() {
 }
 
 #[test]
-fn extra_dependency_walks_share_history_but_stop_at_the_first_checkpoint() {
+fn external_parent_walks_share_history_but_stop_at_the_first_checkpoint() {
     let older = at_depth(2, vec![], 1);
     let stop = at_depth(2, vec![*older.hash()], 1);
     let shared = at_depth(2, vec![*stop.hash()], 0);
     let x = at_depth(2, vec![*shared.hash()], 0);
     let y = at_depth(2, vec![*shared.hash(), *shared.hash()], 0);
     let b = at_depth(2, vec![*x.hash(), *y.hash()], 1);
-    // Both extras are referenced by an interior member, not the head. Their
+    // Both low-depth external parents are referenced by an interior member. Their
     // walks overlap, and neither may continue through stop to older.
     let middle = at_depth(1, vec![*b.hash(), *x.hash(), *y.hash(), *x.hash()], 0);
     let head = at_depth(1, vec![*middle.hash()], 1);
@@ -888,11 +901,8 @@ fn extra_dependency_walks_share_history_but_stop_at_the_first_checkpoint() {
 
     let incoming = fragment(&range, members, 1).verify().unwrap();
     assert_eq!(
-        incoming
-            .additional_dependencies()
-            .copied()
-            .collect::<Vec<_>>(),
-        BTreeSet::from([*x.hash(), *y.hash()])
+        incoming.external_parents().copied().collect::<Vec<_>>(),
+        BTreeSet::from([*b.hash(), *x.hash(), *y.hash()])
             .into_iter()
             .collect::<Vec<_>>(),
     );
@@ -976,15 +986,19 @@ fn raw_stopped_walk_keeps_a_boundary_reached_through_excluded_history() {
     );
     graph.ingest(verified, |_| 2).unwrap();
     let exported = graph.export(&ItemId::Fragment(range.clone())).unwrap();
-    let UnverifiedItem::Fragment {
-        additional_dependencies,
-        commits,
-        ..
-    } = &exported
-    else {
+    let UnverifiedItem::Fragment { commits, .. } = &exported else {
         panic!("expected fragment");
     };
-    assert_eq!(additional_dependencies, &BTreeSet::from([*x.hash()]));
+    assert_eq!(
+        exported
+            .clone()
+            .verify()
+            .unwrap()
+            .external_parents()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*b.hash(), *x.hash()])
+    );
     assert_eq!(
         commits.iter().map(|meta| *meta.hash()).collect::<Vec<_>>(),
         vec![*middle.hash(), *head.hash()]

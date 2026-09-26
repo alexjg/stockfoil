@@ -187,14 +187,8 @@ fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
         .cloned()
         .collect();
     let signatures = members.iter().map(evidence).collect();
-    let additional_dependencies = members
-        .iter()
-        .flat_map(|meta| meta.parents().iter().copied())
-        .filter(|p| !memberships[&range.head].contains(p) && !range.boundary.contains(p))
-        .collect();
     UnverifiedItem::Fragment {
         range,
-        additional_dependencies,
         commits: members,
         signatures,
     }
@@ -803,17 +797,26 @@ fn long_same_depth_checkpoint_chain_preserves_every_boundary_fragment() {
             })
             .unwrap();
         assert_eq!(members, [range.head]);
+        let exported = graph.export(&ItemId::Fragment(range.clone())).unwrap();
+        assert_eq!(
+            exported
+                .clone()
+                .verify()
+                .unwrap()
+                .external_parents()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            range.boundary
+        );
         let UnverifiedItem::Fragment {
             range: exported_range,
-            additional_dependencies,
             commits,
             ..
-        } = graph.export(&ItemId::Fragment(range.clone())).unwrap()
+        } = exported
         else {
             panic!("checkpoint must export as a fragment")
         };
         assert_eq!(&exported_range, range);
-        assert!(additional_dependencies.is_empty());
         assert_eq!(commits.iter().map(hash).collect::<Vec<_>>(), [range.head]);
     }
     // Verify the actual inventory and admit only dependency-ready items into an
@@ -1004,7 +1007,6 @@ fn redundant_ancestor_boundary_is_retained_even_when_normalization_excludes_its_
         if hash(meta) == hash(&case.commits[3]) {
             let UnverifiedItem::Fragment {
                 range,
-                additional_dependencies,
                 commits,
                 signatures,
             } = &item
@@ -1016,8 +1018,13 @@ fn redundant_ancestor_boundary_is_retained_even_when_normalization_excludes_its_
                 [1, 2].map(|i| hash(&case.commits[i])).into()
             );
             assert_eq!(
-                additional_dependencies,
-                &BTreeSet::from([hash(&case.commits[0])])
+                item.clone()
+                    .verify()
+                    .unwrap()
+                    .external_parents()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                [0, 1, 2].map(|i| hash(&case.commits[i])).into()
             );
             assert_eq!(commits.iter().map(hash).collect::<Vec<_>>(), [hash(meta)]);
             assert_eq!(

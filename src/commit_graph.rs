@@ -105,8 +105,6 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Return hashes of commits with no children in the graph, in hash order.
-    /// Includes local drafts awaiting signatures.
-    /// Iterating all heads takes O(h) time for h heads, without scanning the graph.
     pub fn heads(&self) -> impl Iterator<Item = CommitHash> + '_ {
         self.heads.iter().copied()
     }
@@ -134,7 +132,7 @@ impl<P: Clone> CommitGraph<P> {
     /// item's authenticated dependencies; stateless verification does not imply
     /// that those dependencies are present here.
     ///
-    /// Checks boundary and additional dependencies, then canonical fragment
+    /// Checks range boundary and external parents, then canonical fragment
     /// placement, before graph mutation or payload callbacks. For each newly admitted commit, `payload` supplies application
     /// data or a storage handle; duplicates preserve existing data. Neither this
     /// method nor metadata verification checks the bytes of an opaque `P`.
@@ -178,9 +176,9 @@ impl<P: Clone> CommitGraph<P> {
         Ok(())
     }
 
-    // Stateless verification already proves member reachability, depth, and
-    // declared closure. Only placement in boundary history and boundary stops
-    // reached through omitted dependency metadata remain graph-dependent.
+    // Stateless verification proves member reachability and depth, and derives
+    // exact external parents. Placement in boundary history and boundary stops
+    // reached through omitted metadata remain graph-dependent.
     fn validate_fragment_admission(
         &self,
         item: &crate::VerifiedItem,
@@ -204,17 +202,13 @@ impl<P: Clone> CommitGraph<P> {
             return Err(invalid);
         }
         let mut stack = Vec::new();
-        for hash in item.additional_dependencies() {
+        for hash in item.external_parents() {
             if !in_excluded(hash) {
                 return Err(invalid);
             }
             stack.push(self.by_hash[hash]);
         }
-        // All members are reachable, so every cached direct boundary reference
-        // and every additional dependency is reached by the raw head walk.
-        // Starting at those extras completes boundary discovery without walking
-        // supplied members again. Their ancestors remain in excluded history.
-        let mut boundary = item.direct_boundary.clone();
+        let mut boundary = BTreeSet::new();
         let mut visited = HashSet::new();
         let depth = sedimentree_depth(&range.head);
         while let Some(idx) = stack.pop() {
@@ -425,7 +419,6 @@ impl<P: Clone> CommitGraph<P> {
                 .expect("cover fragment is indexed");
                 Ok(UnverifiedItem::Fragment {
                     range: range.clone(),
-                    additional_dependencies: fragment_additional_dependencies(range, &commits),
                     commits,
                     signatures: self.fragments[fragment]
                         .signature_boundary
@@ -806,19 +799,19 @@ impl<P: Clone> CommitGraph<P> {
                 .map(|idx| self.nodes[idx].meta.clone())
                 .collect();
             UnverifiedItem::Fragment {
-                additional_dependencies: fragment_additional_dependencies(&range, &commits),
                 range,
                 commits,
                 signatures,
             }
         };
+        let item = item.verify().ok()?;
         if !item
             .dependencies()
-            .all(|hash| self.has_admitted_commit(&hash))
+            .all(|hash| self.has_admitted_commit(hash))
         {
             return None;
         }
-        item.verify().ok()
+        Some(item)
     }
 
     fn history_clock(&self, heads: &[CommitHash]) -> Result<Arc<AncestorClock>, DiffError> {
@@ -1162,18 +1155,6 @@ impl Index<FragmentIdx> for FragmentStore {
     }
 }
 
-fn fragment_additional_dependencies(
-    range: &FragmentRange,
-    commits: &[CommitMeta],
-) -> BTreeSet<CommitHash> {
-    let members: HashSet<_> = commits.iter().map(|meta| *meta.hash()).collect();
-    commits
-        .iter()
-        .flat_map(|meta| meta.parents().iter().copied())
-        .filter(|hash| !members.contains(hash) && !range.boundary.contains(hash))
-        .collect()
-}
-
 fn sedimentree_depth(hash: &CommitHash) -> usize {
     hash.as_bytes().iter().take_while(|b| **b == 0).count()
 }
@@ -1356,7 +1337,6 @@ mod tests {
         // The second received fragment carries its own certificate, including
         // evidence shared with the first. No historical signature insertion.
         let incoming = UnverifiedItem::Fragment {
-            additional_dependencies: BTreeSet::new(),
             range: FragmentRange {
                 head: *right.hash(),
                 boundary: BTreeSet::new(),

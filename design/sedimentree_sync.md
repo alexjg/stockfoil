@@ -33,36 +33,43 @@ as the head. Redundant ancestor boundaries are retained. Member enumeration is
 separate: ancestry clocks subtract all boundary history, using sorted per-chain
 node positions to enumerate the remaining intervals.
 
-`UnverifiedItem::Fragment` carries `range`, `additional_dependencies`, member
-metadata, and signature evidence. Additional dependencies are exactly:
+`UnverifiedItem::Fragment` carries `range`, member metadata, and signature
+evidence. Verification derives the exact external parents after collecting all
+member hashes, independently of input order:
 
 ```
-parents(members) - members - boundary
+external_parents = parents(members) - members
 ```
 
-They account for parents excluded through boundary history, including bypass
-edges. `VerifiedItem` retains additional dependencies separately from boundaries;
-its `additional_dependencies()` accessor exposes the exact external parents.
-The `dependencies()` accessor still returns all prerequisites as the sorted,
-distinct union of boundaries and extras (or parents for a standalone commit).
+The **range boundary** describes which history is excluded. **External parents**
+describe where member metadata connects to that history: directly referenced
+boundaries as well as parents excluded through boundary history, including bypass
+edges. A boundary reached only through excluded history is not an external parent.
+`VerifiedItem` retains only external parents alongside the range; its
+`external_parents()` accessor exposes this sorted, distinct set. The
+`dependencies()` accessor returns all admission prerequisites as the sorted,
+distinct union of the range boundary and external parents. For a standalone
+commit, both accessors return its parents. `UnverifiedItem::dependencies()` derives
+the same prerequisites from untrusted metadata and the claimed boundary.
 Signatures cover every supplied member; signature targets must themselves be
 members, not prerequisites.
 
 Verification is stateless: it checks signatures, item-local reachability,
-acyclicity, depth constraints, and exact declared external-parent closure. It
-also retains the boundary hashes directly referenced by supplied members in the
-verified item. It cannot prove that an omitted parent belongs to boundary
-history. Before payload callbacks or mutation, admission therefore:
+acyclicity, and depth constraints. Every external parent at least as deep as the
+head must be in the declared boundary. Low-depth external parents are allowed
+provisionally; verification cannot prove that they belong to boundary history.
+Before payload callbacks or mutation, admission therefore:
 
-1. Requires every declared dependency to be admitted, not merely a local draft.
-2. Checks that extras lie in boundary history and supplied members do not.
-3. Walks only additional dependencies' admitted history to discover further
-   depth-based boundary stops, combining these with the cached direct references
-   and requiring an exact match with the declared boundary.
+1. Requires every admission prerequisite to be admitted, not merely a local draft.
+2. Checks that external parents lie in boundary history and supplied members do not.
+3. Walks backwards from all external parents, stopping at commits at least as deep
+   as the head, and requires those stops to exactly match the range boundary.
+   Directly referenced boundaries stop immediately; other external parents lead
+   through excluded history to further boundary stops.
 
 Admission does not rebuild a member map or rewalk supplied member edges:
-stateless reachability and closure, together with these placement checks,
-already establish exact normalized membership.
+stateless reachability and exact external-parent derivation, together with these
+placement checks, already establish exact normalized membership.
 
 Missing dependencies produce `IngestError::MissingDependency`; incorrect range
 placement produces `IngestError::InvalidFragment`. The caller buffers/retries;
