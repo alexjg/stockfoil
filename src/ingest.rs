@@ -73,10 +73,6 @@ impl UnverifiedItem {
         hashes.into_iter()
     }
 
-    /// Verify already-decoded contents. A standalone commit is valid at any depth;
-    /// its own certificate does not certify a fragment headed at that commit.
-    /// The result assumes authenticated dependencies and canonical fragment
-    /// placement; admission checks both against dependency history before mutation.
     pub fn verify(self) -> Result<VerifiedItem, VerificationError> {
         match self {
             Self::Commit { meta, signatures } => {
@@ -103,18 +99,6 @@ impl UnverifiedItem {
         }
     }
 
-    /// Drive an application-provided decoder one envelope at a time. A decoder
-    /// can reconstruct omitted hashes and compressed parent references using
-    /// `CommitMeta::new` as it proceeds. Map malformed compressed data to
-    /// `VerificationError::InvalidItem`; a decoding error aborts verification.
-    ///
-    /// No graph or dependency provider is consulted. Metadata is retained for
-    /// structural checks and admission, but payload bytes need not be retained.
-    /// Supply the head and normalized members, excluding boundaries and all their
-    /// ancestry. `additional_dependencies` must exactly name external member
-    /// parents other than boundaries. Stateless checks cannot prove that excluded
-    /// parents belong to boundary history, or that supplied members do not;
-    /// admission checks full canonical placement before mutation.
     pub fn verify_fragment(
         range: FragmentRange,
         additional_dependencies: BTreeSet<CommitHash>,
@@ -145,8 +129,6 @@ fn verify_metadata(
     let mut members = BTreeMap::new();
     for meta in commits {
         let meta = meta?;
-        // CommitMeta's private fields and canonical constructor bind its hash to
-        // its contents. A decoder cannot supply an unchecked cached hash.
         if members.insert(*meta.hash(), meta).is_some() {
             return Err(VerificationError::InvalidItem);
         }
@@ -157,8 +139,6 @@ fn verify_metadata(
         ItemId::Commit(_) => BTreeSet::new(),
     };
 
-    // Check every signature, even redundant evidence. Targets must be members;
-    // neither dependency claims nor decoder state extend signature coverage.
     for evidence in &signatures {
         if !members.contains_key(&evidence.commit) {
             return Err(VerificationError::InvalidItem);
