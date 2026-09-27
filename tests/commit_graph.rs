@@ -245,6 +245,31 @@ fn repeated_parent_does_not_duplicate_children_or_visits() {
 }
 
 #[test]
+fn children_index_grows_in_insertion_order_and_clones_independently() {
+    let mut graph = CommitGraph::new();
+    let root_hash = insert(&mut graph, 1, &[]);
+    let root = graph.roots().next().unwrap();
+    assert_eq!(graph.children(root).count(), 0);
+    insert(&mut graph, 2, &[root_hash]);
+    let first = graph.children(root).next().unwrap();
+    let mut cloned = graph.clone();
+
+    // Interleave an unrelated root and repeat parents on a later child.
+    insert(&mut graph, 3, &[]);
+    insert(&mut graph, 4, &[root_hash, root_hash]);
+    let children = graph.children(root).collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0], first);
+    assert!(children[0] < children[1]);
+    assert_eq!(cloned.children(root).collect::<Vec<_>>(), vec![first]);
+
+    insert(&mut cloned, 5, &[root_hash]);
+    insert(&mut cloned, 6, &[root_hash]);
+    assert_eq!(cloned.children(root).count(), 3);
+    assert_eq!(graph.children(root).collect::<Vec<_>>(), children);
+}
+
+#[test]
 fn missing_later_parent_rejects_before_any_graph_mutation() {
     let mut graph = CommitGraph::new();
     let root = insert(&mut graph, 0, &[]);

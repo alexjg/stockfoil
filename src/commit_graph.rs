@@ -45,6 +45,8 @@ pub(crate) struct Node {
     uncached_depth: u8,
     depth: usize,
     parents: Range<usize>,
+    // Unlike parents, children grow as later commits arrive. Unique, in insertion order.
+    children: Vec<NodeIdx>,
     signatures: BTreeMap<Author, Signature>,
     // Fragments which this commit is a head of. Indexed by depth, ascending
     headed_fragments: Vec<FragmentIdx>,
@@ -90,10 +92,9 @@ impl<P: Clone> CommitGraph<P> {
         self.nodes.parents(node_idx).iter().copied()
     }
 
+    /// Return direct children once each, in insertion order, in O(number of children).
     pub fn children(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
-        (0..self.nodes.entries.len())
-            .map(NodeIdx)
-            .filter(move |&child| self.parents(child).any(|parent| parent == node_idx))
+        self.nodes.children(node_idx).iter().copied()
     }
 
     pub fn roots(&self) -> impl Iterator<Item = NodeIdx> {
@@ -257,6 +258,11 @@ impl<P: Clone> CommitGraph<P> {
         self.store.insert(node_idx, data);
         for parent in meta.parents() {
             self.heads.remove(parent);
+            let children = &mut self.nodes[self.by_hash[parent]].children;
+            // Repeated envelope parents must not duplicate the reverse edge.
+            if children.last() != Some(&node_idx) {
+                children.push(node_idx);
+            }
         }
         self.heads.insert(hash);
         self.nodes.entries.push(Node {
@@ -266,6 +272,7 @@ impl<P: Clone> CommitGraph<P> {
             clock: OnceLock::new(),
             uncached_depth: if cache_clock { 0 } else { uncached_depth },
             parents,
+            children: Vec::new(),
             signatures: BTreeMap::new(),
             headed_fragments: Vec::new(),
         });
@@ -953,6 +960,10 @@ impl NodeStore {
 
     fn parents(&self, node: NodeIdx) -> &[NodeIdx] {
         &self.parent_ids[self[node].parents.clone()]
+    }
+
+    fn children(&self, node: NodeIdx) -> &[NodeIdx] {
+        &self[node].children
     }
 
     // Discover raw depth-based stops, including redundant ancestor boundaries.
