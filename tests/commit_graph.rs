@@ -248,25 +248,25 @@ fn repeated_parent_does_not_duplicate_children_or_visits() {
 fn children_index_grows_in_insertion_order_and_clones_independently() {
     let mut graph = CommitGraph::new();
     let root_hash = insert(&mut graph, 1, &[]);
-    let root = graph.roots().next().unwrap();
-    assert_eq!(graph.children(root).count(), 0);
+    let root = graph.roots().next().unwrap().clone();
+    assert_eq!(graph.children(&root).count(), 0);
     insert(&mut graph, 2, &[root_hash]);
-    let first = graph.children(root).next().unwrap();
+    let first = graph.children(&root).next().unwrap().clone();
     let mut cloned = graph.clone();
 
     // Interleave an unrelated root and repeat parents on a later child.
     insert(&mut graph, 3, &[]);
     insert(&mut graph, 4, &[root_hash, root_hash]);
-    let children = graph.children(root).collect::<Vec<_>>();
+    let children = graph.children(&root).collect::<Vec<_>>();
     assert_eq!(children.len(), 2);
-    assert_eq!(children[0], first);
+    assert_eq!(children[0], &first);
     assert!(children[0] < children[1]);
-    assert_eq!(cloned.children(root).collect::<Vec<_>>(), vec![first]);
+    assert_eq!(cloned.children(&root).collect::<Vec<_>>(), vec![&first]);
 
     insert(&mut cloned, 5, &[root_hash]);
     insert(&mut cloned, 6, &[root_hash]);
-    assert_eq!(cloned.children(root).count(), 3);
-    assert_eq!(graph.children(root).collect::<Vec<_>>(), children);
+    assert_eq!(cloned.children(&root).count(), 3);
+    assert_eq!(graph.children(&root).collect::<Vec<_>>(), children);
 }
 
 #[test]
@@ -275,8 +275,8 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     let root = insert(&mut graph, 0, &[]);
     let first = insert(&mut graph, 1, &[root]);
     let second = *meta(2, &[]).hash();
-    let roots_before = graph.roots().collect::<Vec<_>>();
-    let first_idx = graph.children(roots_before[0]).next().unwrap();
+    let roots_before = graph.roots().cloned().collect::<Vec<_>>();
+    let first_commit_hash = graph.children(&roots_before[0]).next().unwrap().clone();
     let heads_before = graph.heads().collect::<Vec<_>>();
     let cover_before = graph.minimal_cover();
     let working_before = graph.view_point();
@@ -291,13 +291,13 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     // when validation encounters the missing second parent.
     let merge = reject_local(&mut graph, meta(3, &[first, second]), 30);
     assert_eq!(graph.heads().collect::<Vec<_>>(), heads_before);
-    assert_eq!(graph.roots().collect::<Vec<_>>(), roots_before);
+    assert_eq!(graph.roots().cloned().collect::<Vec<_>>(), roots_before);
     assert_eq!(
-        graph.children(roots_before[0]).collect::<Vec<_>>(),
-        vec![first_idx]
+        graph.children(&roots_before[0]).cloned().collect::<Vec<_>>(),
+        vec![first_commit_hash]
     );
-    assert_eq!(graph.parents(first_idx).collect::<Vec<_>>(), roots_before);
-    assert_eq!(graph.children(first_idx).count(), 0);
+    assert_eq!(graph.parents(&first_commit_hash).cloned().collect::<Vec<_>>(), roots_before);
+    assert_eq!(graph.children(&first_commit_hash).count(), 0);
     assert_eq!(visited(&graph), vec![0, 1]);
     assert_eq!(visited_since(&graph, &[root]), vec![1]);
     let mut metadata_after = Vec::new();
@@ -325,19 +325,19 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     insert(&mut graph, 2, &[]);
     assert_eq!(visited(&graph), vec![0, 1, 2]);
     assert_heads(&graph, &[first, second]);
-    assert_eq!(graph.children(first_idx).count(), 0);
+    assert_eq!(graph.children(&first_commit_hash).count(), 0);
     assert!(!graph.has_admitted_commit(&merge));
     insert(&mut graph, 3, &[first, second]);
     insert(&mut graph, 4, &[merge]);
     assert_eq!(visited(&graph), vec![0, 1, 2, 3, 4]);
     let roots = graph.roots().collect::<Vec<_>>();
     assert_eq!(roots.len(), 2);
-    let merges = graph.children(first_idx).collect::<Vec<_>>();
+    let merges = graph.children(&first_commit_hash).collect::<Vec<_>>();
     assert_eq!(merges.len(), 1);
     assert_eq!(graph.children(roots[1]).collect::<Vec<_>>(), merges);
     assert_eq!(
         graph.parents(merges[0]).collect::<Vec<_>>(),
-        vec![first_idx, roots[1]]
+        vec![&first_commit_hash, roots[1]]
     );
     assert_eq!(graph.children(merges[0]).count(), 1);
 }

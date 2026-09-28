@@ -88,24 +88,41 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    pub fn parents(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
+    pub fn parents(&self, commit: &CommitHash) -> impl Iterator<Item = &'_ CommitHash> + use<'_, P> {
+        self.by_hash.get(commit)
+            .into_iter()
+            .map(|idx| self.parents_by_node_idx(*idx))
+            .flatten()
+            .map(|idx| self.nodes[idx].meta.hash())
+    }
+
+    pub(crate) fn parents_by_node_idx(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> + use<'_, P> {
         self.nodes.parents(node_idx).iter().copied()
     }
 
     /// Return direct children once each, in insertion order, in O(number of children).
-    pub fn children(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
+    pub fn children(&self, commit: &CommitHash) -> impl Iterator<Item = &'_ CommitHash> {
+        self.by_hash.get(commit)
+            .into_iter()
+            .map(|idx| self.children_by_node_idx(*idx))
+            .flatten()
+            .map(|idx| self.nodes[idx].meta.hash())
+    }
+
+    pub fn children_by_node_idx(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
         self.nodes.children(node_idx).iter().copied()
     }
 
-    pub fn roots(&self) -> impl Iterator<Item = NodeIdx> {
+    pub fn roots(&self) -> impl Iterator<Item = &'_ CommitHash> {
         self.nodes
             .entries
             .iter()
             .enumerate()
             .filter_map(|(i, node)| node.parents.is_empty().then_some(NodeIdx(i)))
+            .map(|idx| self.nodes[idx].meta.hash())
     }
 
-    /// Return hashes of commits with no children in the graph, in hash order.
+    /// Hashes of commits with no children in the graph, in hash order.
     pub fn heads(&self) -> impl Iterator<Item = CommitHash> + '_ {
         self.heads.iter().copied()
     }
@@ -129,25 +146,15 @@ impl<P: Clone> CommitGraph<P> {
             || self.nodes.clock(descendant).contains(chain, ancestor)
     }
 
-    /// Admit verified sedimentree history. The destination must already have the
-    /// item's authenticated dependencies; stateless verification does not imply
-    /// that those dependencies are present here.
+    /// Add the commits in `item` to the `CommitGraph`, after checking that dependencies are met
     ///
-    /// Checks range boundary and external parents, then canonical fragment
-    /// placement, before graph mutation or payload callbacks. For each newly admitted commit, `payload` supplies application
-    /// data or a storage handle; duplicates preserve existing data. Neither this
-    /// method nor metadata verification checks the bytes of an opaque `P`.
-    /// Uses the item's evidence to maintain the published minimal cover.
+    /// The `payload` closure is called for each new commit and is expected to
+    /// return the application-specific payload associated with that commit.
     ///
     /// Payload callbacks run before mutation; if one panics, graph state is
     /// unchanged. Payload-byte validation remains the application's responsibility.
     ///
-    /// ```compile_fail
-    /// use stockfoil::{CommitGraph, UnverifiedItem};
-    /// fn bypass(graph: &mut CommitGraph<()>, item: UnverifiedItem) {
-    ///     graph.ingest(item, |_| ()).unwrap();
-    /// }
-    /// ```
+    /// Returns an error if any dependency is missing or if the fragment is invalid.
     pub fn ingest(
         &mut self,
         item: crate::VerifiedItem,
@@ -219,7 +226,7 @@ impl<P: Clone> CommitGraph<P> {
             if self.nodes[idx].depth >= depth {
                 boundary.insert(*self.nodes[idx].meta.hash());
             } else {
-                stack.extend(self.parents(idx));
+                stack.extend(self.parents_by_node_idx(idx));
             }
         }
         if boundary != range.boundary {
@@ -351,7 +358,7 @@ impl<P: Clone> CommitGraph<P> {
             // External parents are admitted dependencies, not payload members.
             // Repeated internal parent edges count once.
             let parents: HashSet<_> = self
-                .parents(idx)
+                .parents_by_node_idx(idx)
                 .filter(|parent| members.contains(parent))
                 .collect();
             remaining.insert(idx, parents.len());
@@ -528,7 +535,7 @@ impl<P: Clone> CommitGraph<P> {
                 continue;
             }
             excluded[idx.0] = true;
-            stack.extend(self.parents(idx));
+            stack.extend(self.parents_by_node_idx(idx));
         }
 
         for (idx, node) in &self.nodes {
@@ -877,7 +884,7 @@ impl<P: Clone> CommitGraph<P> {
 
 /// An opaque node index, valid only in the graph that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeIdx(usize);
+pub(crate) struct NodeIdx(usize);
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeStore {
