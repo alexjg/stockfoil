@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     Author, CommitHash, NodeIdx, QueryError, WritePermission,
-    ancestor_clock::AncestorClock,
+    ancestor_clock::{AncestorClock, ChainTime},
     commit_graph::{Node, NodeStore},
 };
 
@@ -54,13 +54,13 @@ pub(crate) struct PreparedView {
 }
 
 impl PreparedView {
-    fn contains(&self, idx: NodeIdx, node: &Node) -> bool {
-        self.history.contains(node.chain, idx)
-            && (self.unbounded.contains(node.meta.author())
+    fn contains(&self, node: &Node, time: ChainTime) -> bool {
+        self.history.contains_time(time)
+            && (self.unbounded.contains(node.author())
                 || self
                     .bounded
-                    .get(node.meta.author())
-                    .is_some_and(|clock| clock.contains(node.chain, idx)))
+                    .get(node.author())
+                    .is_some_and(|clock| clock.contains_time(time)))
     }
 }
 
@@ -79,7 +79,8 @@ impl ResolvedViewPoint<'_> {
             .known
             .get(commit)
             .ok_or(QueryError::UnknownCommit(*commit))?;
-        Ok(self.visible.contains(idx, &self.nodes[idx]))
+        let time = self.nodes.chain_time(idx);
+        Ok(self.visible.contains(&self.nodes[idx], time))
     }
 }
 
@@ -101,10 +102,11 @@ impl ViewPointDiff<'_> {
             .get(commit)
             .ok_or(QueryError::UnknownCommit(*commit))?;
         let node = &self.nodes[idx];
+        let time = self.nodes.chain_time(idx);
         Ok(
             match (
-                self.before.contains(idx, node),
-                self.after.contains(idx, node),
+                self.before.contains(node, time),
+                self.after.contains(node, time),
             ) {
                 (true, false) => Vis::Before,
                 (false, true) => Vis::After,
@@ -126,16 +128,17 @@ impl ViewPointDiff<'_> {
             .into_iter()
             .take_while(move |(idx, _)| latest.is_some_and(|last| *idx <= last))
             .filter_map(|(idx, node)| {
+                let time = self.nodes.chain_time(idx);
                 let visibility_delta = match (
-                    self.before.contains(idx, node),
-                    self.after.contains(idx, node),
+                    self.before.contains(node, time),
+                    self.after.contains(node, time),
                 ) {
                     (true, false) => VisDiff::Before,
                     (false, true) => VisDiff::After,
                     _ => return None,
                 };
                 Some(CommitDiff {
-                    commit_id: *node.meta.hash(),
+                    commit_id: *node.hash(),
                     visibility_delta,
                 })
             })

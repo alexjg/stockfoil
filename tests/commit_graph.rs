@@ -25,7 +25,7 @@ fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
 fn ingest_local_signed(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) {
     let hash = *meta.hash();
     graph.ingest_local_commit(meta, value);
-    if !graph.has_admitted_commit(&hash) {
+    if !graph.has_commit(&hash) {
         sign(graph, &key(1), hash);
     }
 }
@@ -42,7 +42,7 @@ fn insert(graph: &mut CommitGraph<u8>, value: u8, parents: &[CommitHash]) -> Com
 fn reject_local(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) -> CommitHash {
     let hash = *meta.hash();
     assert!(catch_unwind(AssertUnwindSafe(|| graph.ingest_local_commit(meta, value))).is_err());
-    assert!(!graph.has_admitted_commit(&hash));
+    assert!(!graph.has_commit(&hash));
     assert_eq!(
         graph.ingest_signature(
             support::author(&key(1)),
@@ -326,7 +326,7 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     assert_eq!(visited(&graph), vec![0, 1, 2]);
     assert_heads(&graph, &[first, second]);
     assert_eq!(graph.children(&first_commit_hash).count(), 0);
-    assert!(!graph.has_admitted_commit(&merge));
+    assert!(!graph.has_commit(&merge));
     insert(&mut graph, 3, &[first, second]);
     insert(&mut graph, 4, &[merge]);
     assert_eq!(visited(&graph), vec![0, 1, 2, 3, 4]);
@@ -355,18 +355,18 @@ fn local_draft_parents_are_sufficient_and_pending_duplicates_preserve_first_payl
     graph.ingest_local_commit(child_meta.clone(), 99);
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_heads(&graph, &[child]);
-    assert!(!graph.has_admitted_commit(&root));
-    assert!(!graph.has_admitted_commit(&child));
+    assert!(!graph.has_commit(&root));
+    assert!(!graph.has_commit(&child));
     assert!(graph.signed_view_point().heads().is_empty());
 
     // Signing a child before its delivered draft parent is allowed, but does
     // not admit it. Duplicates must preserve both payload and signature.
     sign(&mut graph, &key(1), child);
     graph.ingest_local_commit(child_meta, 100);
-    assert!(!graph.has_admitted_commit(&child));
+    assert!(!graph.has_commit(&child));
     sign(&mut graph, &key(1), root);
-    assert!(graph.has_admitted_commit(&root));
-    assert!(graph.has_admitted_commit(&child));
+    assert!(graph.has_commit(&root));
+    assert!(graph.has_commit(&child));
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_eq!(graph.children(graph.roots().next().unwrap()).count(), 1);
 }
@@ -386,10 +386,10 @@ fn signature_before_local_insertion_is_rejected_not_retained() {
     );
     assert!(visited(&graph).is_empty());
     graph.ingest_local_commit(root_meta, 1);
-    assert!(!graph.has_admitted_commit(&root));
+    assert!(!graph.has_commit(&root));
     assert!(graph.signed_view_point().heads().is_empty());
     sign(&mut graph, &key(1), root);
-    assert!(graph.has_admitted_commit(&root));
+    assert!(graph.has_commit(&root));
 }
 
 #[test]

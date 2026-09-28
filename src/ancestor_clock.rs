@@ -25,6 +25,10 @@ impl AncestorClock {
         self.position(chain).is_some_and(|tip| tip >= position)
     }
 
+    pub(crate) fn contains_time(&self, time: ChainTime) -> bool {
+        self.position(time.chain).is_some_and(|tip| tip >= time.position)
+    }
+
     pub(crate) fn entries(&self) -> impl Iterator<Item = (usize, NodeIdx)> + '_ {
         self.entries.iter().copied()
     }
@@ -66,4 +70,11 @@ impl ClockBuilder {
             entries: self.entries.into_iter().collect(),
         }
     }
+}
+
+/// Like a lamport timestamp, but for ancestor clocks
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChainTime{
+    pub(crate) chain: usize,
+    pub(crate) position: NodeIdx,
 }

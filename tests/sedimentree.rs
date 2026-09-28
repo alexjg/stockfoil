@@ -237,7 +237,7 @@ impl<P: Clone> Receiver<P> {
                 match graph.ingest(item.clone(), |meta| payloads.remove(meta.hash()).unwrap()) {
                     Ok(()) => accepted.extend(item.commits().cloned()),
                     Err(IngestError::MissingDependency(h)) => {
-                        assert!(!graph.has_admitted_commit(&h));
+                        assert!(!graph.has_commit(&h));
                         assert_eq!(payloads.len(), item.commits().count());
                         waiting.push((item, payloads));
                     }
@@ -585,7 +585,7 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
     assert_eq!(relay.minimal_cover(), inventory);
     let mut received = BTreeSet::new();
     relay.traverse(|meta, _| {
-        assert!(relay.has_admitted_commit(meta.hash()));
+        assert!(relay.has_commit(meta.hash()));
         received.insert(hash(meta));
         ControlFlow::Continue(())
     });
@@ -1083,7 +1083,7 @@ fn add_signature(
         support::signature(&key, hash(meta)),
     );
     if result == Err(stockfoil::SignatureError::NotPendingLocalCommit(hash(meta))) {
-        assert!(!model.local.contains(meta.hash()) || graph.has_admitted_commit(meta.hash()));
+        assert!(!model.local.contains(meta.hash()) || graph.has_commit(meta.hash()));
     } else {
         result.unwrap();
         model.signatures.insert((author(&key), hash(meta)));
@@ -1116,7 +1116,7 @@ fn signed_received_duplicate_authenticates_local_head_but_child_waits_outside_gr
         verified.dependencies().copied().collect::<Vec<_>>(),
         [hash(head)]
     );
-    assert!(!graph.has_admitted_commit(head.hash()));
+    assert!(!graph.has_commit(head.hash()));
     assert_eq!(
         graph.ingest(verified, |_| panic!("blocked item requests no payload")),
         Err(IngestError::MissingDependency(hash(head)))
@@ -1401,7 +1401,7 @@ fn late_other_author_fork_requires_fresh_evidence_after_certificate_replacement(
         source.export(&stale).unwrap_err(),
         ExportError::NotInMinimalCover(stale.clone())
     );
-    assert!(source.has_admitted_commit(root.hash()));
+    assert!(source.has_commit(root.hash()));
 
     // The old loose certificate is no longer available to a new local fork.
     model.signatures.remove(&(*root.author(), hash(root)));

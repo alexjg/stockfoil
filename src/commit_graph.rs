@@ -9,19 +9,12 @@ use crate::{
     FragmentRange, FragmentReadError, ItemId, ResolveError, ResolvedViewPoint, SedimentreeView,
     Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff,
     WritePermission,
-    ancestor_clock::{AncestorClock, ClockBuilder},
+    ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
     sedimentree::MinimalCover,
     view_point::PreparedView,
 };
 
-/// An in-memory, causally closed commit DAG.
-/// Every stored commit has all its ancestors available. Items with missing
-/// dependencies must be buffered outside the graph.
-///
-/// `P` is opaque: it can be decoded operations, a storage reference, or application
-/// metadata. Signatures authenticate the commit envelope and its payload hash,
-/// not an arbitrary `P`. Callers must validate received payload bytes against
-/// [`CommitMeta::payload_hash`] before ingestion or use.
+/// A single commit graph
 #[derive(Clone)]
 pub struct CommitGraph<P> {
     nodes: NodeStore,
@@ -37,9 +30,9 @@ pub struct CommitGraph<P> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
-    pub(crate) meta: CommitMeta,
+    meta: CommitMeta,
     // Immutable graph-local chain label; NodeIdx is the position on the chain.
-    pub(crate) chain: usize,
+    chain: usize,
     clock: OnceLock<Arc<AncestorClock>>,
     // Longest path since an eagerly cached clock. Query caching can only shorten it.
     uncached_depth: u8,
@@ -66,6 +59,14 @@ impl Node {
                 commit: *self.meta.hash(),
                 signature,
             })
+    }
+
+    pub(crate) fn author(&self) -> &Author {
+        self.meta.author()
+    }
+
+    pub(crate) fn hash(&self) -> &CommitHash {
+        self.meta.hash()
     }
 }
 
@@ -109,7 +110,7 @@ impl<P: Clone> CommitGraph<P> {
             .map(|idx| self.nodes[idx].meta.hash())
     }
 
-    pub fn children_by_node_idx(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
+    pub(crate) fn children_by_node_idx(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> {
         self.nodes.children(node_idx).iter().copied()
     }
 
@@ -161,7 +162,7 @@ impl<P: Clone> CommitGraph<P> {
         mut payload: impl FnMut(&CommitMeta) -> P,
     ) -> Result<(), crate::IngestError> {
         for dependency in item.dependencies() {
-            if !self.has_admitted_commit(dependency) {
+            if !self.has_commit(dependency) {
                 return Err(crate::IngestError::MissingDependency(*dependency));
             }
         }
@@ -332,7 +333,7 @@ impl<P: Clone> CommitGraph<P> {
         if self.nodes[head].depth == 0 {
             return Err(FragmentReadError::NotFragment(range.head));
         }
-        if !self.has_admitted_commit(&range.head) {
+        if !self.has_commit(&range.head) {
             return Err(FragmentReadError::NotPublishable(range.head));
         }
         let fragment_idx = self.nodes[head]
@@ -467,7 +468,7 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Whether metadata is authenticated and parent-closed, not merely local.
-    pub fn has_admitted_commit(&self, hash: &CommitHash) -> bool {
+    pub fn has_commit(&self, hash: &CommitHash) -> bool {
         self.by_hash.contains_key(hash) && !self.pending_local.contains(hash)
     }
 
@@ -493,7 +494,7 @@ impl<P: Clone> CommitGraph<P> {
             .collect();
         while let Some(position) = pending.iter().position(|item| {
             item.dependencies()
-                .all(|hash| self.has_admitted_commit(hash))
+                .all(|hash| self.has_commit(hash))
         }) {
             self.ingest(pending.remove(position), |meta| {
                 other.store[&other.by_hash[meta.hash()]].clone()
@@ -781,7 +782,7 @@ impl<P: Clone> CommitGraph<P> {
             let boundary = self.nodes.fragment_boundary(head, depth);
             if boundary
                 .iter()
-                .any(|&idx| !self.has_admitted_commit(self.nodes[idx].meta.hash()))
+                .any(|&idx| !self.has_commit(self.nodes[idx].meta.hash()))
             {
                 return None;
             }
@@ -821,7 +822,7 @@ impl<P: Clone> CommitGraph<P> {
         let item = item.verify().ok()?;
         if !item
             .dependencies()
-            .all(|hash| self.has_admitted_commit(hash))
+            .all(|hash| self.has_commit(hash))
         {
             return None;
         }
@@ -1007,6 +1008,13 @@ impl NodeStore {
             }
         }
         members
+    }
+
+    pub(crate) fn chain_time(&self, idx: NodeIdx) -> ChainTime {
+        ChainTime {
+            chain: self[idx].chain,
+            position: idx,
+        }
     }
 }
 
@@ -1247,7 +1255,7 @@ mod tests {
             vec![graph.by_hash[head.hash()]]
         );
         assert_eq!(graph.signed_view_point().heads(), &[*head.hash()]);
-        assert!(graph.has_admitted_commit(root.hash()));
+        assert!(graph.has_commit(root.hash()));
         assert!(
             graph
                 .resolve(&old_view)
@@ -1285,8 +1293,8 @@ mod tests {
         graph.ingest_local_commit(head.clone(), 2);
         graph.ingest_local_commit(tip.clone(), 3);
         sign(&mut graph, &key, &tip);
-        assert!(!graph.has_admitted_commit(head.hash()));
-        assert!(!graph.has_admitted_commit(tip.hash()));
+        assert!(!graph.has_commit(head.hash()));
+        assert!(!graph.has_commit(tip.hash()));
         assert!(
             graph.nodes[graph.by_hash[head.hash()]]
                 .headed_fragments
@@ -1300,11 +1308,11 @@ mod tests {
 
         sign(&mut graph, &key, &head);
         assert_ne!(graph.minimal_cover(), old_cover);
-        assert!(graph.has_admitted_commit(tip.hash()));
+        assert!(graph.has_commit(tip.hash()));
         assert!(graph.export(&ItemId::Commit(*root.hash())).is_err());
         let mut peer = CommitGraph::new();
         peer.merge(&graph);
-        assert!(peer.has_admitted_commit(tip.hash()));
+        assert!(peer.has_commit(tip.hash()));
         assert_eq!(peer.minimal_cover(), graph.minimal_cover());
     }
 
@@ -1400,6 +1408,6 @@ mod tests {
         }
         let mut peer = CommitGraph::new();
         peer.merge(&graph);
-        assert!(peer.has_admitted_commit(root.hash()));
+        assert!(peer.has_commit(root.hash()));
     }
 }

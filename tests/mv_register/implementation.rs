@@ -60,7 +60,7 @@ impl MvRegisterMap {
     pub fn publish(&mut self) {
         for hash in std::mem::take(&mut self.pending) {
             // Signing a fragment may already have admitted another pending edit.
-            if !self.graph.has_admitted_commit(&hash) {
+            if !self.graph.has_commit(&hash) {
                 let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
                 self.graph
                     .ingest_signature(self.author(), hash, signature)

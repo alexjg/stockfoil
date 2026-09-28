@@ -278,7 +278,7 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     assert_eq!(peer.heads().collect::<Vec<_>>(), vec![base]);
 
     sign(&mut graph, &key, tip);
-    assert!(!graph.has_admitted_commit(&tip));
+    assert!(!graph.has_commit(&tip));
     assert!(graph.resolve(&batch_working).is_err());
     sign(&mut graph, &key, first);
     let published_signed = graph.signed_view_point();
