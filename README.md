@@ -55,6 +55,21 @@ cargo run -p stockfoil-mv-register
 See its [README](examples/mv-register/README.md) for connecting to an existing
 server. `cargo test` runs the library and example tests.
 
+## Receiving out-of-order history
+
+`CommitGraph::ingest` accepts verified items in any arrival order. It captures
+payloads immediately and queues items whose dependencies are not yet admitted.
+Queued received items are not delivered history: they do not affect viewpoints,
+materialization, or export. Local unsigned drafts remain a separate concept.
+
+Admission, including local signing, automatically wakes waiting items.
+`ingest`, `ingest_signature`, `ingest_local_commit`, and `merge` return an
+`IngestReport` describing admitted certificates, deferred rejections, and the
+remaining pending-item count. Inspect `rejected`: a valid dependency can expose
+an invalid queued fragment without itself being rejected. Admission is atomic
+per item, not per batch. `pending_items()` and `missing_dependencies()` expose
+queue progress. There are currently no queue resource limits.
+
 ## A history lesson
 
 This library grew out of the work I have been doing on

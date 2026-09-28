@@ -58,9 +58,11 @@ Verification is stateless: it checks signatures, item-local reachability,
 acyclicity, and depth constraints. Every external parent at least as deep as the
 head must be in the declared boundary. Low-depth external parents are allowed
 provisionally; verification cannot prove that they belong to boundary history.
-Before payload callbacks or mutation, admission therefore:
+Admission therefore:
 
 1. Requires every admission prerequisite to be admitted, not merely a local draft.
+   Otherwise the verified item and its immediately prepared payloads are queued
+   inside `CommitGraph`, outside delivered history.
 2. Checks that external parents lie in boundary history and supplied members do not.
 3. Walks backwards from all external parents, stopping at commits at least as deep
    as the head, and requires those stops to exactly match the range boundary.
@@ -71,10 +73,58 @@ Admission does not rebuild a member map or rewalk supplied member edges:
 stateless reachability and exact external-parent derivation, together with these
 placement checks, already establish exact normalized membership.
 
-Missing dependencies produce `IngestError::MissingDependency`; incorrect range
-placement produces `IngestError::InvalidFragment`. The caller buffers/retries;
-the graph has no received-item causal queue. These checks are mandatory even
-when a correctly constructed source tree should guarantee the prerequisites.
+These checks are mandatory even when a correctly constructed source tree should
+guarantee the prerequisites. A directly received, ready fragment with incorrect
+placement returns `Err(IngestError::InvalidFragment)` before payload callbacks or
+graph/queue mutation. A queued fragment is checked when its dependencies become
+admitted; invalid placement removes that item and reports a deferred rejection
+without delivering any members. Successful dependencies and independent ready
+items remain admitted, rather than being rolled back. Dependents of a rejected
+item remain pending unless another certificate provides the needed commits.
+
+## Graph-owned received queue
+
+`CommitGraph::ingest` accepts a `VerifiedItem` and a payload callback and returns
+`Result<IngestReport, IngestError>`. Missing dependencies queue the item rather
+than returning an error; `IngestError::MissingDependency` has been removed.
+Unverified input stays outside the graph. The received queue currently has no
+resource limits.
+
+The callback runs immediately for each member not already delivered, even when
+the item must wait. The graph owns the returned payloads, never the callback.
+Exact queued duplicates reuse their payloads without invoking the callback again;
+queue identity includes member hashes and signature evidence, not just `ItemId`,
+so a malformed candidate cannot suppress a distinct valid one for the same range.
+Callbacks complete before any graph or queue mutation; a panic leaves both
+unchanged, though callback side effects are not rolled back. Existing delivered
+payloads always win, including members delivered by local insertion or another
+item after queueing.
+
+Queued items are not delivered, admitted, materialized, or exportable. They do
+not affect heads, viewpoints, traversal, or `visit_changes`. Delivered local
+drafts remain separate working history; they do not satisfy received dependencies
+until admitted. Dependency-indexed waiters wake on every newly admitted hash,
+including all members of a fragment, not only its head. Admissions from local
+signing also wake waiters, and newly ready received items and certifiable local
+work drain automatically without callers resubmitting items.
+
+Every operation that can admit history reports both its own admissions and the
+queued work it unblocks. `ingest_signature` returns
+`Result<IngestReport, SignatureError>`; `ingest_local_commit` and `merge` return
+`IngestReport` directly. The report contains:
+
+* `admitted: Vec<ItemId>`: admitted certificates, including duplicates and local
+  certificates. This is not a delivery stream; materialize with `visit_changes`.
+* `rejected: Vec<IngestRejection>`: deferred per-item failures with `item: ItemId`
+  and `error: IngestError`. Inspect these even when the initiating operation succeeds.
+* `pending: usize`: received items still queued after the call, not local drafts.
+
+`pending_items()` exposes that count, counting exact queued duplicates once.
+`missing_dependencies()` iterates distinct unadmitted prerequisite hashes in
+unspecified order; some may already be delivered as local drafts. These queries
+allow dependency fetching without an external verified-item retry queue.
+Cloning the graph clones queued items and their owned payloads. Export and merge
+do not transfer the sender's queued items; merge can unblock the receiver's queue.
 
 ## Structural summaries and certified covers
 
@@ -90,7 +140,8 @@ does not certify it for export. `CommitGraph::minimal_cover` therefore selects
 only retained fragment certificates plus signed standalone commits, and can
 differ from the minimized structural summary. Export, merge, and certificate
 pruning use this certified cover. Boundary history remains independently
-obtainable, and relays admit items in dependency order.
+obtainable. Relays may ingest items in any arrival order; graph-owned queueing
+ensures admission and delivery occur only once dependencies are admitted.
 
 ## Binary Format
 
@@ -98,7 +149,9 @@ Subduction expects a binary format for commits and for fragments. The idea here
 is that the CRDT knows a lot about how it could be encoded efficiently and 
 how runs of commits can be encoded efficiently. For stockfoil this means that
 we need to provide an extension point for the CRDT implementation to define
-how to encode and decode commits and commit bundles.
+how to encode and decode commits and commit bundles. The received queue and
+operation reports do not change any binary API or wire format; they operate on
+verified metadata and application-owned decoded payloads.
 
 ## Sync without subduction
 

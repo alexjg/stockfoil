@@ -127,8 +127,6 @@ impl Error for VerificationError {
 /// A statelessly verified item could not be admitted at the destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestError {
-    /// The dependency is not authenticated and causally admitted here.
-    MissingDependency(CommitHash),
     /// The claimed fragment range or members do not match dependency history.
     InvalidFragment,
 }
@@ -136,9 +134,6 @@ pub enum IngestError {
 impl fmt::Display for IngestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingDependency(hash) => {
-                write!(f, "missing admitted destination dependency: {hash:?}")
-            }
             Self::InvalidFragment => write!(f, "non-canonical fragment or dependency placement"),
         }
     }

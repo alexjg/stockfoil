@@ -200,24 +200,27 @@ fn validate_fragment(id: SedimentreeId, meta: &Fragment, decoded: &Decoded) -> R
     Ok(())
 }
 
-fn admit(doc: &mut MvRegisterMap, mut incoming: Vec<Decoded>) -> Result<usize> {
-    // Subduction may deliver dependency items after their dependents. Retry from
-    // its storage on the next poll; don't put a causal queue inside CommitGraph.
-    // Stage admissions so a bad fragment cannot partially mutate this batch.
-    let mut graph = doc.graph.clone();
-    while let Some(index) = incoming.iter().position(|decoded| {
-        decoded
-            .item
-            .dependencies()
-            .all(|hash| graph.has_commit(hash))
-    }) {
-        let decoded = incoming.swap_remove(index);
-        graph.ingest(decoded.item, |meta| decoded.payloads[meta.hash()].clone())?;
-    }
-    doc.graph = graph;
-    // All network receipt uses the same materializer as edits and revocations.
+fn admit(doc: &mut MvRegisterMap, incoming: Vec<Decoded>) -> Result<usize> {
+    let result = (|| {
+        for decoded in incoming {
+            // Stockfoil owns deferred payloads and wakes them when dependencies
+            // arrive, regardless of transport order or later local signing.
+            let report = doc
+                .graph
+                .ingest(decoded.item, |meta| decoded.payloads[meta.hash()].clone())?;
+            ensure!(
+                report.rejected.is_empty(),
+                "queued items rejected: {:?}",
+                report.rejected
+            );
+        }
+        Ok(doc.graph.pending_items())
+    })();
+    // Admission is atomic per item, not per batch. Even on error, materialize
+    // any valid items admitted before it, including the dependency that exposed
+    // a queued item's invalid placement.
     doc.materialize();
-    Ok(incoming.len())
+    result
 }
 
 async fn converge(
@@ -484,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_dependencies_wait_outside_the_graph_and_transport_parents_are_checked() {
+    fn missing_dependencies_are_queued_and_transport_parents_are_checked() {
         let mut source = MvRegisterMap::new();
         let root = set_loose(&mut source, "root");
         let child = set_loose(&mut source, "child");
@@ -502,16 +505,11 @@ mod tests {
         peer.set_write_permissions(source.view_point().write_permissions());
         let deferred = admit(&mut peer, vec![wire::decode(&child_bytes).unwrap()]).unwrap();
         assert_eq!(deferred, 1);
+        assert_eq!(peer.graph.pending_items(), 1);
         assert!(!peer.graph.has_commit(&child));
         assert!(peer.get("title").is_empty());
-        let deferred = admit(
-            &mut peer,
-            vec![
-                wire::decode(&child_bytes).unwrap(),
-                wire::decode(&root_bytes).unwrap(),
-            ],
-        )
-        .unwrap();
+        // Only deliver the parent: the graph already owns the child's payload.
+        let deferred = admit(&mut peer, vec![wire::decode(&root_bytes).unwrap()]).unwrap();
         assert_eq!(deferred, 0);
         assert!(peer.graph.has_commit(&root));
         assert!(peer.graph.has_commit(&child));
@@ -553,6 +551,40 @@ mod tests {
             blob.meta(),
         );
         assert!(validate_commit(id, &wrong, &decoded).is_err());
+    }
+
+    #[test]
+    fn deferred_rejection_still_materializes_the_valid_dependency() {
+        let mut source = MvRegisterMap::new();
+        let root = set_loose(&mut source, "root");
+        let root_bytes = wire::encode(
+            &source,
+            &source.graph.export(&ItemId::Commit(root)).unwrap(),
+        )
+        .unwrap();
+        add_checkpoint(&mut source).unwrap();
+        let range = source.graph.minimal_cover().fragments[0].range.clone();
+        let mut malformed = source
+            .graph
+            .export(&ItemId::Fragment(range.clone()))
+            .unwrap();
+        let UnverifiedItem::Fragment { commits, .. } = &mut malformed else {
+            unreachable!()
+        };
+        // Stateless verification accepts the parent's hash as a dependency, but
+        // admission must reject omitting that parent's in-range history.
+        commits.retain(|meta| *meta.hash() == range.head);
+        let malformed = wire::decode(&wire::encode(&source, &malformed).unwrap()).unwrap();
+        let mut peer = MvRegisterMap::new();
+        peer.set_write_permissions(source.view_point().write_permissions());
+        assert_eq!(admit(&mut peer, vec![malformed]).unwrap(), 1);
+        assert!(peer.get("title").is_empty());
+        assert!(admit(&mut peer, vec![wire::decode(&root_bytes).unwrap()]).is_err());
+        assert_eq!(peer.graph.pending_items(), 0);
+        assert!(peer.graph.has_commit(&root));
+        assert!(!peer.graph.has_commit(&range.head));
+        assert_eq!(peer.materialized.assignments.len(), 1);
+        assert_eq!(peer.get("title"), source.get("title"));
     }
 
     #[tokio::test]

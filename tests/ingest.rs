@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
     Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
-    FragmentRange, IngestError, ItemId, Signature, SignatureEvidence, UnverifiedItem, VerifiedItem,
-    Vis, WritePermission,
+    FragmentRange, IngestError, IngestReport, ItemId, MaterializationCursor, Signature,
+    SignatureEvidence, UnverifiedItem, VerifiedItem, Vis, WritePermission,
 };
 
 fn author(seed: u8) -> Author {
@@ -73,10 +73,7 @@ fn assert_ingest_rejected_without_changes(
     expected: IngestError,
 ) {
     let members: Vec<_> = verified.commits().map(|meta| *meta.hash()).collect();
-    let admitted: Vec<_> = members
-        .iter()
-        .map(|hash| graph.has_commit(hash))
-        .collect();
+    let admitted: Vec<_> = members.iter().map(|hash| graph.has_commit(hash)).collect();
     let payloads: Vec<_> = members
         .iter()
         .map(|hash| graph.publishable_commit(hash).map(|(_, payload)| *payload))
@@ -85,6 +82,11 @@ fn assert_ingest_rejected_without_changes(
     let view = graph.view_point();
     let signed = graph.signed_view_point();
     let heads = graph.heads().collect::<Vec<_>>();
+    let pending = graph.pending_items();
+    let missing = graph
+        .missing_dependencies()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let mut callbacks = 0;
     assert_eq!(
         graph.ingest(verified, |_| {
@@ -94,6 +96,14 @@ fn assert_ingest_rejected_without_changes(
         Err(expected)
     );
     assert_eq!(callbacks, 0);
+    assert_eq!(graph.pending_items(), pending);
+    assert_eq!(
+        graph
+            .missing_dependencies()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        missing
+    );
     assert_eq!(graph.minimal_cover(), cover);
     assert_eq!(graph.view_point(), view);
     assert_eq!(graph.signed_view_point(), signed);
@@ -107,11 +117,29 @@ fn assert_ingest_rejected_without_changes(
     }
 }
 
-fn sign<P: Clone>(graph: &mut CommitGraph<P>, seed: u8, hash: CommitHash) {
+fn assert_report(mut report: IngestReport, mut admitted: Vec<ItemId>, pending: usize) {
+    report.admitted.sort();
+    admitted.sort();
+    assert_eq!(report.admitted, admitted);
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert_eq!(report.pending, pending);
+}
+
+fn assert_missing<P: Clone>(graph: &CommitGraph<P>, missing: &[CommitHash]) {
+    assert_eq!(
+        graph
+            .missing_dependencies()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        missing.iter().copied().collect(),
+    );
+}
+
+fn sign<P: Clone>(graph: &mut CommitGraph<P>, seed: u8, hash: CommitHash) -> IngestReport {
     let evidence = proof(seed, hash);
     graph
         .ingest_signature(evidence.author, hash, evidence.signature)
-        .unwrap();
+        .unwrap()
 }
 
 fn assert_not_exportable<P: Clone>(graph: &CommitGraph<P>, id: ItemId) {
@@ -161,22 +189,54 @@ fn stateless_verification_precedes_dependency_admission() {
     let mut destination = CommitGraph::new();
     let before = destination.minimal_cover();
     let mut callbacks = 0;
-    assert_eq!(
-        destination.ingest(verified.clone(), |_| {
-            callbacks += 1;
-        }),
-        Err(IngestError::MissingDependency(*root.hash())),
+    let view = destination.view_point();
+    let signed = destination.signed_view_point();
+    assert_report(
+        destination
+            .ingest(verified.clone(), |_| {
+                callbacks += 1;
+            })
+            .unwrap(),
+        vec![],
+        1,
     );
-    assert_eq!(callbacks, 0);
+    assert_eq!(callbacks, 1);
+    assert_eq!(destination.pending_items(), 1);
+    assert_missing(&destination, &[*root.hash()]);
+    assert_eq!(destination.view_point(), view);
+    assert_eq!(destination.signed_view_point(), signed);
+    destination.traverse(|_, _| panic!("queued history must not be traversed"));
+    destination.traverse_since(&[], |_, _| panic!("queued history must not be traversed"));
+    destination
+        .visit_changes(&MaterializationCursor::new(), &view, |_| {
+            panic!("queued history must not be materialized")
+        })
+        .unwrap();
+    assert_not_exportable(&destination, ItemId::Commit(*child.hash()));
+    assert!(destination.publishable_commit(child.hash()).is_none());
+    let mut relay = CommitGraph::new();
+    assert_report(relay.merge(&destination), vec![], 0);
+    assert!(!relay.has_commit(child.hash()));
     assert_eq!(destination.heads().count(), 0);
     assert_eq!(destination.minimal_cover(), before);
     assert!(!destination.has_commit(child.hash()));
 
-    destination
-        .ingest(item(&root, 1).verify().unwrap(), |_| ())
-        .unwrap();
-    // The same already-verified certificate is now admissible; no reverification.
-    destination.ingest(verified, |_| ()).unwrap();
+    assert_report(
+        destination
+            .ingest(item(&root, 1).verify().unwrap(), |_| ())
+            .unwrap(),
+        vec![ItemId::Commit(*root.hash()), ItemId::Commit(*child.hash())],
+        0,
+    );
+    assert_missing(&destination, &[]);
+    // Already processed certificates are still reported, without preparing payloads.
+    assert_report(
+        destination
+            .ingest(verified, |_| panic!("duplicate payload"))
+            .unwrap(),
+        vec![ItemId::Commit(*child.hash())],
+        0,
+    );
     assert!(destination.has_commit(child.hash()));
     assert!(destination.publishable_commit(child.hash()).is_some());
 }
@@ -194,19 +254,26 @@ fn admission_refuses_unsigned_local_dependencies_even_in_the_working_view() {
     assert_eq!(destination.heads().collect::<Vec<_>>(), vec![*root.hash()]);
     assert!(!destination.has_commit(root.hash()));
     let cover = destination.minimal_cover();
-    assert_eq!(
-        destination.ingest(verified.clone(), |_| panic!(
-            "dependency check must precede payloads"
-        )),
-        Err(IngestError::MissingDependency(*root.hash()))
+    assert_report(
+        destination.ingest(verified.clone(), |_| 8).unwrap(),
+        vec![],
+        1,
     );
+    assert_missing(&destination, &[*root.hash()]);
     assert_eq!(destination.view_point(), working);
     assert_eq!(destination.minimal_cover(), cover);
     assert!(!destination.has_commit(child.hash()));
 
-    sign(&mut destination, 1, *root.hash());
+    assert_report(
+        sign(&mut destination, 1, *root.hash()),
+        vec![ItemId::Commit(*root.hash()), ItemId::Commit(*child.hash())],
+        0,
+    );
     assert!(destination.has_commit(root.hash()));
-    destination.ingest(verified, |_| 8).unwrap();
+    assert!(destination.has_commit(child.hash()));
+    destination
+        .ingest(verified, |_| panic!("already woken"))
+        .unwrap();
     assert_eq!(*destination.publishable_commit(root.hash()).unwrap().1, 7);
     assert_eq!(*destination.publishable_commit(child.hash()).unwrap().1, 8);
 }
@@ -228,18 +295,32 @@ fn fragment_boundary_is_a_real_admission_dependency_not_just_local_metadata() {
     assert_eq!(verified.commits().count(), 1);
     assert_eq!(verified.signature_boundary().len(), 1);
     let mut receiver = CommitGraph::new();
-    assert_eq!(
-        receiver.ingest(verified.clone(), |_| panic!("missing boundary")),
-        Err(IngestError::MissingDependency(*boundary.hash()))
+    let mut callbacks = 0;
+    assert_report(
+        receiver
+            .ingest(verified.clone(), |meta| {
+                assert_eq!(meta.hash(), head.hash());
+                callbacks += 1;
+                3
+            })
+            .unwrap(),
+        vec![],
+        1,
     );
+    assert_eq!(callbacks, 1);
+    assert_missing(&receiver, &[*boundary.hash()]);
     receiver.ingest_local_commit(root.clone(), 1);
     receiver.ingest_local_commit(boundary.clone(), 2);
     assert!(!receiver.has_commit(boundary.hash()));
-    assert_eq!(
-        receiver.ingest(verified.clone(), |_| panic!("unsigned boundary")),
-        Err(IngestError::MissingDependency(*boundary.hash()))
+    assert_report(
+        receiver
+            .ingest(verified.clone(), |_| panic!("exact queued duplicate"))
+            .unwrap(),
+        vec![],
+        1,
     );
-    receiver
+    assert_missing(&receiver, &[*boundary.hash()]);
+    let report = receiver
         .ingest(
             fragment(&base_range, vec![boundary.clone(), root.clone()], 2)
                 .verify()
@@ -247,12 +328,14 @@ fn fragment_boundary_is_a_real_admission_dependency_not_just_local_metadata() {
             |_| panic!("existing local payloads must be preserved"),
         )
         .unwrap();
+    assert_report(
+        report,
+        vec![ItemId::Fragment(base_range), ItemId::Fragment(range)],
+        0,
+    );
     assert!(receiver.has_commit(boundary.hash()));
     receiver
-        .ingest(verified, |meta| {
-            assert_eq!(meta.hash(), head.hash());
-            3
-        })
+        .ingest(verified, |_| panic!("queued payload must be retained"))
         .unwrap();
     assert!(receiver.has_commit(head.hash()));
     assert_eq!(receiver.minimal_cover().fragments.len(), 2);
@@ -612,19 +695,38 @@ fn bypass_parent_below_boundary_is_an_external_parent_not_a_payload_or_proof_mem
     }
 
     let mut receiver = CommitGraph::new();
-    assert_ingest_rejected_without_changes(
-        &mut receiver,
-        verified.clone(),
-        IngestError::MissingDependency(expected_dependencies[0]),
+    let before = receiver.view_point();
+    let mut callbacks = Vec::new();
+    assert_report(
+        receiver
+            .ingest(verified.clone(), |meta| {
+                callbacks.push(*meta.hash());
+                if meta.hash() == middle.hash() { 3 } else { 4 }
+            })
+            .unwrap(),
+        vec![],
+        1,
     );
-    receiver
-        .ingest(item(&x, 2).verify().unwrap(), |_| 1)
-        .unwrap();
+    assert_eq!(callbacks, vec![*middle.hash(), *head.hash()]);
+    assert_eq!(receiver.view_point(), before);
+    assert_missing(&receiver, &expected_dependencies);
+    assert!(!receiver.has_commit(middle.hash()));
+    assert!(!receiver.has_commit(head.hash()));
+    assert_report(
+        receiver
+            .ingest(item(&x, 2).verify().unwrap(), |_| 1)
+            .unwrap(),
+        vec![ItemId::Commit(*x.hash())],
+        1,
+    );
     receiver.ingest_local_commit(b.clone(), 2);
-    assert_ingest_rejected_without_changes(
-        &mut receiver,
-        verified.clone(),
-        IngestError::MissingDependency(*b.hash()),
+    assert_missing(&receiver, &[*b.hash()]);
+    assert_report(
+        receiver
+            .ingest(verified.clone(), |_| panic!("queued duplicate"))
+            .unwrap(),
+        vec![],
+        1,
     );
     let base_range = FragmentRange {
         head: *b.hash(),
@@ -638,14 +740,13 @@ fn bypass_parent_below_boundary_is_an_external_parent_not_a_payload_or_proof_mem
             |_| panic!("preserve existing dependency payloads"),
         )
         .unwrap();
-    let mut callbacks = Vec::new();
+    assert_eq!(receiver.pending_items(), 0);
+    assert_missing(&receiver, &[]);
+    assert!(receiver.has_commit(middle.hash()));
+    assert!(receiver.has_commit(head.hash()));
     receiver
-        .ingest(verified, |meta| {
-            callbacks.push(*meta.hash());
-            if meta.hash() == middle.hash() { 3 } else { 4 }
-        })
+        .ingest(verified, |_| panic!("already admitted by wakeup"))
         .unwrap();
-    assert_eq!(callbacks, vec![*middle.hash(), *head.hash()]);
 
     let exported = receiver.export(&ItemId::Fragment(range.clone())).unwrap();
     let UnverifiedItem::Fragment {
@@ -744,18 +845,36 @@ fn omitted_in_range_parent_passes_stateless_checks_but_not_admission_even_when_a
     assert_eq!(verified.signature_boundary().len(), 1);
     let mut graph = CommitGraph::new();
     graph.ingest(item(&b, 2).verify().unwrap(), |_| 1).unwrap();
-    assert_ingest_rejected_without_changes(
-        &mut graph,
-        verified.clone(),
-        IngestError::MissingDependency(*x.hash()),
+    let mut prepared = Vec::new();
+    assert_report(
+        graph
+            .ingest(verified.clone(), |meta| {
+                prepared.push(*meta.hash());
+                99
+            })
+            .unwrap(),
+        vec![],
+        1,
     );
-    graph.ingest_local_commit(x.clone(), 2);
-    assert_ingest_rejected_without_changes(
-        &mut graph,
-        verified.clone(),
-        IngestError::MissingDependency(*x.hash()),
+    assert_eq!(prepared, vec![*middle.hash(), *head.hash()]);
+    assert_missing(&graph, &[*x.hash()]);
+    assert_report(graph.ingest_local_commit(x.clone(), 2), vec![], 1);
+    assert_report(
+        graph
+            .ingest(verified.clone(), |_| panic!("queued duplicate"))
+            .unwrap(),
+        vec![],
+        1,
     );
-    sign(&mut graph, 2, *x.hash());
+    assert_missing(&graph, &[*x.hash()]);
+    let report = sign(&mut graph, 2, *x.hash());
+    assert_eq!(report.admitted, vec![ItemId::Commit(*x.hash())]);
+    assert_eq!(report.pending, 0);
+    assert_eq!(report.rejected.len(), 1);
+    assert_eq!(report.rejected[0].item, ItemId::Fragment(range.clone()));
+    assert_eq!(report.rejected[0].error, IngestError::InvalidFragment);
+    assert_eq!(graph.pending_items(), 0);
+    assert_missing(&graph, &[]);
     assert!(graph.has_commit(x.hash()));
     graph.ingest_local_commit(middle.clone(), 3);
     assert!(!graph.has_commit(middle.hash()));
@@ -924,6 +1043,434 @@ fn external_parent_walks_share_history_but_stop_at_the_first_checkpoint() {
     let mut relay = CommitGraph::new();
     relay.merge(&graph);
     assert_eq!(relay.minimal_cover(), graph.minimal_cover());
+}
+
+#[test]
+fn reverse_chain_and_fan_in_drain_to_quiescence() {
+    let root = at_depth(1, vec![], 0);
+    let left = at_depth(1, vec![*root.hash()], 0);
+    let right = at_depth(2, vec![*root.hash()], 0);
+    let join = at_depth(1, vec![*left.hash(), *right.hash(), *left.hash()], 0);
+    let tip = at_depth(1, vec![*join.hash()], 0);
+    let mut graph = CommitGraph::new();
+    for (index, (meta, seed)) in [(&tip, 1), (&join, 1), (&right, 2), (&left, 1)]
+        .into_iter()
+        .enumerate()
+    {
+        assert_report(
+            graph
+                .ingest(item(meta, seed).verify().unwrap(), |_| index)
+                .unwrap(),
+            vec![],
+            index + 1,
+        );
+        assert_eq!(graph.pending_items(), index + 1);
+        assert!(!graph.has_commit(meta.hash()));
+    }
+    assert_missing(
+        &graph,
+        &[*root.hash(), *left.hash(), *right.hash(), *join.hash()],
+    );
+    assert_eq!(graph.heads().count(), 0);
+    assert_report(
+        graph
+            .ingest(item(&root, 1).verify().unwrap(), |_| 4)
+            .unwrap(),
+        [&root, &left, &right, &join, &tip]
+            .map(|meta| ItemId::Commit(*meta.hash()))
+            .to_vec(),
+        0,
+    );
+    assert_missing(&graph, &[]);
+    assert_eq!(graph.pending_items(), 0);
+    assert_eq!(graph.heads().collect::<Vec<_>>(), vec![*tip.hash()]);
+    for (meta, payload) in [(&tip, 0), (&join, 1), (&right, 2), (&left, 3), (&root, 4)] {
+        assert!(graph.has_commit(meta.hash()));
+        assert_eq!(*graph.publishable_commit(meta.hash()).unwrap().1, payload);
+    }
+    let mut visited = Vec::new();
+    graph.traverse(|meta, _| {
+        for parent in meta.parents() {
+            assert!(visited.contains(parent));
+        }
+        visited.push(*meta.hash());
+        std::ops::ControlFlow::Continue(())
+    });
+    assert_eq!(visited.len(), 5);
+}
+
+#[test]
+fn local_fragment_signing_wakes_waiters_on_promoted_interior_members() {
+    let root = at_depth(1, vec![], 0);
+    let middle = at_depth(1, vec![*root.hash()], 0);
+    let checkpoint = at_depth(1, vec![*middle.hash()], 1);
+    let child = at_depth(2, vec![*middle.hash()], 0);
+    let tip = at_depth(2, vec![*child.hash()], 0);
+    let range = FragmentRange {
+        head: *checkpoint.hash(),
+        boundary: BTreeSet::new(),
+    };
+    let mut graph = CommitGraph::new();
+    assert_report(
+        graph
+            .ingest(item(&tip, 2).verify().unwrap(), |_| 5)
+            .unwrap(),
+        vec![],
+        1,
+    );
+    assert_report(
+        graph
+            .ingest(item(&child, 2).verify().unwrap(), |_| 4)
+            .unwrap(),
+        vec![],
+        2,
+    );
+    for (meta, payload) in [(&root, 1), (&middle, 2), (&checkpoint, 3)] {
+        assert_report(graph.ingest_local_commit(meta.clone(), payload), vec![], 2);
+        assert!(!graph.has_commit(meta.hash()));
+    }
+    assert_missing(&graph, &[*middle.hash(), *child.hash()]);
+    assert_report(
+        sign(&mut graph, 1, *checkpoint.hash()),
+        vec![
+            ItemId::Fragment(range),
+            ItemId::Commit(*child.hash()),
+            ItemId::Commit(*tip.hash()),
+        ],
+        0,
+    );
+    assert_missing(&graph, &[]);
+    for (meta, payload) in [
+        (&root, 1),
+        (&middle, 2),
+        (&checkpoint, 3),
+        (&child, 4),
+        (&tip, 5),
+    ] {
+        assert!(graph.has_commit(meta.hash()));
+        assert_eq!(*graph.publishable_commit(meta.hash()).unwrap().1, payload);
+    }
+}
+
+#[test]
+fn queued_payloads_survive_cloning_but_later_local_payloads_take_precedence() {
+    let root = at_depth(1, vec![], 0);
+    let child = at_depth(1, vec![*root.hash()], 0);
+    let verified = item(&child, 1).verify().unwrap();
+    let mut original = CommitGraph::new();
+    assert_report(
+        original.ingest(verified.clone(), |_| 99).unwrap(),
+        vec![],
+        1,
+    );
+    assert_report(
+        original
+            .ingest(verified.clone(), |_| panic!("queued duplicate"))
+            .unwrap(),
+        vec![],
+        1,
+    );
+    let mut cloned = original.clone();
+    assert_eq!(cloned.pending_items(), 1);
+    assert_missing(&cloned, &[*root.hash()]);
+    assert_report(original.ingest_local_commit(root.clone(), 7), vec![], 1);
+    assert_report(original.ingest_local_commit(child.clone(), 8), vec![], 1);
+    assert_report(
+        original
+            .ingest(verified, |_| panic!("local payload already delivered"))
+            .unwrap(),
+        vec![],
+        1,
+    );
+    assert_report(
+        sign(&mut original, 1, *root.hash()),
+        vec![ItemId::Commit(*root.hash()), ItemId::Commit(*child.hash())],
+        0,
+    );
+    assert_eq!(*original.publishable_commit(child.hash()).unwrap().1, 8);
+    assert_eq!(cloned.pending_items(), 1);
+    assert!(!cloned.has_commit(root.hash()));
+    assert!(!cloned.has_commit(child.hash()));
+    assert_eq!(cloned.heads().count(), 0);
+    assert_report(
+        cloned
+            .ingest(item(&root, 1).verify().unwrap(), |_| 17)
+            .unwrap(),
+        vec![ItemId::Commit(*root.hash()), ItemId::Commit(*child.hash())],
+        0,
+    );
+    assert_eq!(*cloned.publishable_commit(child.hash()).unwrap().1, 99);
+    assert_eq!(*cloned.publishable_commit(root.hash()).unwrap().1, 17);
+    assert_eq!(*original.publishable_commit(root.hash()).unwrap().1, 7);
+    assert_eq!(original.pending_items(), 0);
+}
+
+#[test]
+fn queueing_a_certificate_for_delivered_local_members_does_not_prepare_payloads() {
+    let root = at_depth(1, vec![], 0);
+    let child = at_depth(1, vec![*root.hash()], 0);
+    let mut graph = CommitGraph::new();
+    assert_report(graph.ingest_local_commit(root.clone(), 7), vec![], 0);
+    assert_report(graph.ingest_local_commit(child.clone(), 8), vec![], 0);
+    let before = graph.view_point();
+    assert_report(
+        graph
+            .ingest(item(&child, 1).verify().unwrap(), |_| {
+                panic!("already delivered local payload")
+            })
+            .unwrap(),
+        vec![],
+        1,
+    );
+    assert_eq!(graph.view_point(), before);
+    assert_missing(&graph, &[*root.hash()]);
+    assert!(!graph.has_commit(child.hash()));
+    assert_report(
+        sign(&mut graph, 1, *root.hash()),
+        vec![ItemId::Commit(*root.hash()), ItemId::Commit(*child.hash())],
+        0,
+    );
+    assert_eq!(*graph.publishable_commit(root.hash()).unwrap().1, 7);
+    assert_eq!(*graph.publishable_commit(child.hash()).unwrap().1, 8);
+}
+
+#[test]
+fn panic_during_queued_payload_preparation_preserves_queue_and_graph() {
+    let boundary = at_depth(1, vec![], 1);
+    let middle = at_depth(1, vec![*boundary.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let other = at_depth(2, vec![*boundary.hash()], 0);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*boundary.hash()]),
+    };
+    let verified = fragment(&range, vec![head.clone(), middle.clone()], 1)
+        .verify()
+        .unwrap();
+    let mut graph = CommitGraph::new();
+    graph
+        .ingest(item(&other, 2).verify().unwrap(), |_| 10)
+        .unwrap();
+    let before = graph.view_point();
+    let signed = graph.signed_view_point();
+    let cover = graph.minimal_cover();
+    let mut calls = Vec::new();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graph.ingest(verified.clone(), |meta| {
+                calls.push(*meta.hash());
+                assert_ne!(meta.hash(), head.hash(), "second queued payload fails");
+                99
+            })
+        }))
+        .is_err()
+    );
+    assert_eq!(calls, vec![*middle.hash(), *head.hash()]);
+    assert_eq!(graph.pending_items(), 1);
+    assert_missing(&graph, &[*boundary.hash()]);
+    assert_eq!(graph.view_point(), before);
+    assert_eq!(graph.signed_view_point(), signed);
+    assert_eq!(graph.minimal_cover(), cover);
+    assert_eq!(graph.heads().count(), 0);
+    for meta in [&middle, &head, &other] {
+        assert!(!graph.has_commit(meta.hash()));
+        assert!(graph.publishable_commit(meta.hash()).is_none());
+    }
+    calls.clear();
+    assert_report(
+        graph
+            .ingest(verified, |meta| {
+                calls.push(*meta.hash());
+                7
+            })
+            .unwrap(),
+        vec![],
+        2,
+    );
+    assert_eq!(calls, vec![*middle.hash(), *head.hash()]);
+    assert_report(
+        graph
+            .ingest(item(&boundary, 1).verify().unwrap(), |_| 1)
+            .unwrap(),
+        vec![
+            ItemId::Commit(*boundary.hash()),
+            ItemId::Commit(*other.hash()),
+            ItemId::Fragment(range),
+        ],
+        0,
+    );
+    assert_eq!(*graph.publishable_commit(middle.hash()).unwrap().1, 7);
+    assert_eq!(*graph.publishable_commit(head.hash()).unwrap().1, 7);
+    assert_eq!(*graph.publishable_commit(other.hash()).unwrap().1, 10);
+}
+
+#[test]
+fn distinct_queued_certificates_with_the_same_id_are_both_processed() {
+    let boundary = at_depth(1, vec![], 1);
+    let middle = at_depth(1, vec![*boundary.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*boundary.hash()]),
+    };
+    let first = fragment(&range, vec![head.clone(), middle.clone()], 1)
+        .verify()
+        .unwrap();
+    let second = UnverifiedItem::Fragment {
+        range: range.clone(),
+        commits: vec![head.clone(), middle.clone()],
+        signatures: vec![proof(1, *head.hash()), proof(1, *middle.hash())],
+    }
+    .verify()
+    .unwrap();
+    let mut graph = CommitGraph::new();
+    for (index, verified) in [first, second].into_iter().enumerate() {
+        let mut calls = 0;
+        assert_report(
+            graph
+                .ingest(verified.clone(), |_| {
+                    calls += 1;
+                    7
+                })
+                .unwrap(),
+            vec![],
+            index + 1,
+        );
+        assert_eq!(calls, 2);
+        assert_report(
+            graph
+                .ingest(verified, |_| panic!("exact queued duplicate"))
+                .unwrap(),
+            vec![],
+            index + 1,
+        );
+    }
+    assert_report(
+        graph
+            .ingest(item(&boundary, 1).verify().unwrap(), |_| 1)
+            .unwrap(),
+        vec![
+            ItemId::Commit(*boundary.hash()),
+            ItemId::Fragment(range.clone()),
+            ItemId::Fragment(range),
+        ],
+        0,
+    );
+    assert!(graph.has_commit(head.hash()));
+}
+
+#[test]
+fn deferred_rejection_does_not_suppress_same_id_valid_item_or_other_ready_items() {
+    // The malformed certificate omits x, which is not in b's history. Both
+    // certificates have the same ItemId, so queue identity cannot be just ItemId.
+    let x = at_depth(2, vec![], 0);
+    let b = at_depth(2, vec![], 1);
+    let middle = at_depth(1, vec![*b.hash(), *x.hash()], 0);
+    let head = at_depth(1, vec![*middle.hash()], 1);
+    let other = at_depth(2, vec![*b.hash()], 0);
+    let absent = at_depth(3, vec![], 0);
+    let waiting = at_depth(3, vec![*absent.hash()], 0);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::from([*b.hash()]),
+    };
+    let malformed = fragment(&range, vec![head.clone(), middle.clone()], 1)
+        .verify()
+        .unwrap();
+    let valid = UnverifiedItem::Fragment {
+        range: range.clone(),
+        commits: vec![head.clone(), middle.clone(), x.clone()],
+        signatures: vec![proof(1, *head.hash()), proof(2, *x.hash())],
+    }
+    .verify()
+    .unwrap();
+    // Exercise receipt, merge, and local signing as draining/reporting entrypoints,
+    // and both insertion orders for colliding identities.
+    for trigger in ["ingest", "merge", "sign"] {
+        for valid_first in [false, true] {
+            let mut graph = CommitGraph::new();
+            graph.ingest(item(&x, 2).verify().unwrap(), |_| 2).unwrap();
+            let items = if valid_first {
+                [valid.clone(), malformed.clone()]
+            } else {
+                [malformed.clone(), valid.clone()]
+            };
+            for (index, verified) in items.into_iter().enumerate() {
+                assert_report(graph.ingest(verified, |_| 3).unwrap(), vec![], index + 1);
+            }
+            assert_report(
+                graph
+                    .ingest(item(&other, 2).verify().unwrap(), |_| 4)
+                    .unwrap(),
+                vec![],
+                3,
+            );
+            assert_report(
+                graph
+                    .ingest(item(&waiting, 3).verify().unwrap(), |_| 5)
+                    .unwrap(),
+                vec![],
+                4,
+            );
+            assert_missing(&graph, &[*b.hash(), *absent.hash()]);
+            let report = match trigger {
+                "merge" => {
+                    let mut source = CommitGraph::new();
+                    source.ingest(item(&b, 2).verify().unwrap(), |_| 1).unwrap();
+                    graph.merge(&source)
+                }
+                "sign" => {
+                    assert_report(graph.ingest_local_commit(b.clone(), 1), vec![], 4);
+                    sign(&mut graph, 2, *b.hash())
+                }
+                _ => graph.ingest(item(&b, 2).verify().unwrap(), |_| 1).unwrap(),
+            };
+            let mut admitted = report.admitted;
+            admitted.sort();
+            let base = if trigger == "sign" {
+                ItemId::Fragment(FragmentRange {
+                    head: *b.hash(),
+                    boundary: BTreeSet::new(),
+                })
+            } else {
+                ItemId::Commit(*b.hash())
+            };
+            let mut expected = vec![
+                base,
+                ItemId::Commit(*other.hash()),
+                ItemId::Fragment(range.clone()),
+            ];
+            expected.sort();
+            assert_eq!(admitted, expected);
+            assert_eq!(report.rejected.len(), 1);
+            assert_eq!(report.rejected[0].item, ItemId::Fragment(range.clone()));
+            assert_eq!(report.rejected[0].error, IngestError::InvalidFragment);
+            assert_eq!(report.pending, 1);
+            assert_eq!(graph.pending_items(), 1);
+            assert_missing(&graph, &[*absent.hash()]);
+            for (meta, payload) in [(&b, 1), (&x, 2), (&middle, 3), (&head, 3), (&other, 4)] {
+                assert!(graph.has_commit(meta.hash()));
+                assert_eq!(*graph.publishable_commit(meta.hash()).unwrap().1, payload);
+            }
+            assert!(!graph.has_commit(waiting.hash()));
+            assert_ingest_rejected_without_changes(
+                &mut graph,
+                malformed.clone(),
+                IngestError::InvalidFragment,
+            );
+            assert_report(
+                graph
+                    .ingest(item(&absent, 3).verify().unwrap(), |_| 6)
+                    .unwrap(),
+                vec![
+                    ItemId::Commit(*absent.hash()),
+                    ItemId::Commit(*waiting.hash()),
+                ],
+                0,
+            );
+            assert_eq!(*graph.publishable_commit(waiting.hash()).unwrap().1, 5);
+        }
+    }
 }
 
 #[test]

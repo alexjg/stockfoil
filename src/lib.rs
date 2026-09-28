@@ -3,6 +3,15 @@
 //! `stockfoil` is a library for storing and synchronizing authenticated commit
 //! graphs.
 //!
+//! # Received history
+//!
+//! [`CommitGraph::ingest`] owns verified items and their payloads immediately,
+//! queuing them when admitted dependencies are missing. Queued items are not
+//! delivered graph history. Admission, including local signing, automatically
+//! wakes their dependents. Check [`IngestReport::rejected`] after ingestion,
+//! signing, local insertion, and merge for deferred graph-dependent failures;
+//! valid dependencies are not rolled back. The queue currently has no limits.
+//!
 //! # Materialization
 //!
 //! Use [`CommitGraph::visit_changes`] to build and update a CRDT view. Keep a
@@ -28,7 +37,10 @@ pub use errors::{
     SignatureError, VerificationError,
 };
 mod ingest;
-pub use ingest::{ItemId, SignatureEvidence, UnverifiedItem, VerifiedItem};
+pub use ingest::{
+    IngestRejection, IngestReport, ItemId, SignatureEvidence, UnverifiedItem, VerifiedItem,
+};
+mod pending_ingest;
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;

@@ -1,6 +1,6 @@
 //! Authentication, permission snapshots, and verified receipt boundaries.
-//! Received history is authenticated before admission; local work must arrive
-//! in causal order and can wait inside the graph only for authentication.
+//! Received history is authenticated before buffering and waits for admitted
+//! dependencies; local work must arrive in causal order and can wait for authentication.
 mod support;
 
 use support::{author, key, sign, signature};
@@ -13,9 +13,9 @@ use std::{
 
 use ed25519_dalek::SigningKey;
 use stockfoil::{
-    BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, IngestError, ItemId,
-    QueryError, Signature, SignatureError, SignatureEvidence, UnverifiedItem,
-    VerificationError, ViewPoint, Vis, WritePermission,
+    BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, ItemId, QueryError,
+    Signature, SignatureError, SignatureEvidence, UnverifiedItem, VerificationError, ViewPoint,
+    Vis, WritePermission,
 };
 
 fn commit(key: &SigningKey, value: u8, parents: &[CommitHash]) -> CommitMeta {
@@ -190,25 +190,50 @@ fn admission_excludes_unknown_and_pending_local_commits() {
     let mut graph = graph.clone();
     assert!(!graph.has_commit(root.hash()));
     assert!(!graph.has_commit(child.hash()));
-    assert!(matches!(
-        graph.ingest(child_receipt.clone(), |_| panic!("dependency must be admitted")),
-        Err(IngestError::MissingDependency(hash)) if hash == *root.hash()
-    ));
+    let report = graph
+        .ingest(child_receipt, |_| {
+            panic!("preserve delivered local payload")
+        })
+        .unwrap();
+    assert!(report.admitted.is_empty());
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 1);
+    assert_eq!(graph.pending_items(), 1);
+    assert_eq!(
+        graph
+            .missing_dependencies()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*root.hash()])
+    );
     assert!(graph.minimal_cover().loose_commits.is_empty());
     assert!(graph.minimal_cover().fragments.is_empty());
 
     // Received evidence promotes local copies without replacing their payloads.
-    graph
+    let report = graph
         .ingest(receipt(root.clone(), &alice).verify().unwrap(), |_| {
             panic!("preserve local payload")
         })
         .unwrap();
+    assert_eq!(
+        report.admitted.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([ItemId::Commit(*root.hash()), ItemId::Commit(*child.hash())])
+    );
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 0);
+    assert_eq!(graph.pending_items(), 0);
+    assert!(graph.missing_dependencies().next().is_none());
     assert!(graph.has_commit(root.hash()));
-    assert!(!graph.has_commit(child.hash()));
-    graph
-        .ingest(child_receipt, |_| panic!("preserve local payload"))
-        .unwrap();
     assert!(graph.has_commit(child.hash()));
+
+    let duplicate = graph
+        .ingest(receipt(child.clone(), &alice).verify().unwrap(), |_| {
+            panic!("duplicate receipt must preserve its payload")
+        })
+        .unwrap();
+    assert_eq!(duplicate.admitted, [ItemId::Commit(*child.hash())]);
+    assert!(duplicate.rejected.is_empty());
+    assert_eq!(duplicate.pending, 0);
 
     // Duplicate local insertion must not demote admitted history.
     graph.ingest_local_commit(root.clone(), 99);
@@ -223,6 +248,77 @@ fn admission_excludes_unknown_and_pending_local_commits() {
     peer.merge(&graph);
     assert!(peer.has_commit(root.hash()));
     assert!(peer.has_commit(child.hash()));
+}
+
+#[test]
+fn signing_or_merging_a_local_parent_drains_received_descendants() {
+    let alice = key(1);
+    let root = commit(&alice, 1, &[]);
+    let child = commit(&alice, 2, &[*root.hash()]);
+    let tip = commit(&alice, 3, &[*child.hash()]);
+    for via_merge in [false, true] {
+        let mut graph = CommitGraph::new();
+        grant(&mut graph, &[&alice]);
+        let report = graph.ingest_local_commit(root.clone(), 1);
+        assert!(report.admitted.is_empty());
+        assert!(report.rejected.is_empty());
+        assert_eq!(report.pending, 0);
+        let working = graph.view_point();
+        for (meta, value, pending) in [(&tip, 3, 1), (&child, 2, 2)] {
+            let mut callbacks = 0;
+            let report = graph
+                .ingest(receipt(meta.clone(), &alice).verify().unwrap(), |_| {
+                    callbacks += 1;
+                    value
+                })
+                .unwrap();
+            assert_eq!(callbacks, 1);
+            assert!(report.admitted.is_empty());
+            assert!(report.rejected.is_empty());
+            assert_eq!(report.pending, pending);
+            assert_eq!(graph.view_point(), working);
+        }
+        assert_eq!(graph.pending_items(), 2);
+        assert_eq!(
+            graph
+                .missing_dependencies()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([*root.hash(), *child.hash()])
+        );
+        let report = if via_merge {
+            let mut source = CommitGraph::new();
+            source
+                .ingest(receipt(root.clone(), &alice).verify().unwrap(), |_| 99)
+                .unwrap();
+            graph.merge(&source)
+        } else {
+            graph
+                .ingest_signature(
+                    author(&alice),
+                    *root.hash(),
+                    signature(&alice, *root.hash()),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            report.admitted.into_iter().collect::<BTreeSet<_>>(),
+            [&root, &child, &tip]
+                .map(|meta| ItemId::Commit(*meta.hash()))
+                .into()
+        );
+        assert!(report.rejected.is_empty());
+        assert_eq!(report.pending, 0);
+        assert_eq!(graph.pending_items(), 0);
+        assert!(graph.missing_dependencies().next().is_none());
+        assert_eq!(graph.signed_view_point().heads(), &[*tip.hash()]);
+        let mut values = Vec::new();
+        graph.traverse(|_, value| {
+            values.push(*value);
+            ControlFlow::Continue(())
+        });
+        assert_eq!(values, [1, 2, 3]); // Never replace the delivered local payload.
+    }
 }
 
 #[test]
@@ -244,20 +340,48 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
         Ok(Vis::Neither)
     );
 
-    // Buffer the unverified envelope outside the graph until all parents exist.
-    let pending = receipt(frontier.clone(), &bob);
-    let pending = pending.verify().unwrap();
-    assert!(matches!(
-        graph.ingest(pending.clone(), |_| panic!("missing dependency must precede payload lookup")),
-        Err(IngestError::MissingDependency(hash)) if hash == *missing.hash()
-    ));
+    // Verification and payload capture happen now, but the buffered frontier
+    // cannot supply permission evidence until its dependencies are admitted.
+    let pending = receipt(frontier.clone(), &bob).verify().unwrap();
+    let mut callbacks = 0;
+    let report = graph
+        .ingest(pending, |_| {
+            callbacks += 1;
+            3
+        })
+        .unwrap();
+    assert_eq!(callbacks, 1);
+    assert!(report.admitted.is_empty());
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 1);
+    assert_eq!(
+        graph
+            .missing_dependencies()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*missing.hash()])
+    );
     assert_eq!(graph.view_point(), before); // Reading its parent link isn't proof.
     assert_eq!(
         graph.diff(&before, &before).unwrap().visibility(c.hash()),
         Ok(Vis::Neither)
     );
+    assert!(!graph.has_commit(frontier.hash()));
+    assert!(graph.publishable_commit(frontier.hash()).is_none());
+    assert!(graph.export(&ItemId::Commit(*frontier.hash())).is_err());
+    let mut delivered = Vec::new();
+    graph.traverse(|meta, _| {
+        delivered.push(*meta.hash());
+        ControlFlow::Continue(())
+    });
+    assert_eq!(delivered, vec![*c.hash()]);
+    let unavailable = ViewPoint::from_parts(vec![*frontier.hash()], HashMap::new());
+    assert_eq!(
+        graph.diff(&before, &unavailable).unwrap_err(),
+        DiffError::MissingCommit(*frontier.hash())
+    );
     support::receive_commit(&mut graph, missing, 2);
-    graph.ingest(pending, |_| 3).unwrap();
+    assert_eq!(graph.pending_items(), 0);
     let after = graph.view_point();
     let diff = graph.diff(&before, &after).unwrap();
     // The newly delivered frontier reveals an older commit, not its own denied
@@ -347,7 +471,10 @@ fn historical_views_use_delivered_history_independently_of_admission() {
         let current = graph.view_point();
         assert!(current.write_permissions().is_empty());
         assert_eq!(
-            graph.diff(&current, &current).unwrap().visibility(root.hash()),
+            graph
+                .diff(&current, &current)
+                .unwrap()
+                .visibility(root.hash()),
             Ok(Vis::Neither)
         );
     }
@@ -533,15 +660,17 @@ fn received_commits_need_their_own_authors_signature_coverage() {
     ));
     // Even a directly signed child cannot enter before its verified parent.
     let pending = receipt(child.clone(), &alice).verify().unwrap();
-    assert!(matches!(
-        graph.ingest(pending.clone(), |_| panic!("missing dependency must precede payload lookup")),
-        Err(IngestError::MissingDependency(hash)) if hash == *root.hash()
-    ));
+    let report = graph.ingest(pending, |_| 2).unwrap();
+    assert!(report.admitted.is_empty());
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 1);
     assert_eq!(graph.signed_view_point(), before);
+    assert_eq!(graph.view_point(), before);
 
     support::receive_commit(&mut graph, root.clone(), 1);
+    assert_eq!(graph.pending_items(), 0);
     assert!(graph.has_commit(root.hash()));
-    graph.ingest(pending, |_| 2).unwrap();
+    assert!(graph.has_commit(child.hash()));
     let admitted = graph.signed_view_point();
     let diff = graph.diff(&before, &admitted).unwrap();
     for meta in [&root, &child] {

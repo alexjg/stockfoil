@@ -27,6 +27,33 @@ pub enum ItemId {
     Fragment(FragmentRange),
 }
 
+/// Outcomes of ingestion and any queued work it unblocked.
+///
+/// Returned by received ingestion, local insertion, signing, and merge. A valid
+/// dependency remains admitted even if it unlocks an invalid queued fragment;
+/// inspect `rejected` on every operation which can admit history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestReport {
+    /// Certificates admitted by this call, including local certificates and
+    /// duplicates. This is not a stream of newly delivered commits: use
+    /// [`crate::CommitGraph::visit_changes`] for materialization.
+    pub admitted: Vec<ItemId>,
+    /// Previously queued items which failed graph-dependent admission checks.
+    /// These items have been removed from the queue, without delivering any of
+    /// their members. Their dependents remain pending unless another item can
+    /// provide the missing commits.
+    pub rejected: Vec<IngestRejection>,
+    /// Number of received items still waiting after this call (not local drafts).
+    pub pending: usize,
+}
+
+/// A queued item rejected once its dependencies became admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestRejection {
+    pub item: ItemId,
+    pub error: crate::IngestError,
+}
+
 /// Owned, decoded transport contents, convenient for in-memory exchange.
 /// This is not a wire format. Streaming/application-specific decoders can use
 /// [`Self::verify_fragment`] without first constructing a vector of commits.

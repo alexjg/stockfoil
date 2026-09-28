@@ -6,10 +6,11 @@ use std::{
 
 use crate::{
     Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
-    FragmentRange, FragmentReadError, ItemId, MaterializationChange, MaterializationCursor,
-    SedimentreeView, Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint,
-    ViewPointDiff, Vis, VisDiff, WritePermission,
+    FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId,
+    MaterializationChange, MaterializationCursor, SedimentreeView, Signature, SignatureError,
+    SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
+    pending_ingest::{PendingIngest, PreparedItem},
     sedimentree::MinimalCover,
 };
 
@@ -25,6 +26,8 @@ pub struct CommitGraph<P> {
     // Local commits which we are waiting for the caller to provide signatures
     // over
     pending_local: HashSet<CommitHash>,
+    // Verified received items and owned payloads, not yet delivered history.
+    pending_ingest: PendingIngest<P>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +84,7 @@ impl<P: Clone> CommitGraph<P> {
             heads: BTreeSet::new(),
             permissions: HashMap::new(),
             pending_local: HashSet::new(),
+            pending_ingest: PendingIngest::default(),
         }
     }
 
@@ -142,42 +146,84 @@ impl<P: Clone> CommitGraph<P> {
             || self.nodes.clock(descendant).contains(chain, ancestor)
     }
 
-    /// Add the commits in `item` to the `CommitGraph`, after checking that dependencies are met
+    /// Admit a verified item, or queue it until all dependencies are admitted.
     ///
-    /// The `payload` closure is called for each new commit and is expected to
-    /// return the application-specific payload associated with that commit.
+    /// Queued items are not delivered history: they do not affect heads, views,
+    /// materialization, or export. Delivered unsigned local drafts do not satisfy
+    /// dependencies. Every admission, including local signing, automatically
+    /// drains the items it unblocks.
     ///
-    /// Payload callbacks run before mutation; if one panics, graph state is
-    /// unchanged. Payload-byte validation remains the application's responsibility.
+    /// The `payload` callback runs now, even when admission is deferred, for each
+    /// member not already delivered. Its results are owned by the queue; the
+    /// callback itself is never retained. Exact queued duplicates reuse their
+    /// payloads. Existing delivered payloads always win, including local copies
+    /// inserted after queueing. Payload-byte validation is the caller's duty.
     ///
-    /// Returns an error if any dependency is missing or if the fragment is invalid.
+    /// Callbacks run before mutation; a panic leaves both graph and queue
+    /// unchanged. A ready invalid fragment returns an error without mutation or
+    /// callbacks. A queued fragment which later proves invalid is removed and
+    /// reported in [`IngestReport::rejected`] by the operation that unblocked it;
+    /// valid dependencies and other ready items are not rolled back.
+    ///
+    /// The queue currently has no resource limits.
     pub fn ingest(
         &mut self,
         item: crate::VerifiedItem,
         mut payload: impl FnMut(&CommitMeta) -> P,
-    ) -> Result<(), crate::IngestError> {
-        for dependency in item.dependencies() {
-            if !self.has_commit(dependency) {
-                return Err(crate::IngestError::MissingDependency(*dependency));
-            }
+    ) -> Result<IngestReport, crate::IngestError> {
+        let missing: Vec<_> = item
+            .dependencies()
+            .filter(|hash| !self.has_commit(hash))
+            .copied()
+            .collect();
+        if missing.is_empty() {
+            self.validate_fragment_admission(&item)?;
+        } else if self.pending_ingest.contains(&item) {
+            return Ok(self.ingest_report());
         }
-        self.validate_fragment_admission(&item)?;
-        // Prepare all new payloads before changing state. A pending local copy
-        // also owns its original payload; admission must not overwrite it.
-        let prepared: Vec<_> = item
+        let payloads = item
             .commits
             .iter()
-            .filter(|meta| !self.by_hash.contains_key(meta.hash()))
-            .map(|meta| (meta.clone(), payload(meta)))
+            .map(|meta| (!self.by_hash.contains_key(meta.hash())).then(|| payload(meta)))
             .collect();
-        // Verification supplies parents-first members. Admitted dependencies
-        // close the fragment boundary, so every new member is ready on arrival.
-        for (meta, data) in prepared {
-            self.insert_commit(meta, data);
+        let prepared = PreparedItem { item, payloads };
+        if !missing.is_empty() {
+            self.pending_ingest.push(prepared, missing);
+            return Ok(self.ingest_report());
         }
-        self.admit_certificate(item);
-        self.finish_local_commits();
-        Ok(())
+        let mut report = IngestReport::default();
+        self.admit_prepared(prepared, &mut report);
+        Ok(self.finish_ingest(report))
+    }
+
+    /// Number of received items waiting for admitted dependencies, excluding
+    /// local drafts. Repeated copies of the same queued item count only once.
+    pub fn pending_items(&self) -> usize {
+        self.pending_ingest.len()
+    }
+
+    /// Distinct unadmitted dependencies of queued received items, in unspecified
+    /// order. Some may already be delivered as unsigned local drafts.
+    pub fn missing_dependencies(&self) -> impl Iterator<Item = &CommitHash> {
+        self.pending_ingest.missing_dependencies()
+    }
+
+    fn ingest_report(&self) -> IngestReport {
+        IngestReport {
+            pending: self.pending_items(),
+            ..IngestReport::default()
+        }
+    }
+
+    fn admit_prepared(&mut self, prepared: PreparedItem<P>, report: &mut IngestReport) {
+        // Verified members are parents-first. Another item or a local edit may
+        // have delivered a member since this item's payloads were prepared.
+        for (meta, data) in prepared.item.commits.iter().zip(prepared.payloads) {
+            if !self.by_hash.contains_key(meta.hash()) {
+                self.insert_commit(meta.clone(), data.expect("undelivered member has a payload"));
+            }
+        }
+        self.admit_certificate(prepared.item, report);
     }
 
     // Stateless verification proves member reachability and depth, and derives
@@ -469,39 +515,30 @@ impl<P: Clone> CommitGraph<P> {
         self.by_hash.contains_key(hash) && !self.pending_local.contains(hash)
     }
 
-    pub fn merge(&mut self, other: &Self) {
+    /// Merge only the other graph's admitted history, not its queue, drafts, or
+    /// permissions. Also reports queued items unblocked at this destination.
+    pub fn merge(&mut self, other: &Self) -> IngestReport {
         let cover = other.minimal_cover();
-        let mut pending: Vec<_> = cover
+        let items = cover
             .loose_commits
             .into_iter()
             .map(|commit| ItemId::Commit(commit.commit))
-            .chain(
-                cover
-                    .fragments
-                    .into_iter()
-                    .map(|fragment| ItemId::Fragment(fragment.range)),
-            )
-            .map(|id| {
-                other
-                    .export(&id)
-                    .expect("current cover entry")
-                    .verify()
-                    .expect("certified cover entry")
-            })
-            .collect();
-        while let Some(position) = pending.iter().position(|item| {
-            item.dependencies()
-                .all(|hash| self.has_commit(hash))
-        }) {
-            self.ingest(pending.remove(position), |meta| {
-                other.store[&other.by_hash[meta.hash()]].clone()
-            })
-            .expect("ready certified cover entry");
+            .chain(cover.fragments.into_iter().map(|fragment| ItemId::Fragment(fragment.range)));
+        let mut report = self.ingest_report();
+        for id in items {
+            let item = other
+                .export(&id)
+                .expect("current cover entry")
+                .verify()
+                .expect("certified cover entry");
+            let result = self
+                .ingest(item, |meta| other.store[&other.by_hash[meta.hash()]].clone())
+                .expect("certified cover entry");
+            report.admitted.extend(result.admitted);
+            report.rejected.extend(result.rejected);
+            report.pending = result.pending;
         }
-        debug_assert!(
-            pending.is_empty(),
-            "a complete cover must be causally admissible"
-        );
+        report
     }
 
     /// Visit each delivered commit once, parents before children, including local drafts.
@@ -565,13 +602,14 @@ impl<P: Clone> CommitGraph<P> {
     /// Ingest our own prepared commit for immediate local use.
     /// Parents must already be delivered, but may still be unsigned local drafts.
     /// Duplicate insertion preserves the existing payload and admission status.
+    /// Reports any received items unblocked by local certificate assembly.
     ///
     /// # Panics
     /// Panics before mutation if any parent is missing. Commits prepared with
     /// [`Self::commit_by`] on this graph already satisfy this precondition.
-    pub fn ingest_local_commit(&mut self, meta: CommitMeta, data: P) {
+    pub fn ingest_local_commit(&mut self, meta: CommitMeta, data: P) -> IngestReport {
         if self.by_hash.contains_key(meta.hash()) {
-            return;
+            return self.ingest_report();
         }
         assert!(
             meta.parents()
@@ -581,16 +619,18 @@ impl<P: Clone> CommitGraph<P> {
         );
         self.pending_local.insert(*meta.hash());
         self.insert_commit(meta, data);
-        self.finish_local_commits();
+        self.finish_ingest(IngestReport::default())
     }
 
-    /// Attach a signature to a known, still-pending local commit
+    /// Attach a signature to a known, still-pending local commit.
+    /// Also drains received items unblocked by any resulting admissions; inspect
+    /// the report for deferred rejections even when the signature is valid.
     pub fn ingest_signature(
         &mut self,
         author: Author,
         hash: CommitHash,
         signature: Signature,
-    ) -> Result<(), SignatureError> {
+    ) -> Result<IngestReport, SignatureError> {
         if !self.pending_local.contains(&hash) {
             return Err(SignatureError::NotPendingLocalCommit(hash));
         }
@@ -606,8 +646,7 @@ impl<P: Clone> CommitGraph<P> {
         self.nodes[self.by_hash[&hash]]
             .signatures
             .insert(author, signature);
-        self.finish_local_commits();
-        Ok(())
+        Ok(self.finish_ingest(IngestReport::default()))
     }
 
     /// Replace the entire permission map. Missing authors are denied; captured
@@ -756,9 +795,11 @@ impl<P: Clone> CommitGraph<P> {
 
     // Dependencies and payloads are ready. Index the authenticated members and
     // store signatures on their targets and boundary references on the fragment.
-    fn admit_certificate(&mut self, item: crate::VerifiedItem) {
+    fn admit_certificate(&mut self, item: crate::VerifiedItem, report: &mut IngestReport) {
+        report.admitted.push(item.id().clone());
         for meta in &item.commits {
             self.pending_local.remove(meta.hash());
+            self.pending_ingest.admitted(meta.hash());
             // Interior checkpoints are indexed for structural inspection, not
             // granted export certificates. Their normalized ranges may extend
             // outside this item's payload. Only the actual head gets evidence.
@@ -794,18 +835,27 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    // Only pending local items need assembly. Received fragments already carry
-    // their certificate; this never rebuilds certificates for admitted history.
-    fn finish_local_commits(&mut self) {
+    // Local work and received items may unblock one another. Received items
+    // already have certificates; only local work needs certificate assembly.
+    fn finish_ingest(&mut self, mut report: IngestReport) -> IngestReport {
         loop {
-            let ready = self
+            while let Some(item) = self
                 .pending_local
                 .iter()
                 .map(|hash| self.by_hash[hash])
                 .filter(|&idx| !self.nodes[idx].signatures.is_empty())
-                .find_map(|idx| self.local_item(idx));
-            let Some(item) = ready else { break };
-            self.admit_certificate(item);
+                .find_map(|idx| self.local_item(idx))
+            {
+                self.admit_certificate(item, &mut report);
+            }
+            let Some(prepared) = self.pending_ingest.pop_ready() else { break };
+            match self.validate_fragment_admission(&prepared.item) {
+                Ok(()) => self.admit_prepared(prepared, &mut report),
+                Err(error) => report.rejected.push(IngestRejection {
+                    item: prepared.item.id().clone(),
+                    error,
+                }),
+            }
         }
         // Reuse shared certificates for all newly ready local items before
         // discarding covered ones. Keep topology, not historical export proofs.
@@ -835,6 +885,8 @@ impl<P: Clone> CommitGraph<P> {
                     .retain(|author, _| needed.contains(&(NodeIdx(index), *author)));
             }
         }
+        report.pending = self.pending_items();
+        report
     }
 
     fn local_item(&self, head: NodeIdx) -> Option<crate::VerifiedItem> {

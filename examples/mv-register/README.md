@@ -62,9 +62,9 @@ crate versions in `Cargo.toml`; this is not a stable cross-version protocol.
   and permission changes.
 - [`src/sync.rs`](src/sync.rs): exports Stockfoil's certified `minimal_cover`,
   maps full commit hashes to Subduction IDs, requests sync/subscription, checks
-  transport metadata against the authenticated contents, and ingests dependency
-  items before their dependents. Missing dependencies stay in Subduction storage
-  for the next poll, outside `CommitGraph`.
+  transport metadata against the authenticated contents, and ingests items in
+  arrival order. Stockfoil owns pending items and payloads, automatically
+  admitting them when dependencies arrive or are signed locally.
 - [`src/wire.rs`](src/wire.rs): **example-only** versioned BCS envelopes for
   individual commits and fragments. Original author signatures are retained;
   the transport peer cannot replace them with its own signatures. Commit hashes
@@ -80,11 +80,17 @@ may be relayed. Unsigned drafts are not exported. Fragment checkpoints use
 Subduction's leading-zero-byte depth metric and 12-byte checkpoint IDs; complete
 heads, boundaries, and authenticated contents remain in the envelope.
 
+Admission is atomic per item, not per batch. Network `load()` reports immediate
+and deferred admission errors and still materializes valid items admitted before
+the error. Local editing, signing, and merge log deferred rejections they unblock.
+Queued received items are invisible to materialization until admitted, unlike
+local unsigned drafts.
+
 This deliberately small adapter polls rather than exposing a production event
-loop. It stages graph admissions on a clone, caps blobs at 8 MiB and WebSocket
-messages at 16 MiB, has no encryption/compression or client-side persistence, and
-does not provide a general resource-budget policy. It is not Stockfoil's proposed
-public binary `load`/`save` API.
+loop. It caps blobs at 8 MiB and WebSocket messages at 16 MiB, but the graph's
+pending-item queue currently has no limits. It has no encryption/compression or
+client-side persistence and does not provide a general resource-budget policy.
+It is not Stockfoil's proposed public binary `load`/`save` API.
 
 ## Test
 

@@ -2,7 +2,7 @@
 //! The oracle knows only accepted verified members, local edits, and signature
 //! events; it never asks the graph for delivery, ancestry, depth, or membership.
 //! Out-of-order transport verifies statelessly on arrival; certificates and
-//! payloads then wait in a test-side receiver, never the graph's local-edit queue.
+//! payloads then wait in the graph's received queue, separately from local edits.
 mod support;
 
 use std::{
@@ -15,7 +15,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use stockfoil::{
     Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
     Fragment, FragmentRange, FragmentReadError, IngestError, ItemId, LooseCommit,
-    SedimentreeSummary, SignatureEvidence, UnverifiedItem, VerifiedItem,
+    SedimentreeSummary, SignatureEvidence, UnverifiedItem,
 };
 use support::{author, key, sign};
 
@@ -194,12 +194,13 @@ fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
     }
 }
 
-// Verification is stateless and happens on receipt. Only admission waits for
-// dependencies; even payloads that panic on Clone can wait without being cloned.
+// The receiver only verifies and supplies payloads synchronously. Its metadata
+// archive translates reported certificate IDs to oracle members; it neither
+// retains payloads nor retries/schedules pending work on the graph's behalf.
 struct Receiver<P> {
     commits: Vec<CommitMeta>,
     payload: fn(CommitHash) -> P,
-    pending: Vec<(VerifiedItem, HashMap<CommitHash, P>)>,
+    receipts: HashMap<ItemId, Vec<CommitMeta>>,
 }
 
 impl<P: Clone> Receiver<P> {
@@ -207,7 +208,7 @@ impl<P: Clone> Receiver<P> {
         Self {
             commits: commits.to_vec(),
             payload,
-            pending: Vec::new(),
+            receipts: HashMap::new(),
         }
     }
 
@@ -218,37 +219,34 @@ impl<P: Clone> Receiver<P> {
         payload: P,
     ) -> Vec<CommitMeta> {
         let verified = fixture_item(&self.commits, meta).verify().unwrap();
+        self.receipts
+            .insert(verified.id().clone(), verified.commits().cloned().collect());
         let mut payloads: HashMap<_, _> = verified
             .commits()
             .filter(|m| hash(m) != hash(meta))
             .map(|m| (hash(m), (self.payload)(hash(m))))
             .collect();
         payloads.insert(hash(meta), payload);
-        self.pending.push((verified, payloads));
-        self.retry(graph)
-    }
-
-    fn retry(&mut self, graph: &mut CommitGraph<P>) -> Vec<CommitMeta> {
-        let mut accepted = Vec::new();
-        loop {
-            let before = self.pending.len();
-            let mut waiting = Vec::new();
-            for (item, mut payloads) in self.pending.drain(..) {
-                match graph.ingest(item.clone(), |meta| payloads.remove(meta.hash()).unwrap()) {
-                    Ok(()) => accepted.extend(item.commits().cloned()),
-                    Err(IngestError::MissingDependency(h)) => {
-                        assert!(!graph.has_commit(&h));
-                        assert_eq!(payloads.len(), item.commits().count());
-                        waiting.push((item, payloads));
-                    }
-                    Err(error) => panic!("canonical fixture rejected: {error:?}"),
-                }
-            }
-            self.pending = waiting;
-            if self.pending.len() == before {
-                return accepted;
-            }
-        }
+        let report = graph
+            .ingest(verified, |meta| payloads.remove(meta.hash()).unwrap())
+            .expect("canonical fixture must be accepted");
+        assert_eq!(report.pending, graph.pending_items());
+        assert!(
+            report.rejected.is_empty(),
+            "canonical fixture rejected: {:?}",
+            report.rejected
+        );
+        report
+            .admitted
+            .iter()
+            .flat_map(|id| {
+                self.receipts
+                    .get(id)
+                    .expect("reported received certificate")
+                    .iter()
+                    .cloned()
+            })
+            .collect()
     }
 }
 
@@ -564,20 +562,24 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
     // certificates. Their canonical payloads can extend outside the item that
     // introduced them, so transport need not equal this structural minimum.
     assert_eq!(summaries(graph), (canonical, minimized));
-    // Relay the actual inventory, not individual fixture commits, choosing
-    // envelopes only once every explicit boundary and extra is already present.
+    // Relay the actual inventory in arbitrary reverse order, without a
+    // transport-side readiness scheduler. The graph must drain the closed cover.
+    let certificates: HashMap<_, Vec<_>> = items
+        .iter()
+        .map(|item| (item.id().clone(), item.commits().map(hash).collect()))
+        .collect();
     let mut destination = CommitGraph::new();
     let mut admitted = BTreeSet::new();
-    while !items.is_empty() {
-        let ready = items
-            .iter()
-            .position(|item| item.dependencies().all(|h| admitted.contains(h)))
-            .expect("the complete cover must have an acyclic dependency order");
-        let item = items.remove(ready);
-        let members: Vec<_> = item.commits().map(hash).collect();
-        destination.ingest(item, hash).unwrap();
-        admitted.extend(members);
+    for item in items.into_iter().rev() {
+        let report = destination.ingest(item, hash).unwrap();
+        assert!(report.rejected.is_empty());
+        assert_eq!(report.pending, destination.pending_items());
+        for id in report.admitted {
+            admitted.extend(certificates[&id].iter().copied());
+        }
     }
+    assert_eq!(destination.pending_items(), 0);
+    assert!(destination.missing_dependencies().next().is_none());
     assert_eq!(admitted, published);
     assert_eq!(destination.minimal_cover(), inventory);
     let mut relay = CommitGraph::new();
@@ -819,9 +821,9 @@ fn long_same_depth_checkpoint_chain_preserves_every_boundary_fragment() {
         assert_eq!(&exported_range, range);
         assert_eq!(commits.iter().map(hash).collect::<Vec<_>>(), [range.head]);
     }
-    // Verify the actual inventory and admit only dependency-ready items into an
-    // empty peer, then relay again. Every previous checkpoint must travel first
-    // as its own item rather than being swallowed by its child's payload.
+    // Verify the actual inventory and let an empty peer buffer unordered items,
+    // then relay again. Every previous checkpoint must travel as its own item
+    // rather than being swallowed by its child's payload.
     check_direct_inventory(&graph, &model, &case);
 }
 
@@ -989,6 +991,151 @@ fn received_interior_checkpoint_is_readable_but_cannot_export_an_excluded_ancest
 }
 
 #[test]
+fn fragment_interiors_release_buffered_received_children() {
+    let case = &cases()[0];
+    // Head 8's fragment contains checkpoint 4 as an interior member. Neither
+    // the interior's own certificate nor a retry of its child should be needed.
+    let child = &case.commits[19];
+    assert_eq!(child.parents(), &[hash(&case.commits[4])]);
+    let child_id = ItemId::Commit(hash(child));
+    for trigger in ["receive", "sign", "merge"] {
+        let mut graph = CommitGraph::new();
+        let report = graph
+            .ingest(envelope(child).verify().unwrap(), hash)
+            .unwrap();
+        assert!(report.admitted.is_empty());
+        assert!(report.rejected.is_empty());
+        assert_eq!(report.pending, 1);
+        assert!(graph.heads().next().is_none());
+        assert!(graph.publishable_commit(child.hash()).is_none());
+        let higher = fixture_item(&case.commits, &case.commits[8])
+            .verify()
+            .unwrap();
+        assert!(higher.dependencies().next().is_none());
+        let higher_id = higher.id().clone();
+        let report = match trigger {
+            "receive" => graph.ingest(higher, hash).unwrap(),
+            "sign" => {
+                for meta in &case.commits[..=8] {
+                    let report = graph.ingest_local_commit(meta.clone(), hash(meta));
+                    assert!(report.admitted.is_empty());
+                    assert!(report.rejected.is_empty());
+                    assert_eq!(report.pending, 1);
+                }
+                assert!(!graph.has_commit(child.hash()));
+                graph
+                    .ingest_signature(
+                        author(&key(1)),
+                        hash(&case.commits[8]),
+                        support::signature(&key(1), hash(&case.commits[8])),
+                    )
+                    .unwrap()
+            }
+            "merge" => {
+                let mut source = CommitGraph::new();
+                source.ingest(higher, hash).unwrap();
+                graph.merge(&source)
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            report.admitted.into_iter().collect::<BTreeSet<_>>(),
+            [higher_id, child_id.clone()].into(),
+            "trigger={trigger}"
+        );
+        assert!(report.rejected.is_empty());
+        assert_eq!(report.pending, 0);
+        assert_eq!(graph.pending_items(), 0);
+        assert!(graph.missing_dependencies().next().is_none());
+        assert!(graph.has_commit(child.hash()));
+        graph.export(&child_id).unwrap().verify().unwrap();
+        assert_eq!(
+            graph.heads().collect::<BTreeSet<_>>(),
+            [hash(&case.commits[8]), hash(child)].into()
+        );
+    }
+}
+
+#[test]
+fn deferred_invalid_fragment_does_not_roll_back_its_dependency_or_block_valid_waiters() {
+    let case = &cases()[0];
+    let boundary = fixture_item(&case.commits, &case.commits[16])
+        .verify()
+        .unwrap();
+    assert!(boundary.dependencies().next().is_none());
+    let boundary_id = boundary.id().clone();
+    // Root 0 is behind boundary 16, so including it in head 18's payload is
+    // statelessly verifiable but graph-dependent canonical placement is invalid.
+    let members: Vec<_> = [0, 17, 18].map(|i| case.commits[i].clone()).into();
+    let invalid = UnverifiedItem::Fragment {
+        range: case_range(case, 18),
+        signatures: members.iter().map(evidence).collect(),
+        commits: members,
+    }
+    .verify()
+    .unwrap();
+    let invalid_id = invalid.id().clone();
+    let child = &case.commits[17];
+    for deferred in [false, true] {
+        let mut graph = CommitGraph::new();
+        if deferred {
+            let mut callbacks = 0;
+            let report = graph
+                .ingest(invalid.clone(), |meta| {
+                    callbacks += 1;
+                    hash(meta)
+                })
+                .unwrap();
+            assert_eq!(callbacks, 3);
+            assert!(report.admitted.is_empty());
+            assert!(report.rejected.is_empty());
+            assert_eq!(report.pending, 1);
+            let report = graph
+                .ingest(envelope(child).verify().unwrap(), hash)
+                .unwrap();
+            assert!(report.admitted.is_empty());
+            assert_eq!(report.pending, 2);
+            assert!(graph.heads().next().is_none());
+            assert_eq!(
+                graph
+                    .missing_dependencies()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                [hash(&case.commits[16])].into()
+            );
+            let report = graph.ingest(boundary.clone(), hash).unwrap();
+            assert_eq!(
+                report.admitted.into_iter().collect::<BTreeSet<_>>(),
+                [boundary_id.clone(), ItemId::Commit(hash(child))].into()
+            );
+            assert_eq!(report.rejected.len(), 1);
+            assert_eq!(report.rejected[0].item, invalid_id);
+            assert_eq!(report.rejected[0].error, IngestError::InvalidFragment);
+            assert_eq!(report.pending, 0);
+            assert!(graph.has_commit(child.hash()));
+        } else {
+            graph.ingest(boundary.clone(), hash).unwrap();
+            let before = graph.view_point();
+            assert_eq!(
+                graph.ingest(invalid.clone(), |_| panic!(
+                    "ready invalid fragment requests no payload"
+                )),
+                Err(IngestError::InvalidFragment)
+            );
+            assert_eq!(graph.view_point(), before);
+            assert!(!graph.has_commit(child.hash()));
+        }
+        assert_eq!(graph.pending_items(), 0);
+        assert!(graph.missing_dependencies().next().is_none());
+        assert!(graph.has_commit(&hash(&case.commits[16])));
+        assert!(!graph.has_commit(&hash(&case.commits[18])));
+        assert!(graph.publishable_commit(&hash(&case.commits[18])).is_none());
+        assert!(graph.export(&invalid_id).is_err());
+        graph.export(&boundary_id).unwrap().verify().unwrap();
+    }
+}
+
+#[test]
 fn redundant_ancestor_boundary_is_retained_even_when_normalization_excludes_its_history() {
     let seed = 0xb0_0d_a;
     let root = mine(vec![], 0, seed, 0);
@@ -1062,7 +1209,7 @@ fn every_arrival_matches_the_walk_in_causal_reverse_and_shuffled_orders() {
                 let event = format!("schedule={schedule}, step={step}, node={node}");
                 check(&graph, &model, case, &event);
             }
-            assert!(receiver.pending.is_empty());
+            assert_eq!(graph.pending_items(), 0);
             check_direct_inventory(&graph, &model, case);
             let all = case.commits.iter().map(hash).collect();
             assert_eq!(model.published(&case.commits), all, "seed={:#x}", case.seed);
@@ -1091,7 +1238,7 @@ fn add_signature(
 }
 
 #[test]
-fn signed_received_duplicate_authenticates_local_head_but_child_waits_outside_graph() {
+fn signed_received_duplicate_authenticates_local_head_and_drains_buffered_child() {
     let case = &cases()[0];
     let mut graph = CommitGraph::new();
     let mut model = Model::default();
@@ -1117,10 +1264,16 @@ fn signed_received_duplicate_authenticates_local_head_but_child_waits_outside_gr
         [hash(head)]
     );
     assert!(!graph.has_commit(head.hash()));
+    assert_eq!(graph.pending_items(), 1);
     assert_eq!(
-        graph.ingest(verified, |_| panic!("blocked item requests no payload")),
-        Err(IngestError::MissingDependency(hash(head)))
+        graph
+            .missing_dependencies()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        [hash(head)].into()
     );
+    assert_eq!(graph.heads().collect::<Vec<_>>(), [hash(head)]);
+    assert!(graph.publishable_commit(child.hash()).is_none());
     for meta in [head, child] {
         let id = ItemId::Commit(hash(meta));
         assert_eq!(
@@ -1130,10 +1283,8 @@ fn signed_received_duplicate_authenticates_local_head_but_child_waits_outside_gr
     }
     // A valid received duplicate is real evidence, unlike a bare envelope or
     // a signature by somebody other than the author. It can publish local work.
-    support::receive_commit(&mut graph, head.clone(), hash(head));
-    model.ingest(head, false);
-    model.accepted(receiver.retry(&mut graph));
-    assert!(receiver.pending.is_empty());
+    model.accepted(receiver.receive(&mut graph, head, hash(head)));
+    assert_eq!(graph.pending_items(), 0);
     check(
         &graph,
         &model,
@@ -1357,11 +1508,23 @@ fn pending_local_fragment_does_not_block_an_independent_certified_fragment() {
         item.dependencies().copied().collect::<Vec<_>>(),
         [hash(boundary)]
     );
+    let id = item.id().clone();
+    let report = destination.ingest(item, hash).unwrap();
+    assert!(report.admitted.is_empty());
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 1);
     assert_eq!(
-        destination.ingest(item, |_| panic!("dependency admission precedes payloads")),
-        Err(IngestError::MissingDependency(hash(boundary)))
+        destination
+            .missing_dependencies()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        [hash(boundary)].into()
     );
-    destination.merge(&source);
+    assert!(destination.publishable_commit(head.hash()).is_none());
+    let report = destination.merge(&source);
+    assert!(report.admitted.contains(&id));
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 0);
     check(
         &destination,
         &model,
@@ -1489,13 +1652,13 @@ fn fragment_reads_validate_heads_and_exact_max_level_boundaries_before_callbacks
             .receive(&mut graph, &case.commits[6], head)
             .is_empty()
     );
-    assert_eq!(receiver.pending.len(), 1);
+    assert_eq!(graph.pending_items(), 1);
     assert!(graph.publishable_commit(&head).is_none());
     assert_read_error(&graph, &range, FragmentReadError::MissingCommit(head));
     for meta in &case.commits {
         receiver.receive(&mut graph, meta, hash(meta));
     }
-    assert!(receiver.pending.is_empty());
+    assert_eq!(graph.pending_items(), 0);
     let shallow = hash(&case.commits[0]);
     assert_read_error(
         &graph,
@@ -1736,7 +1899,7 @@ fn repeated_parent_edges_export_each_member_once() {
         for meta in order {
             receiver.receive(&mut graph, meta, hash(meta));
         }
-        assert!(receiver.pending.is_empty());
+        assert_eq!(graph.pending_items(), 0);
         let mut seen = Vec::new();
         graph
             .traverse_fragment(range, |meta, payload| {
@@ -1759,12 +1922,12 @@ fn fragment_and_covered_commit_reads_borrow_without_cloning_payloads() {
     }
     let case = &cases()[0];
     let mut graph = CommitGraph::new();
-    // Reverse transport order exercises external buffering without payload clones.
+    // Reverse transport order exercises graph buffering without payload clones.
     let mut receiver = Receiver::new(&case.commits, NoClone);
     for meta in case.commits[..7].iter().rev() {
         receiver.receive(&mut graph, meta, NoClone(hash(meta)));
     }
-    assert!(receiver.pending.is_empty());
+    assert_eq!(graph.pending_items(), 0);
     let read = |graph: &CommitGraph<NoClone>| {
         let range = case_range(case, 6);
         let all = case.commits.iter().map(hash).collect();

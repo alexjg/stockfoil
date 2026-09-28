@@ -85,17 +85,20 @@ Authentication gates admission of received commits, while write permissions
 gate participation in a selected history. Our own prepared commits are the
 local exception: they are delivered as `pending_local` drafts before signing.
 `pending_local` denotes only delivered but unsigned/unadmitted local work, never
-commits waiting for missing dependencies. `CommitGraph` has no causal queue;
-all missing-dependency buffering belongs outside the graph.
+commits waiting for missing dependencies. `CommitGraph` separately owns a queue
+of verified received items awaiting admitted dependencies, with no resource limits
+currently. Queued items own their payloads but are not delivered, admitted,
+materialized, or exportable; they affect neither heads nor viewpoints.
 Admitted commits are exactly delivered commits not marked `pending_local`;
-they are verified and parent-closed by invariant.
+they are verified and parent-closed by invariant. Delivered local drafts do not
+satisfy received admission dependencies.
 
 #### Pending Signatures
 
-Signatures and changes can arrive out of order. Received items must be verified
-before admission, and missing dependencies and unverified items are buffered
-outside `CommitGraph`. They are not delivered commits awaiting a participation
-check.
+Signatures and changes can arrive out of order. Unverified input stays outside
+`CommitGraph`. Received items must be verified before graph ingestion, which
+queues them if dependencies are not yet admitted. These queued items are not
+delivered commits awaiting a participation check.
 
 The local `ingest_signature` API accepts signatures for known, already delivered
 pending local commits only; it cannot ingest a signature before its local
@@ -121,13 +124,40 @@ signed history that excludes it.
 #### Relationship to sync or merge
 
 Only admitted history is exported through sync or merge. Received verified
-items first check that external dependencies are admitted, then insert commits
-parents-first. Range boundaries and external parents derived from member metadata
-must all be admitted; normalized range placement is checked against their history
-before payload callbacks or mutation. Every insertion is therefore causally
-ready by invariant; missing dependencies are
-buffered outside the graph, not queued inside it. Write-frontier proofs gate
-participation, not forwarding of admitted commits.
+items first check that range boundaries and external parents derived from member
+metadata are admitted. Missing dependencies cause graph-owned queueing, not
+`IngestError::MissingDependency` (which has been removed). Once dependencies are
+admitted, normalized range placement is checked against their history before
+inserting commits parents-first. Every insertion remains causally ready by
+invariant. Write-frontier proofs gate participation, not forwarding of admitted
+commits.
+
+Payload callbacks run immediately even for queued items, for members not already
+delivered. The queue owns their results, not the callback; exact queued duplicates
+reuse those payloads. All callbacks run before graph or queue mutation, so a panic
+leaves both unchanged. If a member is delivered while the item waits, including
+through local insertion, that delivered payload is preserved on later admission.
+A ready invalid fragment returns `Err(IngestError::InvalidFragment)` before
+callbacks or mutation. A queued fragment found invalid later is removed without
+delivering members and reported per item, without rolling back its successful
+dependencies or independent admissions.
+
+Received ingestion returns `Result<IngestReport, IngestError>`, local signing
+returns `Result<IngestReport, SignatureError>`, and local insertion and merge
+return `IngestReport`. Its `admitted: Vec<ItemId>` records certificates (including
+duplicates and local certificates), not newly delivered commits;
+`rejected: Vec<IngestRejection>` records deferred failures as `{ item, error }`;
+and `pending` counts queued received items, not local drafts. Inspect rejections
+even after successful signing or dependency ingestion. Rejected items' dependents
+remain pending unless another certificate provides their missing commits.
+
+Dependency-indexed waiters wake on every admission, including local signing and
+all members of a fragment, and the graph automatically drains newly ready work.
+`pending_items()` reports the received queue count; `missing_dependencies()`
+iterates distinct unadmitted prerequisites in unspecified order, including any
+still-unadmitted local drafts. Cloning a graph clones its queued items and owned
+payloads. Merge transfers neither the sender's queue nor drafts nor permissions,
+though imported admitted history can unblock the destination's queue.
 
 Our own unpublished commits must stay out of sync and merge exports until
 covered by verified signatures. Exporting a descendant must not pull unsigned
@@ -158,11 +188,12 @@ another.
 
 ### Eligibility
 
-For received commits, distinguish data buffered outside the graph from admitted
+For received commits, distinguish unverified input, queued items, and admitted
 history:
 
-* unverified or detached - awaiting verification or causal dependencies outside
-  `CommitGraph`
+* unverified - awaiting verification outside `CommitGraph`
+* verified but queued - owned by `CommitGraph` with payloads, awaiting admitted
+  causal dependencies; not delivered history and unavailable to materialization
 * admitted but nonparticipating - verified with admitted causal dependencies,
   but outside the selected history or disallowed by its write permissions
 * participating - in the selected history and allowed by its write permissions
@@ -186,7 +217,7 @@ what that means for the document.
 A viewpoint captures only two things:
 
 * The history heads, identifying the selected causally complete commit history.
-  Causally unready work remains outside the graph.
+  Queued received work remains outside delivered history.
 * An immutable snapshot of the per-author write permissions
 
 The captured hashes are heads, not an enumeration of the whole history.
@@ -200,9 +231,9 @@ doesn't include future commits or commits outside that history. Authentication
 is enforced at admission, not as another participation predicate.
 
 Proofs of membership in a write frontier are evaluated using only the history
-selected by the history heads, not subsequently received commits or items
-buffered outside the graph awaiting dependencies. A pending draft outside the
-signed history cannot serve as a permission bound there. Signing may change the
+selected by the history heads, not subsequently delivered commits or received
+items queued inside the graph awaiting admitted dependencies. A pending draft
+outside the signed history cannot serve as a permission bound there. Signing may change the
 heads selected by a new signed viewpoint, but cannot change the history or
 participation of an already captured viewpoint.
 
@@ -244,8 +275,10 @@ when their effects aren't visible, such as an overwritten assignment. The signed
 history is parent-closed but needn't be a single linear prefix: different
 branches may get signed at different times.
 
-When a signature arrives, the signed view can catch up without changing the
-working document. Captured viewpoints stay unchanged. To preserve historical
+When a signature arrives, admitting already delivered local work alone lets the
+signed view catch up without changing working participation. Signing can also
+unblock queued received items, adding new delivered history that may change
+participation in newly captured views. Captured viewpoints stay unchanged. To preserve historical
 signing status, save both viewpoints; the working one alone doesn't record
 which commits were admitted then.
 
@@ -286,7 +319,7 @@ confers process independence without requiring a shared authorization log or DAG
 The MVR test should hold back a local signature: the edit appears in the working
 view, but not the signed view or an export. Their diff shows the pending edit.
 After signing, the signed view catches up and export is allowed, without another
-change to the working document. Both earlier viewpoints must still mean the
+change to the working document when no received items are unblocked. Both earlier viewpoints must still mean the
 same thing. Also check that admitted ancestors under drafts remain in the signed
 history, and that a pending draft cannot supply a permission bound there. Check
 batching and that exporting a descendant cannot leak an unsigned local ancestor.
@@ -301,7 +334,8 @@ denied, and existing viewpoints keep their old snapshots. Use `visit_changes`
 for both initial materialization and subsequent updates; delivery and revocation
 bookkeeping belong in the same callback.
 
-In this sketch, `Operation`, `log`, and `load_payload` are application-specific.
+In this sketch, `Operation`, `log`, `load_payload`, and `handle_rejections` are
+application-specific.
 Payload decoding and validation remain the application's responsibility.
 
 ```rust
@@ -329,15 +363,17 @@ let mut apply_change = |change: MaterializationChange<'_, Operation>| {
     }
 };
 
-// Verify and admit received items in dependency order. Missing dependencies
-// are buffered outside the graph, before materialization.
+// Verify before graph ingestion; arrival order need not be causal.
+// The graph owns queued payloads, but materialization sees only delivery.
 for item in received_items {
-    graph.ingest(item.verify()?, load_payload)?;
+    let report = graph.ingest(item.verify()?, load_payload)?;
+    handle_rejections(report.rejected);
 }
 cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 
 // New history may also enable previously stored writes via frontier proofs.
-graph.ingest(new_item.verify()?, load_payload)?;
+let report = graph.ingest(new_item.verify()?, load_payload)?;
+handle_rejections(report.rejected);
 cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 
 // Revoke Alice at these heads. Bob stays unbounded. No new delivery is needed.

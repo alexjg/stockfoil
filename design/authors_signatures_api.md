@@ -22,7 +22,7 @@ sketch: no compatibility APIs or format migrations.
   currently contribute, so normal prepared work meets the local ingestion
   precondition. Preparation fixes the author, parents, payload, and hash before
   any signing IO.
-* Add a local ingestion path, roughly `ingest_local_commit(meta, payload)`. It
+* Add a local ingestion path, `ingest_local_commit(meta, payload) -> IngestReport`. It
   asserts that every parent is already delivered before any mutation, panicking
   on misuse rather than buffering causally unready work. Parents may be unsigned
   local drafts; they need not be admitted. It immediately delivers our prepared
@@ -30,15 +30,17 @@ sketch: no compatibility APIs or format migrations.
   unpublished. `pending_local` means delivered but unsigned/unadmitted local
   work only, never work awaiting causal dependencies. Ordinary incoming
   ingestion must not do this.
-* Add `ingest_signature(author, hash, signature) -> Result<(), SignatureError>`
+* Add `ingest_signature(author, hash, signature) -> Result<IngestReport, SignatureError>`
   for known, already delivered pending local commits only; a signature cannot be
   ingested before its local commit. Verify real Ed25519 signatures; verified
   coverage releases covered local commits from `pending_local` for admission and
   publication, while preserving parent closure. Invalid signatures do neither.
-  Received items are verified before admission; missing dependencies and
-  unverified items are buffered outside `CommitGraph`, not through this local
-  signature API. Older signatures are pruned once a covering signature and its
-  ancestry are publishable; until then we retain the older proof so exported
+  Received items are verified before graph ingestion; verified items awaiting
+  admitted dependencies are queued inside `CommitGraph`, separately from local
+  drafts. Unverified input stays outside the graph, and neither kind of received
+  input goes through this local signature API. Older signatures are pruned once a
+  covering signature and its ancestry are publishable; until then we retain the
+  older proof so exported
   history can still be authenticated.
 * Give `Author` equality, ordering, hashing, and debug output so it works as a
   map key. Keep signing keys outside Stockfoil.
@@ -63,29 +65,80 @@ when signatures haven't arrived yet.
   Their history is verified and parent-closed by invariant, so `CommitGraph`
   needs neither a separate authenticated set nor per-author
   `signature_frontiers`.
-* `CommitGraph` has no causal queue. Received verified items first check that
-  external dependencies are admitted, then insert their commits parents-first;
-  every insertion is causally ready by invariant. Range boundaries and external
-  parents derived from member metadata must all be admitted. Admission also checks
-  normalized range placement against their history before payload callbacks or mutation.
-  All missing-dependency buffering stays outside the graph, for both local work
-  and received items.
+* `CommitGraph` owns a queue of verified received items awaiting admitted
+  dependencies. Queued items own their payloads but are not delivered, admitted,
+  materialized, or exportable. They affect neither heads nor viewpoints nor raw
+  delivery traversals. Local drafts remain separate delivered history and do not
+  satisfy received admission dependencies. Range boundaries and external parents
+  derived from member metadata must all be admitted before an item can enter
+  delivered history, parents-first. Normalized range placement is then checked
+  against that admitted history. Every insertion remains causally ready.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.
 * `minimal_cover` selects authenticated transport items; `export` supplies their
-  metadata and stored signature evidence. Pending local work is excluded. A
+  metadata and stored signature evidence. Pending local work and queued received
+  items are excluded. A
   descendant export must not leak unsigned local ancestors. Publication is
   independent of the working heads and document visibility. Actual transport
   evidence is retained independently for export and verification.
-* `merge` exchanges those items, verifies them, and admits them in dependency
-  order. Write permissions and unverified queues do not travel through merge.
+* `merge(&other) -> IngestReport` exchanges those items, verifies them, and
+  admits them as dependencies become ready, draining the destination's queue too.
+  The sender's queue, local drafts, and write permissions do not travel through
+  merge. Cloning a graph, in contrast, clones its queued items and owned payloads.
   Receiving data must not grant access. Revoked, admitted commits remain
   available for delivery and sync.
 
 Both examples sign their local commits and materialize through `visit_changes`.
 The OR-set uses delivery only; the MVR also exercises participation and explicit
 permission grants.
+
+## Received queue and operation reports
+
+`ingest(VerifiedItem, payload_callback) -> Result<IngestReport, IngestError>`
+accepts verified items in any arrival order. Missing dependencies are not an
+error (`MissingDependency` has been removed). The queue currently has no resource
+limits. Unverified transport input and application-specific payload validation
+remain outside this API.
+
+The payload callback runs immediately, even when the item must wait, once for
+each member not already delivered. The graph owns the returned payloads, never
+the callback. Exact queued duplicates reuse their stored payloads without calling
+it again; distinct member sets or signature evidence claiming the same `ItemId`
+are not conflated. All callbacks complete before graph or queue mutation, so a
+callback panic leaves both unchanged (not the callback's external side effects).
+Existing delivered payloads always win, including copies delivered by local
+insertion or another item after queueing.
+
+A directly received, ready fragment with invalid placement returns
+`Err(IngestError::InvalidFragment)` before callbacks or mutation. For a queued
+fragment, placement can only be checked once its dependencies are admitted. If
+invalid then, it is removed and reported as a per-item rejection by the operation
+that unblocked it, without delivering any of its members. Successful dependencies
+and independent ready items remain admitted; there is no batch rollback.
+Dependents of the rejected item remain pending unless another certificate admits
+the commits they need.
+
+Dependency-indexed waiters wake on every admitted commit, including all members
+of an admitted fragment and admissions caused by local signing. Ready received
+items and newly certifiable local work drain automatically until neither can make
+progress; callers need not resubmit queued items.
+
+Received ingestion and local signing return `Result<IngestReport, ...>`; local
+insertion and merge return `IngestReport` directly. Inspect the report on every
+operation that can admit history:
+
+* `admitted: Vec<ItemId>` lists admitted certificates, including duplicate and
+  local certificates, not newly delivered commits. Use `visit_changes` for
+  materialization.
+* `rejected: Vec<IngestRejection>` lists deferred failures, each with
+  `item: ItemId` and `error: IngestError`.
+* `pending: usize` counts received items still queued after the call, excluding
+  local drafts.
+
+`pending_items() -> usize` exposes the same count; exact queued duplicates count
+once. `missing_dependencies()` iterates distinct unadmitted prerequisite hashes
+in unspecified order. These may already be delivered as unsigned local drafts.
 
 ## Incremental materialization
 
@@ -129,7 +182,8 @@ cursor = next_cursor;
 ```
 
 The returned cursor captures all currently delivered history, including pending
-local drafts, and the requested viewpoint, even if no callbacks ran. Keep it
+local drafts, and the requested viewpoint, even if no callbacks ran. Queued
+received items are excluded until admission delivers them. Keep it
 with the successfully updated materializer state. The input cursor is not mutated;
 reusing it replays changes. The callback runs to completion with no early-break
 protocol, and its side effects are not rolled back if it panics.
@@ -205,9 +259,11 @@ participation. For a single-view membership query, use `diff(&view, &view)`:
 Comparing working and signed viewpoints gives the participation changes awaiting
 signatures. Compare their selected histories as well for signing-status UI:
 pending commits may have no visible effect, so document patches alone aren't
-enough. Save both viewpoints if we need historical signing status. Signing
-changes newly captured signed heads, not the working document or the meaning of
-either previously captured viewpoint.
+enough. Save both viewpoints if we need historical signing status. Admitting
+already delivered drafts alone changes newly captured signed heads, not working
+participation. Signing can also unblock received items, delivering new history
+that may change participation in newly captured views. Neither effect changes
+the meaning of either previously captured viewpoint.
 
 A commit diff isn't a document patch. A commit can participate in both views
 while its visible value changes because another commit stopped overwriting it.

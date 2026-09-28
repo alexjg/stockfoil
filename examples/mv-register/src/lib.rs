@@ -117,7 +117,7 @@ impl MvRegisterMap {
             .graph
             .commit_by(self.author(), &bcs::to_bytes(&assignment).unwrap());
         let hash = *meta.hash();
-        self.graph.ingest_local_commit(meta, assignment);
+        report_rejections(self.graph.ingest_local_commit(meta, assignment));
         self.pending.insert(hash);
         self.materialize();
         hash
@@ -128,9 +128,11 @@ impl MvRegisterMap {
             // Signing a fragment may already have admitted another pending edit.
             if !self.graph.has_commit(&hash) {
                 let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
-                self.graph
-                    .ingest_signature(self.author(), hash, signature)
-                    .unwrap();
+                report_rejections(
+                    self.graph
+                        .ingest_signature(self.author(), hash, signature)
+                        .unwrap(),
+                );
             }
         }
         self.materialize();
@@ -171,7 +173,7 @@ impl MvRegisterMap {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        self.graph.merge(&other.graph);
+        report_rejections(self.graph.merge(&other.graph));
         self.materialize();
     }
 
@@ -181,3 +183,15 @@ impl MvRegisterMap {
             .unwrap();
     }
 }
+
+// Local operations can unblock previously received, invalid fragments too.
+// This example logs those rejections; network load instead returns an error.
+fn report_rejections(report: stockfoil::IngestReport) {
+    for rejection in report.rejected {
+        eprintln!(
+            "rejected queued item {:?}: {}",
+            rejection.item, rejection.error
+        );
+    }
+}
+
