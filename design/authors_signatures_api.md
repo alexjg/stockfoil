@@ -123,7 +123,9 @@ Queries on the prepared diff:
 * `ViewPointDiff::changed_commits()` iterates `CommitDiff` values with
   `commit_id` and `visibility_delta`. The latter is `VisDiff::Before` or
   `VisDiff::After`; unchanged commits never appear. Each changed commit appears
-  once. Leave traversal order unspecified for now.
+  once, in topological (ancestors-before-descendants) order for both additions
+  and removals, including ancestry through omitted commits. Concurrent commits
+  have unspecified relative order, which may differ between replicas.
 
 A known commit outside a viewpoint's history is invisible there. An unknown
 hash is a query error, not proof of invisibility. Permission bounds are evaluated

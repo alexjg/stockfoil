@@ -68,8 +68,12 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
         })
     }
 
-    /// Each changed commit once. Does not report commits in both or neither viewpoint.
-    /// Traversal order is unspecified.
+    /// Each changed commit once, in topological (ancestors-before-descendants) order.
+    /// Does not report commits in both or neither viewpoint.
+    ///
+    /// The ordering applies to both additions and removals, including ancestry
+    /// through omitted commits. Concurrent commits have unspecified relative
+    /// order, which may differ between replicas.
     pub fn changed_commits(&self) -> impl Iterator<Item = CommitDiff> + '_ {
         self.graph.changed_commits(&self.before, &self.after)
     }
