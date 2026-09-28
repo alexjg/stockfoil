@@ -60,9 +60,10 @@ crate versions in `Cargo.toml`; this is not a stable cross-version protocol.
 - [`src/lib.rs`](src/lib.rs): register assignments, cached values, and one
   `visit_changes` materializer for edits, signing, ingestion, historical reads,
   and permission changes.
-- [`src/sync.rs`](src/sync.rs): exports Stockfoil's certified `minimal_cover`,
-  maps full commit hashes to Subduction IDs, requests sync/subscription, and
-  loads locally stored blobs into Stockfoil. Stockfoil owns pending items and
+- [`src/sync.rs`](src/sync.rs): uses `export_changes` and an `ExportCursor` to
+  publish new certified cover items, advancing the cursor after the batch is
+  stored in Subduction. It requests sync/subscription and loads locally stored
+  blobs into Stockfoil. Stockfoil owns pending items and
   payloads, automatically admitting them when dependencies arrive or are signed
   locally.
 - [`src/wire.rs`](src/wire.rs): **example-only** versioned BCS envelopes for

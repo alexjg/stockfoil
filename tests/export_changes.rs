@@ -1,5 +1,4 @@
-//! Contract tests for the export cursor API. Intentionally red until its
-//! constructors and export_changes implementation replace their todo!()s.
+//! Contract tests for incremental publication of the certified export cover.
 mod support;
 
 use std::collections::{BTreeSet, HashMap};
@@ -53,6 +52,13 @@ fn empty_cursor_exports_the_full_cover_and_advancing_makes_it_a_noop() {
     // A different destination starts with its own empty inventory.
     let (fresh, _) = graph.export_changes(&ExportCursor::default());
     assert_changes(&fresh, &expected, &[]);
+
+    let tip = at_depth(2, [*child.hash()], 0);
+    receive(&mut graph, signed_commit(&tip, 2));
+    let (increment, next) = graph.export_changes(&published);
+    assert_changes(&increment, &[ItemId::Commit(*tip.hash())], &[]);
+    let (noop, _) = graph.export_changes(&next);
+    assert_changes(&noop, &[], &[]);
 }
 
 #[test]
@@ -154,6 +160,38 @@ fn permissions_and_different_sufficient_proofs_do_not_republish_the_same_item() 
     graph.set_write_permissions(&HashMap::new());
     let (changes, _) = graph.export_changes(&cursor);
     assert_changes(&changes, &[], &[]);
+}
+
+#[test]
+fn a_deeper_fragment_retires_a_previously_published_fragment() {
+    let root = at_depth(1, [], 1);
+    let head = at_depth(1, [*root.hash()], 2);
+    let old = FragmentRange {
+        head: *root.hash(),
+        boundary: BTreeSet::new(),
+    };
+    let new = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::new(),
+    };
+    let mut graph = CommitGraph::new();
+    receive(&mut graph, signed_fragment(&old, vec![root.clone()], 1));
+    let (initial, cursor) = graph.export_changes(&ExportCursor::default());
+    assert_changes(&initial, &[ItemId::Fragment(old.clone())], &[]);
+
+    receive(&mut graph, signed_fragment(&new, vec![root, head], 1));
+    assert!(graph.export(&ItemId::Fragment(old.clone())).is_err());
+    let (changes, next) = graph.export_changes(&cursor);
+    assert_changes(&changes, &[ItemId::Fragment(new)], &[ItemId::Fragment(old)]);
+    let (noop, _) = graph.export_changes(&next);
+    assert_changes(&noop, &[], &[]);
+
+    // The retired fragment's previously returned certificate remains usable.
+    let mut receiver = CommitGraph::new();
+    for item in initial.added.into_iter().chain(changes.added) {
+        receive(&mut receiver, item);
+    }
+    assert_eq!(receiver.minimal_cover(), graph.minimal_cover());
 }
 
 #[test]

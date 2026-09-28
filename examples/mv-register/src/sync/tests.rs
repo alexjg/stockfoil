@@ -1,5 +1,6 @@
 use super::*;
 use crate::Assignment;
+use stockfoil::ItemId;
 
 fn set_loose(doc: &mut MvRegisterMap, label: &str) -> CommitHash {
     for nonce in 0..100_000 {

@@ -452,21 +452,34 @@ impl<P: Clone> CommitGraph<P> {
     /// for author coverage. A head announcement is not a fragment certificate.
     pub fn export(&self, id: &ItemId) -> Result<UnverifiedItem, ExportError> {
         let cover = self.minimal_cover();
+        let exportable = match id {
+            ItemId::Commit(hash) => {
+                cover.loose_commits.iter().any(|c| &c.commit == hash)
+                    || cover.fragments.iter().any(|f| &f.range.head == hash)
+            }
+            ItemId::Fragment(range) => cover.fragments.iter().any(|f| &f.range == range),
+        };
+        if !exportable {
+            return Err(ExportError::NotInMinimalCover(id.clone()));
+        }
+        Ok(self.export_certified(id))
+    }
+
+    // The caller has checked that this is a current cover entry or its signed
+    // head announcement. Do not recompute the cover for each exported item.
+    fn export_certified(&self, id: &ItemId) -> UnverifiedItem {
         match id {
-            ItemId::Commit(hash)
-                if cover.loose_commits.iter().any(|c| &c.commit == hash)
-                    || cover.fragments.iter().any(|f| &f.range.head == hash) =>
-            {
+            ItemId::Commit(hash) => {
                 let node = &self.nodes[self.by_hash[hash]];
-                Ok(UnverifiedItem::Commit {
+                UnverifiedItem::Commit {
                     meta: node.meta.clone(),
                     signatures: node
                         .signature_evidence()
                         .filter(|evidence| &evidence.author == node.meta.author())
                         .collect(),
-                })
+                }
             }
-            ItemId::Fragment(range) if cover.fragments.iter().any(|f| &f.range == range) => {
+            ItemId::Fragment(range) => {
                 let head = self.by_hash[&range.head];
                 let fragment = self.nodes[head].canonical_fragment().unwrap();
                 let mut commits = Vec::new();
@@ -475,7 +488,7 @@ impl<P: Clone> CommitGraph<P> {
                     ControlFlow::Continue(())
                 })
                 .expect("cover fragment is indexed");
-                Ok(UnverifiedItem::Fragment {
+                UnverifiedItem::Fragment {
                     range: range.clone(),
                     commits,
                     signatures: self.fragments[fragment]
@@ -492,19 +505,33 @@ impl<P: Clone> CommitGraph<P> {
                             })
                         })
                         .collect(),
-                })
+                }
             }
-            _ => Err(ExportError::NotInMinimalCover(id.clone())),
         }
     }
 
-    /// Export the changes in the sedimentree encoding of this graph since 
-    /// `_since`.
+    /// Export the changes in the sedimentree encoding of this graph since
+    /// `since`.
     pub fn export_changes(
         &self,
-        _since: &crate::ExportCursor,
+        since: &crate::ExportCursor,
     ) -> (crate::ExportChanges, crate::ExportCursor) {
-        todo!("compute certified-cover changes and the next export cursor")
+        let cover = self.minimal_cover();
+        let inventory: BTreeSet<_> = cover
+            .loose_commits
+            .into_iter()
+            .map(|commit| ItemId::Commit(commit.commit))
+            .chain(cover.fragments.into_iter().map(|fragment| ItemId::Fragment(fragment.range)))
+            .collect();
+        let added = inventory
+            .difference(&since.inventory)
+            .map(|id| self.export_certified(id))
+            .collect();
+        let retired = since.inventory.difference(&inventory).cloned().collect();
+        (
+            crate::ExportChanges { added, retired },
+            crate::ExportCursor { inventory },
+        )
     }
 
     /// Compute a complete export cover from retained fragment certificates and

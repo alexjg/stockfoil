@@ -6,7 +6,7 @@ use std::{
 
 use eyre::{Result, ensure};
 use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
-use stockfoil::{CommitHash, CommitMeta, ItemId, UnverifiedItem, WritePermission};
+use stockfoil::{CommitHash, CommitMeta, ExportCursor, UnverifiedItem, WritePermission};
 use subduction_core::timeout::call::CallTimeout;
 
 pub use crate::transport::RemoteServer;
@@ -18,35 +18,20 @@ use crate::{
 
 struct Replica {
     client: Client,
-    published: BTreeSet<ItemId>,
+    published: ExportCursor,
 }
 
 impl Replica {
     fn new(client: Client) -> Self {
         Self {
             client,
-            published: BTreeSet::new(),
+            published: ExportCursor::default(),
         }
     }
 
     async fn publish(&mut self, id: SedimentreeId, doc: &MvRegisterMap) -> Result<()> {
-        // The certified cover excludes unsigned local drafts.
-        let cover = doc.graph.minimal_cover();
-        let items = cover
-            .loose_commits
-            .into_iter()
-            .map(|c| ItemId::Commit(c.commit))
-            .chain(
-                cover
-                    .fragments
-                    .into_iter()
-                    .map(|f| ItemId::Fragment(f.range)),
-            );
-        for item_id in items {
-            if self.published.contains(&item_id) {
-                continue;
-            }
-            let item = doc.graph.export(&item_id)?;
+        let (changes, next) = doc.graph.export_changes(&self.published);
+        for item in changes.added {
             let blob = Blob::new(wire::encode(doc, &item)?);
             match &item {
                 UnverifiedItem::Commit { meta, .. } => {
@@ -73,8 +58,10 @@ impl Replica {
                         .await?;
                 }
             }
-            self.published.insert(item_id);
         }
+        // Advance only after the whole batch is stored. Superseded items can
+        // remain in Subduction; retirement is not a request to delete history.
+        self.published = next;
         Ok(())
     }
 
