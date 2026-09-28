@@ -15,12 +15,12 @@ cargo run -p stockfoil-mv-register
 This starts an in-memory **real Subduction WebSocket server** on an ephemeral
 loopback port. Two independent clients:
 
-1. Share authenticated initial history, including a certified fragment.
-2. Make concurrent assignments and converge to `{"Hello", "Howdy"}`.
-3. Read the original historical view, then revoke Bob locally; Alice sees only
-   `{"Hello"}` while Bob still sees both values.
-4. Keep an unsigned draft local, then sign it and synchronize it.
-5. Connect a fresh third replica, which catches up entirely from the server.
+1. Share an initial assignment.
+2. Make concurrent assignments.
+3. Synchronize and print `{"Hello", "Howdy"}` on both replicas.
+
+Fragment transfer, historical reads, revocation, unsigned drafts, and fresh-replica
+catch-up are exercised in the tests rather than in the runnable demo.
 
 No register `merge()` or cloned graph transfers history between clients. The
 server stores opaque blobs; it does not run the register or interpret its
@@ -61,10 +61,10 @@ crate versions in `Cargo.toml`; this is not a stable cross-version protocol.
   `visit_changes` materializer for edits, signing, ingestion, historical reads,
   and permission changes.
 - [`src/sync.rs`](src/sync.rs): exports Stockfoil's certified `minimal_cover`,
-  maps full commit hashes to Subduction IDs, requests sync/subscription, checks
-  transport metadata against the authenticated contents, and ingests items in
-  arrival order. Stockfoil owns pending items and payloads, automatically
-  admitting them when dependencies arrive or are signed locally.
+  maps full commit hashes to Subduction IDs, requests sync/subscription, and
+  loads locally stored blobs into Stockfoil. Stockfoil owns pending items and
+  payloads, automatically admitting them when dependencies arrive or are signed
+  locally.
 - [`src/wire.rs`](src/wire.rs): **example-only** versioned BCS envelopes for
   individual commits and fragments. Original author signatures are retained;
   the transport peer cannot replace them with its own signatures. Commit hashes
@@ -80,11 +80,17 @@ may be relayed. Unsigned drafts are not exported. Fragment checkpoints use
 Subduction's leading-zero-byte depth metric and 12-byte checkpoint IDs; complete
 heads, boundaries, and authenticated contents remain in the envelope.
 
+This minimal adapter assumes peers advertise transport metadata correctly; it
+provides blobs to Stockfoil without cross-checking their transport heads, parents,
+or fragment metadata. Incorrect advertisements can prevent convergence, but do
+not bypass Stockfoil's payload, signature, or graph-admission checks.
+
 Admission is atomic per item, not per batch. Network `load()` reports immediate
 and deferred admission errors and still materializes valid items admitted before
-the error. Local editing, signing, and merge log deferred rejections they unblock.
-Queued received items are invisible to materialization until admitted, unlike
-local unsigned drafts.
+the error. The register wrapper ignores deferred rejection reports from local
+operations rather than logging them; applications can inspect `IngestReport` for
+diagnostics. Queued received items are invisible to materialization until admitted,
+unlike local unsigned drafts.
 
 This deliberately small adapter polls rather than exposing a production event
 loop. It caps blobs at 8 MiB and WebSocket messages at 16 MiB, but the graph's
@@ -100,5 +106,7 @@ cargo test -p stockfoil-mv-register # just this example
 ```
 
 The WebSocket tests bind only `127.0.0.1:0` and need no external service. Other
-checks cover malformed envelopes, payload/signature tampering, transport-metadata
-mismatches, wrong server identity, deferred dependencies, and fragment relay.
+checks cover malformed envelopes, payload/signature tampering, wrong server
+identity, deferred dependencies, fragment relay, historical views, revocation,
+and draft publication. Network tests and fixtures live in
+[`src/sync/tests.rs`](src/sync/tests.rs).

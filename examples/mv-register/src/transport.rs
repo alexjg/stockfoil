@@ -1,16 +1,8 @@
 //! Real WebSocket transport and ownership of its background tasks.
 
-use std::{
-    fmt::Debug,
-    future::IntoFuture,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{future::IntoFuture, sync::Arc, time::Duration};
 
-use eyre::{Result, WrapErr, eyre};
+use eyre::{Result, ensure};
 use future_form::Sendable;
 use sedimentree_core::depth::CountLeadingZeroBytes;
 use subduction_core::{
@@ -28,7 +20,6 @@ use subduction_websocket::tokio::{
     TimeoutTokio, TrackedTokioSpawn, client::TokioWebSocketClient, server::TokioWebSocketServer,
 };
 use tokio::{
-    runtime::Handle,
     task::JoinHandle,
     time::{Instant, timeout, timeout_at},
 };
@@ -54,7 +45,7 @@ pub(crate) type Server = TokioWebSocketServer<
 >;
 
 pub(crate) async fn start_server() -> Result<Server> {
-    TokioWebSocketServer::setup(
+    Ok(TokioWebSocketServer::setup(
         ([127, 0, 0, 1], 0).into(),
         TimeoutTokio,
         Duration::from_secs(60),
@@ -66,8 +57,7 @@ pub(crate) async fn start_server() -> Result<Server> {
         NonceCache::default(),
         CountLeadingZeroBytes,
     )
-    .await
-    .wrap_err("starting WebSocket server")
+    .await?)
 }
 
 type Connection = MessageTransport<TokioWebSocketClient<MemorySigner>>;
@@ -93,8 +83,9 @@ type Node = Subduction<
 pub(crate) struct Client {
     pub node: Arc<Node>,
     pub server: PeerId,
-    lifecycle: Option<Lifecycle>,
-    runtime: Handle,
+    core: Vec<JoinHandle<()>>,
+    websocket: Vec<JoinHandle<()>>,
+    tracker: TaskTracker,
 }
 
 impl Client {
@@ -104,26 +95,19 @@ impl Client {
         let (conn, ws_listener, ws_sender, ws_keepalive) = timeout_at(
             deadline,
             TokioWebSocketClient::with_max_message_size(
-                remote.url.parse().wrap_err("invalid WebSocket URL")?,
+                remote.url.parse()?,
                 signer.clone(),
                 Audience::known(remote.peer_id),
                 MAX_MESSAGE_SIZE,
             ),
         )
-        .await
-        .wrap_err("WebSocket connection/handshake timed out")?
-        .wrap_err("WebSocket connection/handshake failed")?;
+        .await??;
 
-        // Audience::known is not itself a check of the returned identity.
-        // No tasks have been spawned yet; dropping these futures closes the
-        // unadmitted transport on an identity mismatch.
-        if conn.peer_id() != remote.peer_id {
-            return Err(eyre!(
-                "WebSocket peer identity mismatch: expected {}, received {}",
-                remote.peer_id,
-                conn.peer_id()
-            ));
-        }
+        // Audience::known does not check the returned identity. Check before spawning.
+        ensure!(
+            conn.peer_id() == remote.peer_id,
+            "WebSocket peer identity mismatch"
+        );
 
         let tracker = TaskTracker::new();
         let (node, _handler, listener, manager) = SubductionBuilder::new()
@@ -134,170 +118,70 @@ impl Client {
             .nonce_cache(NonceCache::default())
             .depth_metric(CountLeadingZeroBytes)
             .build::<Sendable, Connection>();
-
-        let mut lifecycle = Lifecycle {
-            node: node.clone(),
-            stopping: Arc::new(AtomicBool::new(false)),
-            tracker,
-            tasks: Vec::with_capacity(5),
-        };
-        // The builder listener already calls node.listen(): spawn it only once.
-        lifecycle.spawn("Subduction listener", listener, false);
-        lifecycle.spawn("Subduction manager", manager, false);
-        lifecycle.spawn("WebSocket listener", ws_listener, true);
-        lifecycle.spawn("WebSocket sender", ws_sender, true);
-        lifecycle.spawn("WebSocket keepalive", ws_keepalive, true);
         let client = Self {
             node,
             server: remote.peer_id,
-            lifecycle: Some(lifecycle),
-            runtime: Handle::current(),
+            core: vec![spawn(listener), spawn(manager)],
+            websocket: vec![spawn(ws_listener), spawn(ws_sender), spawn(ws_keepalive)],
+            tracker,
         };
-
-        let admission = timeout_at(
-            deadline,
-            client.node.add_connection(conn.map(MessageTransport::new)),
-        )
-        .await
-        .wrap_err("WebSocket admission timed out")
-        .and_then(|result| result.wrap_err("WebSocket admission failed"));
-        match admission {
-            Ok(true) => Ok(client),
-            result => {
-                client.close().await;
-                match result {
-                    Err(error) => Err(error),
-                    _ => Err(eyre!("fresh WebSocket connection was already registered")),
-                }
-            }
-        }
+        ensure!(
+            timeout_at(
+                deadline,
+                client.node.add_connection(conn.map(MessageTransport::new))
+            )
+            .await??,
+            "WebSocket connection already registered"
+        );
+        Ok(client)
     }
 
     pub(crate) async fn close(mut self) {
-        if let Some(lifecycle) = self.lifecycle.take() {
-            // Detach-safe: cancelling close must not interrupt the manager's
-            // normal shutdown cleanup. The drain itself has bounded waits.
-            report_join(
-                "WebSocket client cleanup",
-                self.runtime.spawn(lifecycle.drain()).await,
-            );
+        if let Some(drain) = self.shutdown() {
+            let _ = drain.await;
         }
+    }
+
+    fn shutdown(&mut self) -> Option<JoinHandle<()>> {
+        if self.core.is_empty() && self.websocket.is_empty() {
+            return None;
+        }
+        self.node.shutdown();
+        // Upstream disconnect() is a no-op: abort socket IO, but let the manager drain.
+        for task in &self.websocket {
+            task.abort();
+        }
+        self.tracker.close();
+        let core = std::mem::take(&mut self.core);
+        let websocket = std::mem::take(&mut self.websocket);
+        let tracker = self.tracker.clone();
+        // A separate task keeps cleanup running even if close() is cancelled.
+        Some(tokio::spawn(async move {
+            for mut task in core.into_iter().chain(websocket) {
+                if timeout(DRAIN_TIMEOUT, &mut task).await.is_err() {
+                    task.abort();
+                    let _ = timeout(DRAIN_TIMEOUT, task).await;
+                }
+            }
+            let _ = timeout(DRAIN_TIMEOUT, tracker.wait()).await;
+        }))
     }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
-        if let Some(lifecycle) = self.lifecycle.take() {
-            lifecycle.shutdown();
-            // Never block_on from Drop (which may run inside a Tokio task).
-            // If the runtime is shutting down, Lifecycle's Drop aborts leftovers.
-            self.runtime.spawn(lifecycle.drain());
-        }
-    }
-}
-
-struct Task {
-    name: &'static str,
-    handle: JoinHandle<()>,
-    transport: bool,
-}
-
-struct Lifecycle {
-    node: Arc<Node>,
-    stopping: Arc<AtomicBool>,
-    tracker: TaskTracker,
-    tasks: Vec<Task>,
-}
-
-impl Lifecycle {
-    fn spawn<F>(&mut self, name: &'static str, future: F, transport: bool)
-    where
-        F: IntoFuture,
-        F::IntoFuture: Send + 'static,
-        F::Output: Debug + Send + 'static,
-    {
-        let future = future.into_future();
-        let stopping = self.stopping.clone();
-        let node = self.node.clone();
-        let handle = tokio::spawn(async move {
-            let outcome = future.await;
-            if !stopping.load(Ordering::Acquire) {
-                eprintln!("{name} exited outside shutdown: {outcome:?}");
-                node.shutdown();
-            }
-        });
-        self.tasks.push(Task {
-            name,
-            handle,
-            transport,
-        });
-    }
-
-    fn shutdown(&self) {
-        self.stopping.store(true, Ordering::Release);
-        self.node.shutdown();
-        self.tracker.close();
-    }
-
-    async fn drain(mut self) {
+        // All clients live inside this example's Tokio runtime.
         self.shutdown();
-        // This client transport's disconnect() is a no-op. Its WS tasks can
-        // remain parked on socket IO, so explicitly unpark them as in e2e.rs.
-        // Crucially, leave the manager alive to abort its connection loops.
-        for task in &self.tasks {
-            if task.transport {
-                task.handle.abort();
-            }
-        }
-
-        let mut joined = 0;
-        let graceful = timeout(DRAIN_TIMEOUT, async {
-            for task in &mut self.tasks {
-                report_join(task.name, (&mut task.handle).await);
-                joined += 1;
-            }
-            self.tracker.wait().await;
-        })
-        .await;
-
-        if graceful.is_err() {
-            eprintln!("WebSocket client shutdown timed out; aborting remaining tasks");
-            for task in &self.tasks[joined..] {
-                task.handle.abort();
-            }
-            if timeout(DRAIN_TIMEOUT, async {
-                for task in &mut self.tasks[joined..] {
-                    report_join(task.name, (&mut task.handle).await);
-                }
-                self.tracker.wait().await;
-            })
-            .await
-            .is_err()
-            {
-                eprintln!(
-                    "WebSocket client abort drain timed out ({} tracked tasks remain)",
-                    self.tracker.len()
-                );
-            }
-        }
     }
 }
 
-impl Drop for Lifecycle {
-    fn drop(&mut self) {
-        // Also covers cancellation of connect/close or runtime shutdown while
-        // the best-effort asynchronous Drop cleanup is pending.
-        self.shutdown();
-        for task in &self.tasks {
-            task.handle.abort();
-        }
-    }
-}
-
-fn report_join(name: &str, result: std::result::Result<(), tokio::task::JoinError>) {
-    if let Err(error) = result
-        && !error.is_cancelled()
-    {
-        eprintln!("{name} failed: {error}");
-    }
+fn spawn<F>(future: F) -> JoinHandle<()>
+where
+    F: IntoFuture,
+    F::IntoFuture: Send + 'static,
+{
+    let future = future.into_future();
+    tokio::spawn(async move {
+        let _ = future.await;
+    })
 }
