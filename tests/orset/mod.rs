@@ -1,17 +1,16 @@
-//! Delivery-only observed-remove set. The graph supplies causal ordering and
-//! deduplication, so the materialized state only needs the surviving add IDs.
-use std::{
-    collections::{BTreeSet, HashMap},
-    ops::ControlFlow,
-};
+//! Delivery-only observed-remove set using the standard materialization cursor.
+//! This example intentionally ignores permission changes and processes only
+//! `newly_delivered` events, retaining just the surviving add IDs.
+use std::collections::{BTreeSet, HashMap};
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
-use stockfoil::{Author, CommitGraph, CommitHash, Signature};
+use stockfoil::{Author, CommitGraph, CommitHash, MaterializationCursor, Signature};
 
 pub struct OrSet {
     graph: CommitGraph<Op>,
     adds: HashMap<String, BTreeSet<CommitHash>>,
+    cursor: MaterializationCursor,
     signing_key: SigningKey,
 }
 
@@ -29,6 +28,7 @@ impl OrSet {
         Self {
             graph: CommitGraph::new(),
             adds: HashMap::new(),
+            cursor: MaterializationCursor::new(),
             signing_key: SigningKey::from_bytes(&rand::random()),
         }
     }
@@ -55,7 +55,6 @@ impl OrSet {
     }
 
     fn commit(&mut self, op: Op) {
-        let before: Vec<_> = self.graph.heads().collect();
         let meta = self
             .graph
             .commit_by(self.author(), &bcs::to_bytes(&op).unwrap());
@@ -65,7 +64,7 @@ impl OrSet {
         self.graph
             .ingest_signature(self.author(), hash, signature)
             .unwrap();
-        self.evaluate(&before);
+        self.materialize();
     }
 
     pub fn fork(&self) -> Self {
@@ -75,28 +74,34 @@ impl OrSet {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        let before: Vec<_> = self.graph.heads().collect();
         self.graph.merge(&other.graph);
-        self.evaluate(&before);
+        self.materialize();
     }
 
-    fn evaluate(&mut self, since: &[CommitHash]) {
-        self.graph.traverse_since(since, |meta, op| {
-            match op {
-                Op::Add(value) => {
-                    self.adds
-                        .entry(value.clone())
-                        .or_default()
-                        .insert(*meta.hash());
+    fn materialize(&mut self) {
+        self.cursor = self
+            .graph
+            .visit_changes(&self.cursor, &self.graph.view_point(), |change| {
+                // This set models delivery only. Unlike the MVR example it has no
+                // revocation policy, so visibility does not affect its operations.
+                if !change.newly_delivered {
+                    return;
                 }
-                Op::Remove { value, observed } => {
-                    if let Some(adds) = self.adds.get_mut(value) {
-                        adds.retain(|hash| !observed.contains(hash.as_bytes()));
+                match change.payload {
+                    Op::Add(value) => {
+                        self.adds
+                            .entry(value.clone())
+                            .or_default()
+                            .insert(*change.meta.hash());
+                    }
+                    Op::Remove { value, observed } => {
+                        if let Some(adds) = self.adds.get_mut(value) {
+                            adds.retain(|hash| !observed.contains(hash.as_bytes()));
+                        }
                     }
                 }
-            }
-            ControlFlow::Continue(())
-        });
+            })
+            .unwrap();
     }
 
     pub fn value(&self) -> BTreeSet<String> {

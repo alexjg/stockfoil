@@ -2,6 +2,49 @@
 
 A library for building CRDTs on top of authenticated commit DAGs.
 
+## Materializing a CRDT
+
+Use `CommitGraph::visit_changes` as the standard update path. Keep a
+`MaterializationCursor` alongside your materialized state, and run the same
+callback after local edits, ingestion/merge, signing, or permission changes:
+
+```rust
+use stockfoil::MaterializationCursor;
+
+// Initialize once, together with an empty application-specific materializer.
+let mut cursor = MaterializationCursor::new();
+
+// Repeat this update after changing the graph or its permissions.
+let after = graph.view_point();
+cursor = graph.visit_changes(&cursor, &after, |change| {
+    materializer.apply(change);
+})?;
+```
+
+Inside `apply`, store `change.meta` and `change.payload` when `newly_delivered` is
+true, even if the commit is currently denied. Use `visibility` to enable
+participation for `Vis::After` or disable it for `Vis::Before`. Each commit is
+visited at most once per traversal, in ancestors-before-descendants order.
+Keep any older operations needed to recompute document-level effects when
+revocation reveals a previously overwritten value.
+
+Pass `signed_view_point()` to restrict participation to admitted history; newly
+delivered drafts still arrive for storage. Pass a captured `ViewPoint` for a
+historical view. To read history without moving the live view, copy the
+materialized state **and** its cursor before updating that copy.
+
+Executable examples:
+
+* [Multi-value registers](tests/mv_register/implementation.rs): one callback for
+  new assignments, revocation, cached current values, and historical reads.
+* [Observed-remove set](tests/orset/mod.rs): the delivery-only case, processing
+  `newly_delivered` events with the same cursor API.
+
+See the [materialization API guide](design/authors_signatures_api.md#incremental-materialization)
+for the full contract. `diff`, `traverse`, and `traverse_since` are lower-level
+options for graph inspection and specialized consumers, not prerequisites for
+materialization.
+
 ## A history lesson
 
 This library grew out of the work I have been doing on
@@ -108,14 +151,14 @@ streaming fashion. This covers verifying the hash graph.
 
 ### Materializing the view
 
-There are generally two flows to think about when materializing the view:
+Cold starts and incremental updates use the same `visit_changes` callback. An
+empty cursor starts a new materialization; a retained cursor includes newly
+delivered commits and participation changes since the previous update. See
+[Materializing a CRDT](#materializing-a-crdt) above.
 
-* The cold start flow where we are feeding all the commits we have through the
-  materialization
-* The incremental flow where we are feeding new fragments we know about into the
-  materialization
-
-Note that `stockfoil` doesn't know anything about the encoding of commits or bundles.
+Stockfoil does not interpret application payloads. The materializer decides how
+commit participation affects CRDT values and retains the data needed for
+revocation and historical views.
 
 ### Encoding Commits
 

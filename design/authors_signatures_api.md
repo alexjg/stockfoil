@@ -53,9 +53,11 @@ when signatures haven't arrived yet.
 
 ## Delivery and permissions
 
-* `heads`, `traverse`, and `traverse_since` expose
-  causally delivered history, including local drafts. Received items must be
-  verified before admission and delivery; permissions don't gate delivery.
+* `visit_changes` is the standard materialization entry point, combining delivery
+  and participation changes. The lower-level `heads`, `traverse`, and
+  `traverse_since` APIs expose causally delivered history, including local drafts.
+  Received items must be verified before admission and delivery; permissions
+  don't gate delivery.
   Admitted commits are exactly delivered commits not marked `pending_local`.
   Their history is verified and parent-closed by invariant, so `CommitGraph`
   needs neither a separate authenticated set nor per-author
@@ -80,10 +82,71 @@ when signatures haven't arrived yet.
   Receiving data must not grant access. Revoked, admitted commits remain
   available for delivery and sync.
 
-Both examples sign their local commits. The OR-set uses delivery only; the MVR
-also exercises participation and explicit permission grants.
+Both examples sign their local commits and materialize through `visit_changes`.
+The OR-set uses delivery only; the MVR also exercises participation and explicit
+permission grants.
 
-## Viewpoints and diffs
+## Incremental materialization
+
+Use `CommitGraph::visit_changes(&cursor, &after, callback)` as the standard way
+to build or update a CRDT view. It combines delivery and participation changes in
+one callback and returns `Result<MaterializationCursor, DiffError>`. Use the same
+path after local edits, signing, receipt/merge, or permission changes, rather than
+coordinating a delivery traversal with a separate diff.
+
+Start an empty materializer with `MaterializationCursor::new()` (or `default()`).
+The cursor owns both the previously processed delivery heads and the previous
+viewpoint. These are deliberately separate: a historical or signed viewpoint may
+exclude delivered commits that the materializer has already stored. Read-only
+`delivery_heads()` and `view_point()` accessors expose the snapshots.
+
+Each callback receives a `MaterializationChange<'_, P>` with:
+
+* `meta: &CommitMeta` and `payload: &P`, borrowed without cloning.
+* `newly_delivered: bool`, indicating that the commit lies outside the cursor's
+  processed delivery history. Store this data even when it does not participate.
+* `visibility: Vis`, classifying participation in the old and requested views.
+
+A commit is visited once if newly delivered or if its participation changed,
+never twice when both conditions hold. Newly delivered denied commits are visited
+with `Vis::Neither`. Already stored commits whose participation is unchanged are
+omitted. Additions and removals are visited in ancestors-before-descendants order,
+including ancestry through omitted commits; concurrent ordering is unspecified.
+
+```rust
+let next_cursor = graph.visit_changes(&cursor, &after, |change| {
+    if change.newly_delivered {
+        log.add_operations_from(change.meta, change.payload, false);
+    }
+    match change.visibility {
+        Vis::After => log.set_commit_visibility(*change.meta.hash(), true),
+        Vis::Before => log.set_commit_visibility(*change.meta.hash(), false),
+        Vis::Both | Vis::Neither => {}
+    }
+})?;
+cursor = next_cursor;
+```
+
+The returned cursor captures all currently delivered history, including pending
+local drafts, and the requested viewpoint, even if no callbacks ran. Keep it
+with the successfully updated materializer state. The input cursor is not mutated;
+reusing it replays changes. The callback runs to completion with no early-break
+protocol, and its side effects are not rolled back if it panics.
+
+All history heads in the cursor and target viewpoint are validated before any
+callback. A missing head returns `DiffError::MissingCommit`; unknown permission
+bounds grant nothing. A cursor can be reused on another graph with its delivered
+history, regardless of graph-local chain assignments, provided the caller retains
+the corresponding materializer state. Admission and signatures are not checked
+by this traversal.
+
+This remains a commit-level update stream, not a document patch. For example,
+revoking an overwriting assignment may restore an older value without revisiting
+that older commit. Keep the operations needed to recompute such effects.
+`tests/mv_register/implementation.rs` demonstrates this with a cached materialized
+view; `tests/orset/mod.rs` shows the simpler delivery-only case using the same API.
+
+## Viewpoints and lower-level queries
 
 `ViewPoint` is an owned, cloneable description containing only `heads`
 and `write_permissions`. Give it a `heads() -> &[CommitHash]` accessor
@@ -98,7 +161,9 @@ heads and histories. No authentication frontier or extra local-changes field is
 needed. Authentication is an admission check, not a participation predicate;
 actual transport signature evidence is kept independently of viewpoints.
 
-Proposed graph methods:
+Select a target using `view_point()` or `signed_view_point()`, then pass it to
+`visit_changes`. For specialized queries that do not maintain materialized state,
+`diff` remains available as a participation-only primitive:
 
 * `view_point() -> ViewPoint` captures all delivered history, including local
   drafts, and the current write permissions.
@@ -146,64 +211,6 @@ either previously captured viewpoint.
 A commit diff isn't a document patch. A commit can participate in both views
 while its visible value changes because another commit stopped overwriting it.
 
-## Incremental materialization
-
-`CommitGraph::visit_changes(&cursor, &after, callback)` combines delivery and
-participation updates in one traversal. It returns
-`Result<MaterializationCursor, DiffError>`; `diff` remains available for callers
-that only need participation comparisons.
-
-Start an empty materializer with `MaterializationCursor::new()` (or `default()`).
-The cursor owns both the previously processed delivery heads and the previous
-viewpoint. These are deliberately separate: a historical or signed viewpoint may
-exclude delivered commits that the materializer has already stored. Read-only
-`delivery_heads()` and `view_point()` accessors expose the snapshots.
-
-Each callback receives a `MaterializationChange<'_, P>` with:
-
-* `meta: &CommitMeta` and `payload: &P`, borrowed without cloning.
-* `newly_delivered: bool`, indicating that the commit lies outside the cursor's
-  processed delivery history. Store this data even when it does not participate.
-* `visibility: Vis`, classifying participation in the old and requested views.
-
-A commit is visited once if newly delivered or if its participation changed,
-never twice when both conditions hold. Newly delivered denied commits are visited
-with `Vis::Neither`. Already stored commits whose participation is unchanged are
-omitted. Additions and removals are visited in ancestors-before-descendants order,
-including ancestry through omitted commits; concurrent ordering is unspecified.
-
-```rust
-let next_cursor = graph.visit_changes(&cursor, &after, |change| {
-    if change.newly_delivered {
-        log.add_operations_from(change.meta, change.payload, false);
-    }
-    match change.visibility {
-        Vis::After => log.set_commit_visibility(*change.meta.hash(), true),
-        Vis::Before => log.set_commit_visibility(*change.meta.hash(), false),
-        Vis::Both | Vis::Neither => {}
-    }
-})?;
-cursor = next_cursor;
-```
-
-The returned cursor captures all currently delivered history, including pending
-local drafts, and the requested viewpoint, even if no callbacks ran. Keep it
-with the successfully updated materializer state. The input cursor is not mutated;
-reusing it replays changes. The callback runs to completion with no early-break
-protocol, and its side effects are not rolled back if it panics.
-
-All history heads in the cursor and target viewpoint are validated before any
-callback. A missing head returns `DiffError::MissingCommit`; unknown permission
-bounds grant nothing as in `diff`. A cursor can be reused on another graph with
-its delivered history, regardless of graph-local chain assignments, provided the
-caller retains the corresponding materializer state. Admission and signatures
-are not checked by this traversal.
-
-This remains a commit-level update stream, not a document patch. For example,
-revoking an overwriting assignment may restore an older value without revisiting
-that older commit. `tests/materialization.rs` exercises that flow with a retained
-operation store, along with historical reads, drafts, and permission-only changes.
-
 ## MVR demo
 
 The graph retains every delivered assignment. The MVR selects the causally
@@ -211,12 +218,18 @@ maximal *participating* assignments for each key. Revoking an assignment removes
 both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
-The implementation lives in `tests/mv_register/implementation.rs`. It computes
-values on reads rather than maintaining a second state cache. `get_at` uses
-`diff(view, view)` for both local and imported snapshots, returning `DiffError`
-if a history head is missing. Delivered working snapshots remain readable before
-signing; the example does not track snapshot provenance or validate admission on
-reads. Merge still transfers only authenticated history.
+The implementation lives in `tests/mv_register/implementation.rs`. Its materializer
+owns a cursor, all delivered assignments, their participation, and cached values.
+One `visit_changes` callback stores new assignments and updates participation,
+then affected keys are recomputed from the retained writes. `get` reads the cache.
+Local edits, signing, permission changes, and merge all call that same update path.
+
+`get_at` clones the materialized state together with its cursor and updates that
+private copy to the requested viewpoint. Historical reads therefore use the same
+materialization logic without changing live state or redelivering stored writes.
+They return `DiffError` if a history head is missing. Delivered working snapshots
+remain readable before signing; admission is not validated on reads. Merge still
+transfers only authenticated history.
 
 The example owns its signing key and has no external-signer wrapper or wire
 protocol. Its document API is:
@@ -233,9 +246,12 @@ protocol. Its document API is:
 
 The tests are sibling modules and cannot inspect the private graph. They cover
 concurrent register values, revocation restoring overwritten values, and one
-prepare/publish/relay flow preserving historical drafts. The OR-set example in
-`tests/orset/mod.rs` instead applies each delivered operation once with
-`traverse_since`, retaining only surviving add IDs.
+prepare/publish/relay flow preserving historical drafts. Additional tests cover
+denied delivery followed by permission grants, late frontier proofs, and isolated
+historical reads. The OR-set example in `tests/orset/mod.rs` uses `visit_changes`
+as well, processing only `newly_delivered` events and retaining surviving add IDs.
+It intentionally models delivery only, not revocation: its operations ignore
+`visibility`. Neither example needs raw traversal or a separate participation diff.
 
 Signature errors, causal admission, fragment certificates, and viewpoint diffs
 are tested directly in the graph suites rather than repeated through the examples.

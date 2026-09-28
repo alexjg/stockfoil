@@ -1,21 +1,21 @@
-//! Multi-value registers: retain assignments, then select each key's causally
-//! maximal participating writes. This example only merges in-memory replicas.
+//! Multi-value registers materialized through a single `visit_changes` callback.
+//! Retain all assignments so revocation can reveal previously overwritten values.
+//! This example only merges in-memory replicas.
 
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    ops::ControlFlow,
-};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use stockfoil::{
-    Author, CommitGraph, CommitHash, DiffError, Signature, ViewPoint, Vis, WritePermission,
+    Author, CommitGraph, CommitHash, DiffError, MaterializationCursor, Signature, ViewPoint, Vis,
+    WritePermission,
 };
 
 pub struct MvRegisterMap {
     graph: CommitGraph<Assignment>,
     signing_key: SigningKey,
     pending: BTreeSet<CommitHash>,
+    materialized: Materialized,
 }
 
 #[derive(Clone, Serialize)]
@@ -24,12 +24,71 @@ struct Assignment {
     value: String,
 }
 
+#[derive(Clone, Default)]
+struct Materialized {
+    cursor: MaterializationCursor,
+    // Delivery is parent-closed, so appending each new batch preserves this
+    // topological order even when the displayed viewpoint moves backwards.
+    assignments: Vec<(CommitHash, Assignment)>,
+    participating: BTreeSet<CommitHash>,
+    values: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Materialized {
+    fn update(
+        &mut self,
+        graph: &CommitGraph<Assignment>,
+        view: &ViewPoint,
+    ) -> Result<(), DiffError> {
+        let mut affected = BTreeSet::new();
+        let next = graph.visit_changes(&self.cursor, view, |change| {
+            let hash = *change.meta.hash();
+            if change.newly_delivered {
+                // Keep even denied writes: a later permission change can enable
+                // them without delivering their payloads again.
+                self.assignments.push((hash, change.payload.clone()));
+            }
+            match change.visibility {
+                Vis::After => {
+                    self.participating.insert(hash);
+                    affected.insert(change.payload.key.clone());
+                }
+                Vis::Before => {
+                    self.participating.remove(&hash);
+                    affected.insert(change.payload.key.clone());
+                }
+                Vis::Both | Vis::Neither => {}
+            }
+        })?;
+
+        // A revoked assignment can reveal an older write that wasn't revisited.
+        // Recompute only affected keys, using all retained participating writes.
+        for key in affected {
+            let mut maximal = BTreeMap::new();
+            for (hash, assignment) in &self.assignments {
+                if assignment.key == key && self.participating.contains(hash) {
+                    maximal.retain(|older, _| !graph.is_ancestor(older, hash));
+                    maximal.insert(*hash, assignment.value.clone());
+                }
+            }
+            self.values.insert(key, maximal.into_values().collect());
+        }
+        self.cursor = next;
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> BTreeSet<String> {
+        self.values.get(key).cloned().unwrap_or_default()
+    }
+}
+
 impl MvRegisterMap {
     pub fn new() -> Self {
         let mut doc = Self {
             graph: CommitGraph::new(),
             signing_key: SigningKey::from_bytes(&rand::random()),
             pending: BTreeSet::new(),
+            materialized: Materialized::default(),
         };
         doc.set_write_permissions(&HashMap::from([(doc.author(), WritePermission::Unbounded)]));
         doc
@@ -50,6 +109,7 @@ impl MvRegisterMap {
         let hash = *meta.hash();
         self.graph.ingest_local_commit(meta, assignment);
         self.pending.insert(hash);
+        self.materialize();
         hash
     }
 
@@ -63,6 +123,7 @@ impl MvRegisterMap {
                     .unwrap();
             }
         }
+        self.materialize();
     }
 
     pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
@@ -73,6 +134,7 @@ impl MvRegisterMap {
 
     pub fn set_write_permissions(&mut self, permissions: &HashMap<Author, WritePermission>) {
         self.graph.set_write_permissions(permissions);
+        self.materialize();
     }
 
     pub fn view_point(&self) -> ViewPoint {
@@ -80,21 +142,15 @@ impl MvRegisterMap {
     }
 
     pub fn get(&self, key: &str) -> BTreeSet<String> {
-        self.get_at(&self.view_point(), key).unwrap()
+        self.materialized.get(key)
     }
 
     pub fn get_at(&self, view: &ViewPoint, key: &str) -> Result<BTreeSet<String>, DiffError> {
-        let participation = self.graph.diff(view, view)?;
-        let mut writes = BTreeMap::new();
-        self.graph.traverse(|meta, assignment| {
-            if assignment.key == key && participation.visibility(meta.hash()).unwrap() == Vis::Both
-            {
-                writes.retain(|hash, _| !self.graph.is_ancestor(hash, meta.hash()));
-                writes.insert(*meta.hash(), assignment.value.clone());
-            }
-            ControlFlow::Continue(())
-        });
-        Ok(writes.into_values().collect())
+        // Use the same update path on a private copy of the state and cursor.
+        // Historical reads must not move the live document's materialization.
+        let mut historical = self.materialized.clone();
+        historical.update(&self.graph, view)?;
+        Ok(historical.get(key))
     }
 
     pub fn fork(&self) -> Self {
@@ -106,5 +162,12 @@ impl MvRegisterMap {
 
     pub fn merge(&mut self, other: &Self) {
         self.graph.merge(&other.graph);
+        self.materialize();
+    }
+
+    fn materialize(&mut self) {
+        self.materialized
+            .update(&self.graph, &self.graph.view_point())
+            .unwrap();
     }
 }

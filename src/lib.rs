@@ -1,7 +1,24 @@
 //! # Stockfoil
 //!
 //! `stockfoil` is a library for storing and synchronizing authenticated commit
-//! graphs
+//! graphs.
+//!
+//! # Materialization
+//!
+//! Use [`CommitGraph::visit_changes`] to build and update a CRDT view. Keep a
+//! [`MaterializationCursor`] alongside the materialized state and use one
+//! callback for newly delivered payloads and changes in commit participation.
+//! This handles cold starts, local edits, merge, signing, and revocation without
+//! coordinating separate delivery and diff traversals.
+//!
+//! Target [`CommitGraph::view_point`] for the working view (including drafts),
+//! [`CommitGraph::signed_view_point`] for admitted history, or a captured
+//! [`ViewPoint`] for a historical view. For an isolated historical read, copy
+//! both the materialized state and its cursor before updating the copy.
+//!
+//! [`CommitGraph::diff`], [`CommitGraph::traverse`], and
+//! [`CommitGraph::traverse_since`] are lower-level tools for specialized queries
+//! and graph inspection.
 mod ancestor_clock;
 mod author;
 pub use author::Author;

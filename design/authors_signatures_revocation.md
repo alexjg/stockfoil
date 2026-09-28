@@ -137,13 +137,13 @@ prevent them from contributing.
 
 ## Revocation History
 
-The `stockfoil::CommitGraph::traverse_delivered_since` API is one example of a very
-useful kind of API which allows applications to perform incremental updates.
-Another example would be a `diff` API which allows applications to compute the
-difference between two parts of the commit graph. At the moment these kinds of
-API are passed the heads of the document, but this is not sufficient for
-applications which want to do things like diff the before and after of a
-revocation. 
+Tracking only delivered heads, as with the lower-level `traverse_since` API,
+is not enough for incremental materialization: revocation can change a document
+without delivering new commits. The standard `visit_changes` API instead tracks
+both delivered history and the previous viewpoint in a `MaterializationCursor`.
+It reports new data and participation changes through one callback. A separate
+`diff` API is available for specialized participation queries without maintaining
+a materialized view.
 
 Ideally we want an API which makes revocation view changes explicit. This is
 complicated though. Revocation view changes are driven by two things: the
@@ -297,99 +297,63 @@ See the [implementation sketch](authors_signatures_api.md) for proposed API
 changes and the MVR test plan.
 
 `set_write_permissions` replaces the whole permission map. Omitted authors are
-denied, and existing viewpoints keep their old snapshots.
+denied, and existing viewpoints keep their old snapshots. Use `visit_changes`
+for both initial materialization and subsequent updates; delivery and revocation
+bookkeeping belong in the same callback.
+
+In this sketch, `Operation`, `log`, and `load_payload` are application-specific.
+Payload decoding and validation remain the application's responsibility.
 
 ```rust
 use std::collections::HashMap;
+use stockfoil::{CommitGraph, MaterializationChange, MaterializationCursor, Vis, WritePermission};
 
-let mut graph: CommitGraph = CommitGraph::new();
-
-// Alice and Bob can write without a frontier. Everyone else is denied.
+let mut graph = CommitGraph::<Operation>::new();
 let mut permissions = HashMap::from([
-    (alice.clone(), WritePermission::Unbounded),
+    (alice, WritePermission::Unbounded),
     (bob, WritePermission::Unbounded),
 ]);
 graph.set_write_permissions(&permissions);
+let mut cursor = MaterializationCursor::new();
 
-// Load received items after verification, in dependency order.
-// Buffer unverified items and missing dependencies outside the graph.
-for commit in commits {
-    graph.ingest_commit(commit)?;
+// Define the materialization logic once, for cold starts and every update.
+let mut apply_change = |change: MaterializationChange<'_, Operation>| {
+    if change.newly_delivered {
+        // Retain new operations, initially inactive, even if currently denied.
+        log.add_operations_from(change.meta, change.payload, false);
+    }
+    match change.visibility {
+        Vis::After => log.set_commit_visibility(*change.meta.hash(), true),
+        Vis::Before => log.set_commit_visibility(*change.meta.hash(), false),
+        Vis::Both | Vis::Neither => {}
+    }
+};
+
+// Verify and admit received items in dependency order. Missing dependencies
+// are buffered outside the graph, before materialization.
+for item in received_items {
+    graph.ingest(item.verify()?, load_payload)?;
 }
+cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 
-// At this point the graph is loaded and the permissions have been applied.
+// New history may also enable previously stored writes via frontier proofs.
+graph.ingest(new_item.verify()?, load_payload)?;
+cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 
-// This gives us the "current viewpoint" of the graph. A combination of:
-// * the heads of the commit graph
-// * an immutable snapshot of the per-author write permissions
-// This is the working viewpoint, including local drafts.
-// signed_view_point() instead selects the maximal admitted commits as heads.
-let view_point = graph.view_point();
-
-// Now admit a verified received change whose dependencies are admitted.
-graph.ingest_commit(new_commit)?;
-
-// Now incorporate new commits into the operation log
-let post_view_point = graph.view_point();
-graph.traverse_since(view_point.heads(), |commit| {
-    // Newly delivered commits did not contribute under the source viewpoint.
-    // Store their operations as inactive until we process the participation diff.
-    log.add_operations_from(commit, false);
-});
-
-// Ingestion can change participation for previously delivered commits too,
-// for example when a new commit supplies a missing write-frontier proof.
-let ingestion_diff = graph.diff(&view_point, &post_view_point)?;
-for commit_diff in ingestion_diff.changed_commits() {
-    let visible = match commit_diff.visibility_delta {
-        VisDiff::Before => false,
-        VisDiff::After => true,
-    };
-    // CRDT-specific bookkeeping: update participation, not operation storage.
-    log.set_commit_visibility(commit_diff.commit_id, visible);
-}
-// The operation log now reflects post_view_point. Signing local drafts changes
-// newly captured signed heads, not this working document. To update a signed
-// materialization, compare signed viewpoints captured before and after signing.
-
-let pre_revocation_view_point = graph.view_point();
-// Revoke Alice at these heads. Bob stays unbounded.
+// Revoke Alice at these heads. Bob stays unbounded. No new delivery is needed.
 permissions.insert(alice, WritePermission::Bounded(revocation_heads));
 graph.set_write_permissions(&permissions);
-
-// Now diff again
-let diff = graph.diff(&pre_revocation_view_point, &graph.view_point())?;
-for commit_diff in diff.changed_commits() {
-    match commit_diff.visibility_delta {
-        VisDiff::Before => {
-            // commit contributed before but does not contribute after
-        }
-        VisDiff::After => {
-            // commit did not contribute before but contributes after
-        }
-    }
-}
-
-
-// Another way is to walk our CRDT operation log checking visibility against
-// the diff
-for op in crdt_specific_op_log {
-    match diff.visibility(op.commit_id) {
-        Vis::Before => {
-            // commit was visible before but not after
-        }
-        Vis::After => {
-            // commit was not visible before but is after
-        }
-        Vis::Both => {
-            // commit was visible and is still visible
-        }
-        Vis::Neither => {
-            // commit was invisible and is still invisible
-        }
-    }
-}
+cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 ```
+
+For an admitted-only view, pass `signed_view_point()` instead of `view_point()`;
+the same callback handles later signing without storing operations twice. For a
+historical read that must not change live state, copy the materializer together
+with its cursor, then update the copy to the requested viewpoint. The MVR example
+uses exactly this approach.
+
+Raw traversal and participation-only `diff` queries remain available for graph
+inspection or specialized consumers, but are not needed for this update loop.
 
 
 

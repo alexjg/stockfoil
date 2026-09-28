@@ -506,6 +506,9 @@ impl<P: Clone> CommitGraph<P> {
 
     /// Visit each delivered commit once, parents before children, including local drafts.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
+    ///
+    /// This is a raw delivery traversal. For CRDT materialization, prefer
+    /// [`Self::visit_changes`] to also handle changes in participation.
     pub fn traverse<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(&self, mut traversal: F) {
         // Only ready commits are inserted, so node order is already topological.
         for (idx, node) in &self.nodes {
@@ -518,6 +521,9 @@ impl<P: Clone> CommitGraph<P> {
     /// Visit delivered commits excluding `since` and their ancestors, parents first.
     /// An empty `since` visits all delivered commits. Unknown hashes are ignored.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
+    ///
+    /// This lower-level API does not report permission changes. Prefer
+    /// [`Self::visit_changes`] for incremental materialization.
     pub fn traverse_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
         &self,
         since: &[CommitHash],
@@ -640,6 +646,9 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Compare participation over delivered history, including pending local drafts.
+    /// This is a participation-only query; prefer [`Self::visit_changes`] for
+    /// materialization that also needs newly delivered payloads.
+    ///
     /// Returns [`DiffError::MissingCommit`] if either viewpoint names a missing
     /// history head, even when its author is denied permission. Unknown permission
     /// bounds grant nothing; they are not missing-history errors.
@@ -660,6 +669,10 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     /// Visit newly delivered commits and participation changes in one traversal.
+    ///
+    /// This is the standard entry point for CRDT materialization. Start with an
+    /// empty [`MaterializationCursor`] and materializer, then use the same callback
+    /// after local edits, ingestion/merge, signing, or permission changes.
     ///
     /// A commit is visited exactly once if it is outside `cursor`'s processed
     /// delivery history or its participation changes from `cursor.view_point()`
