@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    Author, CommitHash, NodeIdx, QueryError, WritePermission,
+    Author, CommitGraph, CommitHash, NodeIdx, QueryError, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime},
     commit_graph::{Node, NodeStore},
 };
@@ -54,7 +54,7 @@ pub(crate) struct PreparedView {
 }
 
 impl PreparedView {
-    fn contains(&self, node: &Node, time: ChainTime) -> bool {
+    pub(crate) fn contains(&self, node: &Node, time: ChainTime) -> bool {
         self.history.contains_time(time)
             && (self.unbounded.contains(node.author())
                 || self
@@ -64,45 +64,25 @@ impl PreparedView {
     }
 }
 
-/// A viewpoint resolved against verified, causally admitted graph history.
-#[derive(Debug)]
-pub struct ResolvedViewPoint<'graph> {
-    pub(crate) known: &'graph HashMap<CommitHash, NodeIdx>,
-    pub(crate) nodes: &'graph NodeStore,
-    pub(crate) visible: PreparedView,
-}
-
-impl ResolvedViewPoint<'_> {
-    /// Whether a known commit contributes. An unknown hash is an error.
-    pub fn visible(&self, commit: &CommitHash) -> Result<bool, QueryError> {
-        let &idx = self
-            .known
-            .get(commit)
-            .ok_or(QueryError::UnknownCommit(*commit))?;
-        let time = self.nodes.chain_time(idx);
-        Ok(self.visible.contains(&self.nodes[idx], time))
-    }
-}
-
 /// A comparison of commit participation, not a document patch stream.
 /// Does not require either viewpoint's history to have been admitted.
-#[derive(Debug)]
-pub struct ViewPointDiff<'graph> {
-    pub(crate) known: &'graph HashMap<CommitHash, NodeIdx>,
-    pub(crate) nodes: &'graph NodeStore,
+pub struct ViewPointDiff<'graph, P: Clone> {
+    pub(crate) graph: &'graph CommitGraph<P>,
     pub(crate) before: PreparedView,
     pub(crate) after: PreparedView,
 }
 
-impl ViewPointDiff<'_> {
+impl<'a, P: Clone> ViewPointDiff<'a, P> {
     /// Classify a known commit under the source and destination viewpoints.
     pub fn visibility(&self, commit: &CommitHash) -> Result<Vis, QueryError> {
-        let &idx = self
-            .known
-            .get(commit)
+        let time = self
+            .graph
+            .commit_time(commit)
             .ok_or(QueryError::UnknownCommit(*commit))?;
-        let node = &self.nodes[idx];
-        let time = self.nodes.chain_time(idx);
+        let node = self
+            .graph
+            .node(commit)
+            .ok_or(QueryError::UnknownCommit(*commit))?;
         Ok(
             match (
                 self.before.contains(node, time),
@@ -119,29 +99,16 @@ impl ViewPointDiff<'_> {
     /// Each changed commit once. Does not report commits in both or neither viewpoint.
     /// Traversal order is unspecified.
     pub fn changed_commits(&self) -> impl Iterator<Item = CommitDiff> + '_ {
-        let latest = self
-            .before
-            .history
-            .latest()
-            .max(self.after.history.latest());
-        self.nodes
-            .into_iter()
-            .take_while(move |(idx, _)| latest.is_some_and(|last| *idx <= last))
-            .filter_map(|(idx, node)| {
-                let time = self.nodes.chain_time(idx);
-                let visibility_delta = match (
-                    self.before.contains(node, time),
-                    self.after.contains(node, time),
-                ) {
-                    (true, false) => VisDiff::Before,
-                    (false, true) => VisDiff::After,
-                    _ => return None,
-                };
-                Some(CommitDiff {
-                    commit_id: *node.hash(),
-                    visibility_delta,
-                })
-            })
+        self.graph.changed_commits(&self.before, &self.after)
+    }
+}
+
+impl<'a, P: Clone> std::fmt::Debug for ViewPointDiff<'a, P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewPointDiff")
+            .field("before", &self.before)
+            .field("after", &self.after)
+            .finish()
     }
 }
 

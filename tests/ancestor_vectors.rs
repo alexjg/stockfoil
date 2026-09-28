@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use stockfoil::{
     Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, QueryError,
-    ResolveError, SignatureEvidence, UnverifiedItem, ViewPoint, Vis, VisDiff, WritePermission,
+    SignatureEvidence, UnverifiedItem, ViewPoint, Vis, VisDiff, WritePermission,
 };
 use support::{author, key, signature};
 
@@ -172,21 +172,6 @@ fn assert_views(
 ) {
     let expected: Vec<_> = views.iter().map(|v| oracle.visible(v)).collect();
     for (i, view) in views.iter().enumerate() {
-        if drafts && !view.heads().is_empty() {
-            assert_eq!(
-                graph.resolve(view).unwrap_err(),
-                ResolveError::PendingLocalCommit(view.heads()[0])
-            );
-        } else {
-            let resolved = graph.resolve(view).unwrap();
-            for hash in oracle.nodes.keys() {
-                assert_eq!(resolved.visible(hash).unwrap(), expected[i].contains(hash));
-            }
-            assert_eq!(
-                resolved.visible(&unknown),
-                Err(QueryError::UnknownCommit(unknown))
-            );
-        }
         // Compare both directions and identical snapshots, without assuming any
         // changed_commits iteration order, and explicitly reject duplicates.
         for (j, other) in views.iter().enumerate() {
@@ -240,12 +225,6 @@ fn assert_views(
                 graph.diff(&invalid, &views[0]).unwrap_err(),
                 DiffError::MissingCommit(unknown)
             );
-            if !drafts {
-                assert_eq!(
-                    graph.resolve(&invalid).unwrap_err(),
-                    ResolveError::MissingCommit(unknown)
-                );
-            }
         }
     }
 }
@@ -389,11 +368,6 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
                 WritePermission::Bounded(vec![*nodes[6].hash()]),
             )]),
         );
-        let resolved = left.resolve(&witness).unwrap();
-        assert!(resolved.visible(nodes[0].hash()).unwrap());
-        assert!(resolved.visible(nodes[3].hash()).unwrap());
-        assert!(!resolved.visible(nodes[4].hash()).unwrap());
-        assert!(resolved.visible(nodes[6].hash()).unwrap());
         assert_eq!(
             oracle.visible(&witness),
             HashSet::from([*nodes[0].hash(), *nodes[3].hash(), *nodes[6].hash(),])

@@ -191,7 +191,6 @@ fn admission_refuses_unsigned_local_dependencies_even_in_the_working_view() {
     destination.set_write_permissions(&HashMap::from([(author(1), WritePermission::Unbounded)]));
     let working = destination.view_point();
     assert_eq!(working.heads(), &[*root.hash()]);
-    assert!(destination.resolve(&working).is_err());
     assert_eq!(destination.heads().collect::<Vec<_>>(), vec![*root.hash()]);
     assert!(!destination.has_commit(root.hash()));
     let cover = destination.minimal_cover();
@@ -315,13 +314,6 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
     ]));
     let captured = source.signed_view_point();
     assert_eq!(captured.heads(), &[*b.hash()]);
-    assert!(
-        source
-            .resolve(&captured)
-            .unwrap()
-            .visible(a.hash())
-            .unwrap()
-    );
     assert!(source.has_commit(a.hash()));
     assert!(source.publishable_commit(a.hash()).is_some());
     assert_not_exportable(&source, ItemId::Commit(*a.hash()));
@@ -354,17 +346,12 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
                 assert_not_exportable(graph, ItemId::Commit(*meta.hash()));
             }
         }
-        let resolved = graph.resolve(&captured).unwrap();
-        assert!(resolved.visible(a.hash()).unwrap());
-        assert!(resolved.visible(b.hash()).unwrap());
-        assert!(!resolved.visible(c.hash()).unwrap());
         assert_eq!(graph.minimal_cover(), cover);
     }
     let mut relay = CommitGraph::new();
     relay.merge(&receiver);
     assert_eq!(relay.minimal_cover(), cover);
     assert!(relay.has_commit(c.hash()));
-    assert!(relay.resolve(&captured).unwrap().visible(a.hash()).unwrap());
     assert_not_exportable(&relay, ItemId::Commit(*b.hash()));
     relay
         .export(&ItemId::Fragment(range))

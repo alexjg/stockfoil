@@ -23,7 +23,7 @@ mod commit_meta;
 pub use commit_meta::{CommitContents, CommitMeta};
 mod parsing;
 mod view_point;
-pub use view_point::{CommitDiff, ResolvedViewPoint, ViewPoint, ViewPointDiff, Vis, VisDiff};
+pub use view_point::{CommitDiff, ViewPoint, ViewPointDiff, Vis, VisDiff};
 mod signature;
 pub use signature::Signature;
 mod sedimentree;

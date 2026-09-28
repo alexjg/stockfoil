@@ -320,7 +320,6 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
     assert_eq!(graph.minimal_cover(), cover_before);
     assert_eq!(graph.view_point(), working_before);
     assert_eq!(graph.signed_view_point(), signed_before);
-    assert!(graph.resolve(&signed_before).is_ok());
 
     insert(&mut graph, 2, &[]);
     assert_eq!(visited(&graph), vec![0, 1, 2]);

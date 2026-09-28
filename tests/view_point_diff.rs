@@ -23,7 +23,7 @@ fn append(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHas
     hash
 }
 
-fn assert_changes(diff: &ViewPointDiff<'_>, removed: &[CommitHash], added: &[CommitHash]) {
+fn assert_changes<P: Clone>(diff: &ViewPointDiff<'_, P>, removed: &[CommitHash], added: &[CommitHash]) {
     let changes = diff.changed_commits().collect::<Vec<_>>();
     assert_eq!(changes.len(), removed.len() + added.len());
     let actual = changes
@@ -98,15 +98,6 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
         &[revoked_title, revoked_key],
     );
     assert_changes(&alice.diff(&after, &after).unwrap(), &[], &[]);
-    assert!(
-        alice
-            .resolve(&before)
-            .unwrap()
-            .visible(&revoked_key)
-            .unwrap()
-    );
-    assert!(!bob.resolve(&after).unwrap().visible(&revoked_key).unwrap());
-    assert!(bob.resolve(&after).unwrap().visible(&descendant).unwrap());
 
     // Default denial, explicit denial, and empty bounds have equal participation.
     alice.set_write_permissions(&HashMap::from([(bob_id, WritePermission::Unbounded)]));
@@ -158,28 +149,18 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
     assert_eq!(peer.heads().collect::<Vec<_>>(), expected);
-    assert!(peer.resolve(&signed).is_ok());
-    assert!(matches!(
-        peer.resolve(&working),
-        Err(ResolveError::MissingCommit(hash)) if hash == joined
-    ));
 
     sign(&mut graph, &alice, draft);
     expected = vec![draft, right];
     expected.sort();
     assert_eq!(graph.signed_view_point().heads(), expected);
-    assert!(graph.resolve(&signed).unwrap().visible(&left).unwrap());
-    assert!(!graph.resolve(&signed).unwrap().visible(&draft).unwrap());
     assert_eq!(graph.view_point(), working);
     sign(&mut graph, &alice, joined);
     assert_eq!(graph.signed_view_point(), working);
     peer.merge(&graph);
     for snapshot in [&signed, &working] {
         assert_changes(&peer.diff(snapshot, snapshot).unwrap(), &[], &[]);
-        assert!(peer.resolve(snapshot).is_ok());
     }
-    assert!(!peer.resolve(&signed).unwrap().visible(&joined).unwrap());
-    assert!(peer.resolve(&working).unwrap().visible(&joined).unwrap());
 }
 
 #[test]
@@ -201,28 +182,15 @@ fn pending_write_bounds_apply_only_to_working_history() {
     );
     let signed = graph.signed_view_point();
     assert_eq!(signed.heads(), &[root]);
-    assert!(!graph.resolve(&signed).unwrap().visible(&root).unwrap());
     assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
-    assert!(matches!(
-        graph.resolve(&working),
-        Err(ResolveError::PendingLocalCommit(hash)) if hash == bound
-    ));
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
-    assert!(matches!(
-        peer.resolve(&working),
-        Err(ResolveError::MissingCommit(hash)) if hash == bound
-    ));
 
     sign(&mut graph, &bob, bound);
     assert_eq!(graph.view_point(), working);
     assert_eq!(graph.signed_view_point(), working);
     peer.merge(&graph);
     for graph in [&graph, &peer] {
-        assert!(!graph.resolve(&signed).unwrap().visible(&root).unwrap());
-        let resolved = graph.resolve(&working).unwrap();
-        assert!(resolved.visible(&root).unwrap());
-        assert!(!resolved.visible(&bound).unwrap());
         assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
     }
 }
@@ -233,18 +201,14 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     let mut graph = CommitGraph::new();
     graph.set_write_permissions(&HashMap::from([(author(&key), WritePermission::Unbounded)]));
     let base = prepare(&mut graph, &key, 0);
-    assert!(graph.resolve(&graph.view_point()).is_err());
     sign(&mut graph, &key, base);
     let initial = graph.view_point();
-    assert!(graph.resolve(&initial).is_ok());
 
     let first = prepare(&mut graph, &key, 1);
     let first_working = graph.view_point();
     let first_signed = graph.signed_view_point();
     assert_eq!(first_working.heads(), &[first]);
     assert_eq!(first_signed.heads(), &[base]);
-    assert!(graph.resolve(&first_working).is_err());
-    assert!(graph.resolve(&first_signed).is_ok());
     let pending = graph.diff(&first_signed, &first_working).unwrap();
     assert_eq!(pending.visibility(&base).unwrap(), Vis::Both);
     assert_eq!(pending.visibility(&first).unwrap(), Vis::After);
@@ -255,7 +219,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
             .ingest_signature(author(&key), first, signature(&key, base))
             .is_err()
     );
-    assert!(graph.resolve(&first_working).is_err());
     assert_changes(
         &graph
             .diff(&first_signed, &graph.signed_view_point())
@@ -267,7 +230,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     let tip = prepare(&mut graph, &key, 2);
     let batch_working = graph.view_point();
     let batch_signed = graph.signed_view_point();
-    assert!(graph.resolve(&batch_working).is_err());
     assert_changes(
         &graph.diff(&batch_signed, &batch_working).unwrap(),
         &[],
@@ -279,7 +241,6 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
 
     sign(&mut graph, &key, tip);
     assert!(!graph.has_commit(&tip));
-    assert!(graph.resolve(&batch_working).is_err());
     sign(&mut graph, &key, first);
     let published_signed = graph.signed_view_point();
     assert_changes(
@@ -293,14 +254,7 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         &[],
     );
     assert_eq!(batch_working.heads(), graph.view_point().heads());
-    assert!(graph.resolve(&first_working).is_ok());
-    assert!(graph.resolve(&batch_working).is_ok());
-    let old_signed = graph.resolve(&batch_signed).unwrap();
-    assert!(!old_signed.visible(&first).unwrap());
-    assert!(!old_signed.visible(&tip).unwrap());
-    assert!(old_signed.visible(&base).unwrap());
     peer.merge(&graph);
-    assert!(peer.resolve(&batch_working).is_ok());
 
     assert_eq!(
         graph.ingest_signature(author(&key), tip, signature(&key, tip)),

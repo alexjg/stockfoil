@@ -5,13 +5,7 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ExportError,
-    FragmentRange, FragmentReadError, ItemId, ResolveError, ResolvedViewPoint, SedimentreeView,
-    Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff,
-    WritePermission,
-    ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
-    sedimentree::MinimalCover,
-    view_point::PreparedView,
+    Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError, FragmentRange, FragmentReadError, ItemId, SedimentreeView, Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, VisDiff, WritePermission, ancestor_clock::{AncestorClock, ChainTime, ClockBuilder}, sedimentree::MinimalCover, view_point::PreparedView
 };
 
 /// A single commit graph
@@ -642,36 +636,15 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Resolve a viewpoint against admitted history, not the opaque payloads `P`.
-    /// Every head must be admitted: verified, parent-closed admission establishes
-    /// authentication of its entire history. Pending local heads do not suffice,
-    /// even for a viewpoint captured locally or an author denied permission.
-    pub fn resolve(&self, view_point: &ViewPoint) -> Result<ResolvedViewPoint<'_>, ResolveError> {
-        for hash in &view_point.heads {
-            if !self.by_hash.contains_key(hash) {
-                return Err(ResolveError::MissingCommit(*hash));
-            }
-            if self.pending_local.contains(hash) {
-                return Err(ResolveError::PendingLocalCommit(*hash));
-            }
-        }
-        Ok(ResolvedViewPoint {
-            known: &self.by_hash,
-            nodes: &self.nodes,
-            visible: self.participation(view_point)?,
-        })
-    }
-
     /// Compare participation optimistically, including pending local history.
     /// Received viewpoints must be resolved before they drive a materialized view.
     pub fn diff(
         &self,
         before: &ViewPoint,
         after: &ViewPoint,
-    ) -> Result<ViewPointDiff<'_>, DiffError> {
+    ) -> Result<ViewPointDiff<'_, P>, DiffError> {
         Ok(ViewPointDiff {
-            known: &self.by_hash,
-            nodes: &self.nodes,
+            graph: self,
             before: self.participation(before)?,
             after: self.participation(after)?,
         })
@@ -827,6 +800,43 @@ impl<P: Clone> CommitGraph<P> {
             return None;
         }
         Some(item)
+    }
+
+    pub(crate) fn commit_time(&self, commit: &CommitHash) -> Option<ChainTime> {
+        self.by_hash.get(commit).map(|idx| self.nodes.chain_time(*idx))
+    }
+
+    pub(crate) fn node_time(&self, node: NodeIdx) -> ChainTime {
+        self.nodes.chain_time(node)
+    }
+
+    pub(crate) fn node(&self, commit: &CommitHash) -> Option<&Node> {
+        self.by_hash.get(commit).map(|idx| &self.nodes[*idx])
+    }
+
+    pub(crate) fn changed_commits(&self, before: &PreparedView, after: &PreparedView) -> impl Iterator<Item = CommitDiff> {
+        let latest = before
+            .history
+            .latest()
+            .max(after.history.latest());
+        self.nodes
+            .into_iter()
+            .take_while(move |(idx, _)| latest.is_some_and(|last| *idx <= last))
+            .filter_map(|(idx, node)| {
+                let time = self.node_time(idx);
+                let visibility_delta = match (
+                    before.contains(node, time),
+                    after.contains(node, time),
+                ) {
+                    (true, false) => VisDiff::Before,
+                    (false, true) => VisDiff::After,
+                    _ => return None,
+                };
+                Some(CommitDiff {
+                    commit_id: *node.hash(),
+                    visibility_delta,
+                })
+            })
     }
 
     fn history_clock(&self, heads: &[CommitHash]) -> Result<Arc<AncestorClock>, DiffError> {
@@ -1256,22 +1266,9 @@ mod tests {
         );
         assert_eq!(graph.signed_view_point().heads(), &[*head.hash()]);
         assert!(graph.has_commit(root.hash()));
-        assert!(
-            graph
-                .resolve(&old_view)
-                .unwrap()
-                .visible(root.hash())
-                .unwrap()
-        );
         let mut peer = CommitGraph::new();
         peer.merge(&graph);
         assert_eq!(peer.minimal_cover(), cover);
-        assert!(
-            peer.resolve(&old_view)
-                .unwrap()
-                .visible(root.hash())
-                .unwrap()
-        );
         let mut relay = CommitGraph::new();
         relay.merge(&peer);
         assert_eq!(relay.minimal_cover(), cover);

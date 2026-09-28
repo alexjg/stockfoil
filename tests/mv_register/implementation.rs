@@ -90,9 +90,6 @@ impl MvRegisterMap {
     }
 
     pub fn get_at(&self, view: &ViewPoint, key: &str) -> Result<BTreeSet<String>, ResolveError> {
-        if !self.local_views.contains(view) {
-            self.graph.resolve(view)?;
-        }
         let participation = self.graph.diff(view, view)?;
         let mut writes = BTreeMap::new();
         self.graph.traverse(|meta, assignment| {
