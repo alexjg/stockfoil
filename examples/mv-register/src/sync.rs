@@ -25,7 +25,6 @@ use crate::{
 struct Replica {
     client: Client,
     published: BTreeSet<ItemId>,
-    received: BTreeSet<[u8; 32]>,
     fragments_sent: usize,
 }
 
@@ -34,7 +33,6 @@ impl Replica {
         Self {
             client,
             published: BTreeSet::new(),
-            received: BTreeSet::new(),
             fragments_sent: 0,
         }
     }
@@ -117,18 +115,14 @@ impl Replica {
         Ok(())
     }
 
-    async fn pull(&mut self, id: SedimentreeId, doc: &mut MvRegisterMap) -> Result<usize> {
+    async fn load(&self, id: SedimentreeId, doc: &mut MvRegisterMap) -> Result<usize> {
         let mut incoming = Vec::new();
         for meta in self.client.node.get_commits(id).await.unwrap_or_default() {
             let digest = meta.blob_meta().digest();
             if let Some(blob) = self.client.node.get_blob(id, digest).await? {
                 let decoded = wire::decode(blob.as_slice())?;
                 validate_commit(id, &meta, &decoded)?;
-                // Validate before deduplicating: a previously accepted blob
-                // must not be advertised under different transport metadata.
-                if !self.received.contains(digest.as_bytes()) {
-                    incoming.push((*digest.as_bytes(), decoded));
-                }
+                incoming.push(decoded);
             }
         }
         for meta in self.client.node.get_fragments(id).await.unwrap_or_default() {
@@ -136,14 +130,10 @@ impl Replica {
             if let Some(blob) = self.client.node.get_blob(id, digest).await? {
                 let decoded = wire::decode(blob.as_slice())?;
                 validate_fragment(id, &meta, &decoded)?;
-                if !self.received.contains(digest.as_bytes()) {
-                    incoming.push((*digest.as_bytes(), decoded));
-                }
+                incoming.push(decoded);
             }
         }
-        let (accepted, deferred) = admit(doc, incoming)?;
-        self.received.extend(accepted);
-        Ok(deferred)
+        admit(doc, incoming)
     }
 }
 
@@ -210,29 +200,24 @@ fn validate_fragment(id: SedimentreeId, meta: &Fragment, decoded: &Decoded) -> R
     Ok(())
 }
 
-fn admit(
-    doc: &mut MvRegisterMap,
-    mut incoming: Vec<([u8; 32], Decoded)>,
-) -> Result<(Vec<[u8; 32]>, usize)> {
+fn admit(doc: &mut MvRegisterMap, mut incoming: Vec<Decoded>) -> Result<usize> {
     // Subduction may deliver dependency items after their dependents. Retry from
     // its storage on the next poll; don't put a causal queue inside CommitGraph.
     // Stage admissions so a bad fragment cannot partially mutate this batch.
     let mut graph = doc.graph.clone();
-    let mut accepted = Vec::new();
-    while let Some(index) = incoming.iter().position(|(_, decoded)| {
+    while let Some(index) = incoming.iter().position(|decoded| {
         decoded
             .item
             .dependencies()
             .all(|hash| graph.has_commit(hash))
     }) {
-        let (digest, decoded) = incoming.swap_remove(index);
+        let decoded = incoming.swap_remove(index);
         graph.ingest(decoded.item, |meta| decoded.payloads[meta.hash()].clone())?;
-        accepted.push(digest);
     }
     doc.graph = graph;
     // All network receipt uses the same materializer as edits and revocations.
     doc.materialize();
-    Ok((accepted, incoming.len()))
+    Ok(incoming.len())
 }
 
 async fn converge(
@@ -251,7 +236,7 @@ async fn converge(
             }
             let mut deferred = 0;
             for (replica, doc) in replicas.iter_mut().zip(docs.iter_mut()) {
-                deferred += replica.pull(id, doc).await?;
+                deferred += replica.load(id, doc).await?;
             }
             if deferred == 0 && ready(docs) {
                 return Ok(());
@@ -370,7 +355,7 @@ pub async fn run(remote: Option<RemoteServer>) -> Result<()> {
         replicas[0].publish(id, &docs[0]).await?;
         replicas[0].sync(id).await?;
         replicas[1].sync(id).await?;
-        replicas[1].pull(id, &mut docs[1]).await?;
+        replicas[1].load(id, &mut docs[1]).await?;
         ensure!(
             !docs[1].graph.has_commit(&draft),
             "unsigned draft escaped publication policy"
@@ -481,8 +466,16 @@ mod tests {
         assert!(validate_fragment(id, &wrong, &decoded).is_err());
         let mut peer = MvRegisterMap::new();
         peer.set_write_permissions(source.view_point().write_permissions());
-        let (_, deferred) = admit(&mut peer, vec![([1; 32], decoded)]).unwrap();
+        let deferred = admit(&mut peer, vec![decoded]).unwrap();
         assert_eq!(deferred, 0);
+        let cursor = peer.materialized.cursor.clone();
+        let assignments = peer.materialized.assignments.len();
+        assert_eq!(
+            admit(&mut peer, vec![wire::decode(blob.as_slice()).unwrap()]).unwrap(),
+            0
+        );
+        assert_eq!(peer.materialized.cursor, cursor);
+        assert_eq!(peer.materialized.assignments.len(), assignments);
         assert_eq!(peer.get("title"), source.get("title"));
         // The peer can export the received certificate again after older proofs
         // have been pruned, without obtaining the original author's signing key.
@@ -507,26 +500,39 @@ mod tests {
         .unwrap();
         let mut peer = MvRegisterMap::new();
         peer.set_write_permissions(source.view_point().write_permissions());
-        let (accepted, deferred) = admit(
-            &mut peer,
-            vec![([2; 32], wire::decode(&child_bytes).unwrap())],
-        )
-        .unwrap();
-        assert!(accepted.is_empty());
+        let deferred = admit(&mut peer, vec![wire::decode(&child_bytes).unwrap()]).unwrap();
         assert_eq!(deferred, 1);
         assert!(!peer.graph.has_commit(&child));
         assert!(peer.get("title").is_empty());
-        let (accepted, deferred) = admit(
+        let deferred = admit(
             &mut peer,
             vec![
-                ([2; 32], wire::decode(&child_bytes).unwrap()),
-                ([1; 32], wire::decode(&root_bytes).unwrap()),
+                wire::decode(&child_bytes).unwrap(),
+                wire::decode(&root_bytes).unwrap(),
             ],
         )
         .unwrap();
         assert_eq!(deferred, 0);
-        assert_eq!(accepted, vec![[1; 32], [2; 32]]);
-        assert_eq!(peer.get("title"), source.get("title"));
+        assert!(peer.graph.has_commit(&root));
+        assert!(peer.graph.has_commit(&child));
+        let cursor = peer.materialized.cursor.clone();
+        for _ in 0..2 {
+            assert_eq!(
+                admit(
+                    &mut peer,
+                    vec![
+                        wire::decode(&child_bytes).unwrap(),
+                        wire::decode(&root_bytes).unwrap(),
+                        wire::decode(&child_bytes).unwrap(),
+                    ]
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(peer.materialized.assignments.len(), 2);
+            assert_eq!(peer.materialized.cursor, cursor);
+            assert_eq!(peer.get("title"), source.get("title"));
+        }
 
         let id = SedimentreeId::new([5; 32]);
         let blob = Blob::new(child_bytes.clone());
