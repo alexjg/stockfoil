@@ -24,8 +24,9 @@ visibility of old commits. There is no general traversal cut at the
 intersection of the before/after write-frontier down-sets: permissions are
 per author, and visible commits need not form a down-set. Each candidate commit
 must instead be classified by its delivery and author permission in each view.
+Author-specific chains let us compile those permissions into a visibility clock.
 The current diff iterator scans the stored topological prefix through the
-latest node in either delivery history, yielding commits whose visibility
+latest coordinate in either visibility clock, yielding commits whose visibility
 changes. It does not implement a frontier-to-head traversal.
 
 In other scenarios materialization is split into two steps: first ingesting
@@ -42,9 +43,11 @@ commit is visible in a viewpoint, without walking its ancestry on every query.
 Parent links already allow ancestry checks by graph traversal, but repeated
 walks are expensive in large graphs. The implementation in
 `src/ancestor_clock.rs` and `src/commit_graph.rs` instead uses graph-local
-chain clocks, with prepared visibility predicates in `src/view_point.rs`.
+chain clocks. `src/view_point.rs` queries permission-masked clocks for visibility.
 
-A chain is a set of commits totally ordered by ancestry. Each commit has an
+A chain is a set of commits by one author, totally ordered by ancestry. An
+author may own several chains: sharing a signing key does not make concurrent
+commits causally ordered. Each commit has an
 immutable chain ID and a position: its `NodeIdx` in the append-only,
 parents-before-children node store. Positions increase along a chain but need
 not be consecutive, and adjacent chain members need not share a direct parent
@@ -70,25 +73,30 @@ otherwise it tests membership in the descendant's inclusive clock.
 Chains are assigned greedily as commits arrive with all parents present.
 The node store tracks the current tip of every chain. For a new commit:
 
-- Prefer a direct parent which is still the current tip of its chain. If there
-  are several eligible parents, choose the smallest chain ID.
+- Prefer a direct parent by the same author which is still the current tip of
+  its chain. If there are several eligible parents, choose the smallest chain ID.
 - If no direct parent is eligible, form the union of the parents' ancestry
-  clocks. Look for any currently tracked chain tip in this parent down-set,
-  again choosing the smallest eligible chain ID. This tip can be an indirect
-  ancestor of the new commit.
+  clocks. Look for a currently tracked chain tip owned by the new commit's
+  author in this parent down-set, again choosing the smallest eligible chain ID.
+  This tip can be an indirect ancestor, across commits by other authors.
 - Reuse that chain and advance its tip to the new commit's `NodeIdx`. If no
-  chain is reusable, allocate a new chain ID with this node as its tip.
+  chain is reusable, allocate a new chain ID owned by this author, with this
+  node as its tip.
 
-A root therefore allocates a new chain. Ordinary sequential edits use the
-direct-parent fast path without building clocks or scanning all chains.
+A root therefore allocates a new chain. Sequential edits by the same author use
+the direct-parent fast path without building clocks or scanning all chains.
 Reusing an indirect ancestor tip is important: direct-parent-only reuse would
-strand a chain after each diamond. Repeated fork-and-merge diamonds stay on
-two chains with this policy, rather than allocating a chain per diamond.
+strand a chain after each diamond or author switch. Repeated single-author
+fork-and-merge diamonds stay on two chains with this policy, rather than
+allocating a chain per diamond. A linear history alternating two authors also
+uses two chains, reusing each author's tip through the other author's commits.
 
-The invariant is that the previous tip is an ancestor of each new member.
-Existing labels never change. This is an online greedy decomposition, not a
-minimum-chain decomposition: it is not guaranteed to achieve the graph's
-optimal width, and the number of chains can depend on insertion order.
+The invariants are that every member has the chain's author and the previous tip
+is an ancestor of each new member. Existing labels and owners never change.
+This is an online greedy decomposition, not a minimum-chain decomposition:
+it is not guaranteed to achieve optimal width even within each author, and the
+number of chains can depend on insertion order. Author-specific chains can be
+more numerous than unrestricted chains, even in a linear history.
 
 === Computing and Caching Clocks
 
@@ -147,7 +155,7 @@ visits normalized members without scanning the excluded history or unrelated
 nodes. Traversal, summaries, export, and local certificate construction use the
 same member calculation.
 
-== Prepared Viewpoints
+== Permission-Masked Clocks
 
 The portable `ViewPoint` is unchanged: it owns delivered commit hashes and
 write permissions. It contains no chain labels, node indices, or ancestry
@@ -156,11 +164,18 @@ compared across replicas. Diffing requires both viewpoints' history heads to be
 delivered and may include pending local commits. Admission is a separate concern:
 callers requiring admitted history can check each head with `has_commit`.
 
-Preparing a viewpoint produces a `PreparedView` with:
+Preparing a viewpoint starts with its inclusive delivery-history clock and masks
+each coordinate according to that chain owner's permission:
 
-- One inclusive delivery-history clock
-- A set of authors with unbounded permission
-- One bounded ancestry clock per author with a bounded permission
+- Unbounded: keep the history's position unchanged.
+- Denied or absent: remove the coordinate.
+- Bounded: cap the history's position at the frontier clock's position on that
+  chain, or remove the coordinate if the frontier clock has no such chain.
+
+Unbounded permission needs no infinity sentinel: its effective limit is simply
+the selected history's tip. An absent coordinate is distinct from position zero.
+Each bounded author's frontier clock is computed at most once during preparation,
+even if that author owns several chains. Only the final masked clock is retained.
 
 For each bounded frontier, first retain only frontier heads which are known
 and belong to this viewpoint's delivery history. Then union those retained
@@ -169,24 +184,24 @@ essential: an out-of-history bound grants nothing in this snapshot, even if
 some of its ancestors are delivered. Unioning all bounds and intersecting the
 result with delivery history would incorrectly grant those ancestors.
 
-A commit is visible exactly when its position is in the delivery clock and
-its author is either unbounded or has a bounded clock containing that
-position. Denied or absent authors contribute nothing. Each membership query
-reads only the commit's own chain coordinate from each relevant clock: the
-delivery clock and, if needed, that author's bounded clock. No clock for the
-queried commit needs to be constructed. Diff classification applies this
-predicate to the before and after prepared views.
+A commit is visible exactly when the masked clock contains its chain position.
+Each query uses one coordinate lookup, with no author lookup or ancestry walk.
+Diff classification applies this test to the before and after masked clocks.
 
 Delivery and individual bound clocks are down-sets. Visibility is not
-necessarily a down-set, because permissions filter commits by author. It
-therefore cannot in general be represented by a single visibility clock.
+necessarily a down-set, because permissions filter commits by author. However,
+single-author chains ensure visibility is still a prefix on every chain, so it
+fits the same `AncestorClock` representation. An allowed descendant can remain
+visible while an intermediate commit by a denied author is excluded on another
+chain. Masked clocks are never put into node ancestry caches or used for fragment
+membership: those operations must retain the full parent-closed histories.
 
 == Costs and Limits
 
 Let `K` be the number of coordinates in a relevant clock. Once prepared,
 membership uses binary search in the sparse sorted vector, taking
-`O(log K)` time (constant time for an empty clock). Visibility performs at most
-two such searches per view, in addition to hash-table lookups. Same-chain
+`O(log K)` time (constant time for an empty clock). Visibility performs one such
+search per view, after looking up the commit's chain position. Same-chain
 strict ancestry has a constant-time fast path; other ancestry queries may
 first need to compute the descendant's clock.
 
@@ -200,10 +215,10 @@ or the size of the clocks being merged. Enumerating changed commits still
 scans a topological prefix; fast membership is not an output-sensitive diff.
 
 Each cached clock uses space proportional to its own coordinate count, in
-addition to per-node metadata and the chain-tip table. Small chain counts make
+addition to per-node metadata and the chain-tip and chain-owner tables. Small chain counts make
 long, mostly sequential histories cheap, and `Arc` avoids copying shared
-immutable clocks. Wide histories or a poor greedy decomposition can make
-clocks large, however. With many large cached clocks, storage and accumulated
+immutable clocks. Many authors, wide histories, or a poor greedy decomposition
+can make clocks large, however. With many large cached clocks, storage and accumulated
 construction work can still be quadratic in the number of commits (with
 additional map-update costs). Neither greedy reuse nor checkpoint caching
 eliminates this worst case or guarantees an optimal number of chains.

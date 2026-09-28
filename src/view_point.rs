@@ -1,12 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashMap;
 
 use crate::{
-    Author, CommitGraph, CommitHash, QueryError, WritePermission,
-    ancestor_clock::{AncestorClock, ChainTime},
-    commit_graph::Node,
+    Author, CommitGraph, CommitHash, QueryError, WritePermission, ancestor_clock::AncestorClock,
 };
 
 /// An owned snapshot of history heads and write permissions.
@@ -46,32 +41,13 @@ impl ViewPoint {
     }
 }
 
-/// Graph-local compiled membership predicates, not an enumeration of visible
-/// commits. Visibility need not be parent-closed, so bounds remain per author.
-#[derive(Debug)]
-pub(crate) struct PreparedView {
-    pub(crate) history: Arc<AncestorClock>,
-    pub(crate) unbounded: HashSet<Author>,
-    pub(crate) bounded: HashMap<Author, Arc<AncestorClock>>,
-}
-
-impl PreparedView {
-    pub(crate) fn contains(&self, node: &Node, time: ChainTime) -> bool {
-        self.history.contains_time(time)
-            && (self.unbounded.contains(node.author())
-                || self
-                    .bounded
-                    .get(node.author())
-                    .is_some_and(|clock| clock.contains_time(time)))
-    }
-}
-
 /// A comparison of commit participation, not a document patch stream.
 /// Does not require either viewpoint's history to have been admitted.
 pub struct ViewPointDiff<'graph, P: Clone> {
     pub(crate) graph: &'graph CommitGraph<P>,
-    pub(crate) before: PreparedView,
-    pub(crate) after: PreparedView,
+    // Permission-masked chain prefixes, not parent-closed ancestry summaries.
+    pub(crate) before: AncestorClock,
+    pub(crate) after: AncestorClock,
 }
 
 impl<'a, P: Clone> ViewPointDiff<'a, P> {
@@ -81,21 +57,15 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
             .graph
             .commit_time(commit)
             .ok_or(QueryError::UnknownCommit(*commit))?;
-        let node = self
-            .graph
-            .node(commit)
-            .ok_or(QueryError::UnknownCommit(*commit))?;
-        Ok(
-            match (
-                self.before.contains(node, time),
-                self.after.contains(node, time),
-            ) {
-                (true, false) => Vis::Before,
-                (false, true) => Vis::After,
-                (true, true) => Vis::Both,
-                (false, false) => Vis::Neither,
-            },
-        )
+        Ok(match (
+            self.before.contains_time(time),
+            self.after.contains_time(time),
+        ) {
+            (true, false) => Vis::Before,
+            (false, true) => Vis::After,
+            (true, true) => Vis::Both,
+            (false, false) => Vis::Neither,
+        })
     }
 
     /// Each changed commit once. Does not report commits in both or neither viewpoint.

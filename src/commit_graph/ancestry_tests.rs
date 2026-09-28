@@ -2,10 +2,17 @@ use super::*;
 
 // These fixtures exercise the ancestry index without signature or fragment
 // maintenance. They are still parent-closed local drafts, never admitted data.
+fn author(seed: u8) -> Author {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap()
+}
+
 fn append(graph: &mut CommitGraph<()>, parents: &[NodeIdx]) -> NodeIdx {
+    append_by(graph, author(1), parents)
+}
+
+fn append_by(graph: &mut CommitGraph<()>, author: Author, parents: &[NodeIdx]) -> NodeIdx {
     let idx = NodeIdx(graph.nodes.entries.len());
-    let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
-    let author = Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap();
     let meta = (0u64..)
         .map(|nonce| {
             CommitMeta::new(CommitContents {
@@ -77,6 +84,144 @@ fn repeated_diamonds_reuse_ancestral_not_just_parent_chain_tips() {
             .filter_map(|n| n.clock.get())
             .all(|clock| clock.entries().count() <= 2)
     );
+}
+
+#[test]
+fn alternating_authors_reuse_only_their_own_ancestral_chain_tips() {
+    let mut graph = CommitGraph::new();
+    let root = append_by(&mut graph, author(1), &[]);
+    let mut tip = root;
+    for i in 1..65 {
+        tip = append_by(&mut graph, author(1 + (i % 2) as u8), &[tip]);
+        assert_eq!(graph.nodes.chain_tips.len(), 2);
+    }
+    // Reuse must cross the other author's intervening commit, but never put
+    // two authors on the same chain. NodeIdx(0) is still a real coordinate.
+    assert_eq!(root, NodeIdx(0));
+    assert_eq!(graph.nodes.chain_authors, vec![author(1), author(2)]);
+    for (idx, node) in &graph.nodes {
+        assert_eq!(graph.nodes.chain_authors[node.chain], *node.meta.author());
+        assert_eq!(node.chain, idx.0 % 2);
+        let expected = walk(&graph.nodes, idx);
+        let clock = graph.nodes.clock(idx);
+        for (other, other_node) in &graph.nodes {
+            assert_eq!(clock.contains(other_node.chain, other), expected.contains(&other));
+        }
+    }
+}
+
+#[test]
+fn same_author_forks_have_independent_permission_coordinates() {
+    use crate::Vis;
+
+    let alice = author(1);
+    let bob = author(2);
+    let mut graph = CommitGraph::new();
+    let root = append_by(&mut graph, alice, &[]);
+    let middle = append_by(&mut graph, bob, &[root]);
+    let left = append_by(&mut graph, alice, &[middle]);
+    let right = append_by(&mut graph, alice, &[middle]);
+    let join = append_by(&mut graph, bob, &[left, right]);
+    assert_eq!(graph.nodes[root].chain, graph.nodes[left].chain);
+    assert_ne!(graph.nodes[left].chain, graph.nodes[right].chain);
+    assert_eq!(graph.nodes[middle].chain, graph.nodes[join].chain);
+    assert_eq!(graph.nodes.chain_authors, vec![alice, bob, alice]);
+    let hash = |idx: NodeIdx| *graph.nodes[idx].hash();
+    let view = |bounds| {
+        ViewPoint::from_parts(
+            vec![hash(join)],
+            HashMap::from([
+                (alice, WritePermission::Bounded(bounds)),
+                (bob, WritePermission::Denied),
+            ]),
+        )
+    };
+    let all = ViewPoint::from_parts(
+        vec![hash(join)],
+        HashMap::from([
+            (alice, WritePermission::Unbounded),
+            (bob, WritePermission::Unbounded),
+        ]),
+    );
+    let left_view = view(vec![hash(left)]);
+    let right_view = view(vec![hash(right)]);
+    let cached = Arc::clone(graph.nodes.clock(join));
+    let masked = graph.participation(&left_view).unwrap();
+    assert_eq!(
+        masked.entries().collect::<Vec<_>>(),
+        vec![(graph.nodes[left].chain, left)]
+    );
+    // The allowed descendant stays visible through Bob's denied middle node.
+    let diff = graph.diff(&all, &left_view).unwrap();
+    for idx in [root, left] {
+        assert_eq!(diff.visibility(&hash(idx)), Ok(Vis::Both));
+    }
+    for idx in [middle, right, join] {
+        assert_eq!(diff.visibility(&hash(idx)), Ok(Vis::Before));
+    }
+    let changes = diff.changed_commits().collect::<Vec<_>>();
+    assert_eq!(changes.len(), 3);
+    assert!(changes.iter().all(|c| c.visibility_delta == VisDiff::Before));
+    assert_eq!(
+        changes.iter().map(|c| c.commit_id).collect::<HashSet<_>>(),
+        HashSet::from([hash(middle), hash(right), hash(join)])
+    );
+    let diff = graph.diff(&left_view, &right_view).unwrap();
+    assert_eq!(diff.visibility(&hash(root)), Ok(Vis::Both));
+    assert_eq!(diff.visibility(&hash(left)), Ok(Vis::Before));
+    assert_eq!(diff.visibility(&hash(right)), Ok(Vis::After));
+    assert_eq!(diff.visibility(&hash(middle)), Ok(Vis::Neither));
+    assert_eq!(diff.visibility(&hash(join)), Ok(Vis::Neither));
+    let both = view(vec![hash(left), hash(right), hash(left)]);
+    let diff = graph.diff(&left_view, &both).unwrap();
+    assert_eq!(diff.visibility(&hash(left)), Ok(Vis::Both));
+    assert_eq!(diff.visibility(&hash(right)), Ok(Vis::After));
+
+    // A different author's frontier can bound Alice's chains. A known bound
+    // outside the selected history must grant nothing, even to its ancestors.
+    let through_bob = view(vec![hash(join)]);
+    let diff = graph.diff(&both, &through_bob).unwrap();
+    assert_eq!(diff.changed_commits().count(), 0);
+    let excluded_bound = ViewPoint::from_parts(
+        vec![hash(right)],
+        HashMap::from([(alice, WritePermission::Bounded(vec![hash(join)]))]),
+    );
+    let empty = graph.participation(&excluded_bound).unwrap();
+    assert_eq!(empty.latest(), None);
+    assert!(!empty.contains(graph.nodes[root].chain, root));
+
+    // Masking never mutates the full ancestry cache or its cross-author edges.
+    assert!(Arc::ptr_eq(&cached, graph.nodes.clock(join)));
+    for (idx, node) in &graph.nodes {
+        assert!(cached.contains(node.chain, idx));
+    }
+    assert!(graph.is_ancestor(&hash(middle), &hash(left)));
+    assert!(!graph.is_ancestor(&hash(left), &hash(right)));
+}
+
+#[test]
+fn masks_cap_or_remove_coordinates_without_mutating_history() {
+    let history = AncestorClock::from_tips(&[NodeIdx(0), NodeIdx(5), NodeIdx(9)]);
+    let masked = history.mask(|chain, _| match chain {
+        0 => Some(NodeIdx(usize::MAX)),
+        1 => None,
+        2 => Some(NodeIdx(7)),
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        masked.entries().collect::<Vec<_>>(),
+        vec![(0, NodeIdx(0)), (2, NodeIdx(7))]
+    );
+    assert!(masked.contains(0, NodeIdx(0)));
+    assert!(!masked.contains(1, NodeIdx(0)));
+    assert!(!masked.contains(2, NodeIdx(8)));
+    assert_eq!(masked.latest(), Some(NodeIdx(7)));
+    assert_eq!(history.position(1), Some(NodeIdx(5)));
+    assert_eq!(history.position(2), Some(NodeIdx(9)));
+    let empty = history.mask(|_, _| None);
+    assert_eq!(empty.latest(), None);
+    assert!(!empty.contains(0, NodeIdx(0)));
+    assert_eq!(AncestorClock::default().mask(|_, tip| Some(tip)).latest(), None);
 }
 
 #[test]

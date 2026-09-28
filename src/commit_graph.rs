@@ -5,7 +5,11 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError, FragmentRange, FragmentReadError, ItemId, SedimentreeView, Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, VisDiff, WritePermission, ancestor_clock::{AncestorClock, ChainTime, ClockBuilder}, sedimentree::MinimalCover, view_point::PreparedView
+    Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
+    FragmentRange, FragmentReadError, ItemId, SedimentreeView, Signature, SignatureError,
+    SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, VisDiff, WritePermission,
+    ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
+    sedimentree::MinimalCover,
 };
 
 /// A single commit graph
@@ -25,7 +29,7 @@ pub struct CommitGraph<P> {
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     meta: CommitMeta,
-    // Immutable graph-local chain label; NodeIdx is the position on the chain.
+    // Immutable graph-local, single-author chain; NodeIdx is its position.
     chain: usize,
     clock: OnceLock<Arc<AncestorClock>>,
     // Longest path since an eagerly cached clock. Query caching can only shorten it.
@@ -53,10 +57,6 @@ impl Node {
                 commit: *self.meta.hash(),
                 signature,
             })
-    }
-
-    pub(crate) fn author(&self) -> &Author {
-        self.meta.author()
     }
 
     pub(crate) fn hash(&self) -> &CommitHash {
@@ -246,7 +246,9 @@ impl<P: Clone> CommitGraph<P> {
             .extend(meta.parents().iter().map(|hash| self.by_hash[hash]));
         let parents = start..self.nodes.parent_ids.len();
         let node_idx = NodeIdx(self.nodes.entries.len());
-        let chain = self.nodes.assign_chain(parents.clone(), node_idx);
+        let chain = self
+            .nodes
+            .assign_chain(*meta.author(), parents.clone(), node_idx);
         let depth = sedimentree_depth(&hash);
         let uncached_depth = self.nodes.parent_ids[parents.clone()]
             .iter()
@@ -812,27 +814,20 @@ impl<P: Clone> CommitGraph<P> {
         self.by_hash.get(commit).map(|idx| self.nodes.chain_time(*idx))
     }
 
-    pub(crate) fn node_time(&self, node: NodeIdx) -> ChainTime {
-        self.nodes.chain_time(node)
-    }
-
-    pub(crate) fn node(&self, commit: &CommitHash) -> Option<&Node> {
-        self.by_hash.get(commit).map(|idx| &self.nodes[*idx])
-    }
-
-    pub(crate) fn changed_commits(&self, before: &PreparedView, after: &PreparedView) -> impl Iterator<Item = CommitDiff> {
-        let latest = before
-            .history
-            .latest()
-            .max(after.history.latest());
+    pub(crate) fn changed_commits(
+        &self,
+        before: &AncestorClock,
+        after: &AncestorClock,
+    ) -> impl Iterator<Item = CommitDiff> {
+        let latest = before.latest().max(after.latest());
         self.nodes
             .into_iter()
             .take_while(move |(idx, _)| latest.is_some_and(|last| *idx <= last))
             .filter_map(|(idx, node)| {
-                let time = self.node_time(idx);
+                let time = self.nodes.chain_time(idx);
                 let visibility_delta = match (
-                    before.contains(node, time),
-                    after.contains(node, time),
+                    before.contains_time(time),
+                    after.contains_time(time),
                 ) {
                     (true, false) => VisDiff::Before,
                     (false, true) => VisDiff::After,
@@ -869,33 +864,31 @@ impl<P: Clone> CommitGraph<P> {
         Ok(self.nodes.clock_for_heads(&indices))
     }
 
-    fn participation(&self, view_point: &ViewPoint) -> Result<PreparedView, DiffError> {
+    fn participation(&self, view_point: &ViewPoint) -> Result<AncestorClock, DiffError> {
         let history = self.history_clock(&view_point.heads)?;
+        // An author may own several chains. Prepare its frontier only once,
+        // then retain just the masked coordinates, not the per-author clocks.
         let mut bounded = HashMap::new();
-        let mut unbounded = HashSet::new();
-        for (&author, permission) in &view_point.write_permissions {
-            match permission {
-                WritePermission::Unbounded => {
-                    unbounded.insert(author);
-                }
-                WritePermission::Bounded(frontier) => {
-                    // Filter frontier *heads*, not the resulting ancestry clock:
-                    // an out-of-history bound grants nothing in this snapshot.
-                    let available = frontier
-                        .iter()
-                        .filter_map(|hash| self.by_hash.get(hash).copied())
-                        .filter(|&idx| history.contains(self.nodes[idx].chain, idx))
-                        .collect::<Vec<_>>();
-                    bounded.insert(author, self.nodes.clock_for_heads(&available));
-                }
-                WritePermission::Denied => {}
+        Ok(history.mask(|chain, tip| {
+            let author = self.nodes.chain_authors[chain];
+            match view_point.write_permissions.get(&author) {
+                Some(WritePermission::Unbounded) => Some(tip),
+                Some(WritePermission::Bounded(frontier)) => bounded
+                    .entry(author)
+                    .or_insert_with(|| {
+                        // Filter frontier *heads*, not the resulting clock:
+                        // an out-of-history bound grants nothing in this snapshot.
+                        let available = frontier
+                            .iter()
+                            .filter_map(|hash| self.by_hash.get(hash).copied())
+                            .filter(|&idx| history.contains(self.nodes[idx].chain, idx))
+                            .collect::<Vec<_>>();
+                        self.nodes.clock_for_heads(&available)
+                    })
+                    .position(chain),
+                Some(WritePermission::Denied) | None => None,
             }
-        }
-        Ok(PreparedView {
-            history,
-            bounded,
-            unbounded,
-        })
+        }))
     }
 }
 
@@ -910,19 +903,22 @@ pub(crate) struct NodeStore {
     entries: Vec<Node>,
     parent_ids: Vec<NodeIdx>,
     chain_tips: Vec<NodeIdx>,
+    // Each chain has one immutable owner; forks may give an author many chains.
+    chain_authors: Vec<Author>,
     // Sorted positions allow clock differences to enumerate just their intervals.
     chain_nodes: Vec<Vec<NodeIdx>>,
 }
 
 impl NodeStore {
-    fn assign_chain(&mut self, parents: Range<usize>, position: NodeIdx) -> usize {
+    fn assign_chain(&mut self, author: Author, parents: Range<usize>, position: NodeIdx) -> usize {
         let parents = &self.parent_ids[parents];
         // Ordinary sequential edits need no clock construction or chain scan.
         let direct = parents
             .iter()
             .filter_map(|&parent| {
                 let chain = self[parent].chain;
-                (self.chain_tips[chain] == parent).then_some(chain)
+                (self.chain_authors[chain] == author && self.chain_tips[chain] == parent)
+                    .then_some(chain)
             })
             .min();
         let reusable = direct.or_else(|| {
@@ -930,11 +926,13 @@ impl NodeStore {
                 return None;
             }
             // Direct-parent-only reuse strands a chain after every diamond.
-            // Any tip in the parents' down-set can safely precede this node.
+            // Any same-author tip in the parents' down-set can safely precede
+            // this node, including across commits by other authors.
             let history = self.clock_for_heads(parents);
-            history
-                .entries()
-                .find_map(|(chain, tip)| (self.chain_tips[chain] == tip).then_some(chain))
+            history.entries().find_map(|(chain, tip)| {
+                (self.chain_authors[chain] == author && self.chain_tips[chain] == tip)
+                    .then_some(chain)
+            })
         });
         if let Some(chain) = reusable {
             self.chain_tips[chain] = position;
@@ -943,6 +941,7 @@ impl NodeStore {
         } else {
             let chain = self.chain_tips.len();
             self.chain_tips.push(position);
+            self.chain_authors.push(author);
             self.chain_nodes.push(vec![position]);
             chain
         }
