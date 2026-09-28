@@ -1,70 +1,16 @@
 //! Adversarial contracts for stateless, item-local metadata authentication.
 use std::collections::BTreeSet;
 
-use ed25519_dalek::{Signer, SigningKey};
+mod support;
+
 use stockfoil::{
-    Author, BlobHash, CommitContents, CommitHash, CommitMeta, FragmentRange, ItemId, Signature,
+    BlobHash, CommitContents, CommitHash, CommitMeta, FragmentRange, ItemId, Signature,
     SignatureEvidence, UnverifiedItem, VerificationError,
 };
-
-fn author(seed: u8) -> Author {
-    Author::try_from(
-        SigningKey::from_bytes(&[seed; 32])
-            .verifying_key()
-            .as_bytes()
-            .as_slice(),
-    )
-    .unwrap()
-}
-
-fn evidence(seed: u8, hash: CommitHash) -> SignatureEvidence {
-    SignatureEvidence {
-        author: author(seed),
-        commit: hash,
-        signature: Signature::from(
-            SigningKey::from_bytes(&[seed; 32])
-                .sign(hash.as_bytes())
-                .to_bytes(),
-        ),
-    }
-}
-
-fn signed(meta: &CommitMeta, seed: u8) -> UnverifiedItem {
-    UnverifiedItem::Commit {
-        meta: meta.clone(),
-        signatures: vec![evidence(seed, *meta.hash())],
-    }
-}
-
-fn depth(meta: &CommitMeta) -> usize {
-    meta.hash()
-        .as_bytes()
-        .iter()
-        .take_while(|byte| **byte == 0)
-        .count()
-}
-
-fn at_depth(seed: u8, parents: Vec<CommitHash>, wanted: usize) -> CommitMeta {
-    let author = author(seed);
-    (0u64..10_000_000)
-        .map(|nonce| {
-            CommitMeta::new(CommitContents {
-                parents: parents.clone(),
-                author,
-                payload: BlobHash::of_contents(&nonce.to_le_bytes()),
-            })
-        })
-        .find(|meta| depth(meta) == wanted)
-        .expect("find a real hash at the requested depth")
-}
-
-fn fragment(range: &FragmentRange, commits: Vec<CommitMeta>, seed: u8) -> UnverifiedItem {
-    UnverifiedItem::Fragment {
-        range: range.clone(),
-        commits,
-        signatures: vec![evidence(seed, range.head)],
-    }
-}
+use support::{
+    at_depth, proof as evidence, seeded_author as author, signed_commit as signed,
+    signed_fragment as fragment,
+};
 
 #[test]
 fn missing_wrong_author_and_invalid_signatures_are_distinct() {

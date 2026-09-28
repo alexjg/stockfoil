@@ -10,12 +10,12 @@ use std::{
 
 use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
-    Author, CommitGraph, CommitHash, CommitMeta, FragmentRange, Signature, SignatureEvidence,
-    UnverifiedItem,
+    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, FragmentRange,
+    Signature, SignatureEvidence, UnverifiedItem,
 };
 
 /// Receive a signed fixture in its canonical item through verification and admission.
-/// Parents must already be verified in the graph; callers buffer early arrivals.
+/// Parents must already be admitted: this fixture builds fragments from destination metadata.
 pub fn receive_commit<P: Clone>(graph: &mut CommitGraph<P>, meta: CommitMeta, payload: P) {
     let hash = *meta.hash();
     let item = received_item(graph, meta)
@@ -110,6 +110,63 @@ pub fn author(key: &SigningKey) -> Author {
 
 pub fn signature(key: &SigningKey, hash: CommitHash) -> Signature {
     Signature::from(key.sign(hash.as_bytes()).to_bytes())
+}
+
+pub fn seeded_author(seed: u8) -> Author {
+    author(&key(seed))
+}
+
+/// Mine deterministic metadata at an exact leading-zero-byte depth.
+pub fn at_depth(seed: u8, parents: impl AsRef<[CommitHash]>, depth: usize) -> CommitMeta {
+    let author = seeded_author(seed);
+    (0u64..10_000_000)
+        .map(|nonce| {
+            CommitMeta::new(CommitContents {
+                author,
+                parents: parents.as_ref().to_vec(),
+                payload: BlobHash::of_contents(&nonce.to_le_bytes()),
+            })
+        })
+        .find(|meta| {
+            meta.hash()
+                .as_bytes()
+                .iter()
+                .take_while(|byte| **byte == 0)
+                .count()
+                == depth
+        })
+        .expect("find a real hash at the requested depth")
+}
+
+pub fn proof(seed: u8, hash: CommitHash) -> SignatureEvidence {
+    let key = key(seed);
+    SignatureEvidence {
+        author: author(&key),
+        commit: hash,
+        signature: signature(&key, hash),
+    }
+}
+
+/// A standalone announcement, even at a checkpoint; never invents a fragment certificate.
+pub fn signed_commit(meta: &CommitMeta, seed: u8) -> UnverifiedItem {
+    UnverifiedItem::Commit {
+        meta: meta.clone(),
+        signatures: vec![proof(seed, *meta.hash())],
+    }
+}
+
+/// Sign the supplied range's head without normalizing or filtering its members.
+/// Malformed fragment fixtures must remain malformed.
+pub fn signed_fragment(
+    range: &FragmentRange,
+    commits: Vec<CommitMeta>,
+    seed: u8,
+) -> UnverifiedItem {
+    UnverifiedItem::Fragment {
+        range: range.clone(),
+        commits,
+        signatures: vec![proof(seed, range.head)],
+    }
 }
 
 pub fn sign<P: Clone>(graph: &mut CommitGraph<P>, key: &SigningKey, hash: CommitHash) {

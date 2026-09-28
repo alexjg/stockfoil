@@ -498,6 +498,15 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
+    /// Export the changes in the sedimentree encoding of this graph since 
+    /// `_since`.
+    pub fn export_changes(
+        &self,
+        _since: &crate::ExportCursor,
+    ) -> (crate::ExportChanges, crate::ExportCursor) {
+        todo!("compute certified-cover changes and the next export cursor")
+    }
+
     /// Compute a complete export cover from retained fragment certificates and
     /// signed standalone commits. Structural subfragments alone do not suffice.
     pub fn minimal_cover(&self) -> MinimalCover {

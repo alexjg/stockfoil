@@ -36,6 +36,8 @@ pub use errors::{
     DiffError, ExportError, FragmentReadError, IngestError, QueryError,
     SignatureError, VerificationError,
 };
+mod export;
+pub use export::{ExportChanges, ExportCursor};
 mod ingest;
 pub use ingest::{
     IngestRejection, IngestReport, ItemId, SignatureEvidence, UnverifiedItem, VerifiedItem,

@@ -1,60 +1,21 @@
 //! Decoder streams, per-author signature boundaries, and signed head announcements.
 use std::collections::BTreeSet;
 
-use ed25519_dalek::{Signer, SigningKey};
+mod support;
+
 use stockfoil::{
     Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
-    FragmentRange, FragmentReadError, ItemId, Signature, SignatureEvidence, UnverifiedItem,
-    VerificationError,
+    FragmentRange, FragmentReadError, ItemId, UnverifiedItem, VerificationError,
 };
-
-fn author(seed: u8) -> Author {
-    Author::try_from(
-        SigningKey::from_bytes(&[seed; 32])
-            .verifying_key()
-            .as_bytes()
-            .as_slice(),
-    )
-    .unwrap()
-}
-
-fn meta(seed: u8, parents: Vec<CommitHash>, depth: usize) -> CommitMeta {
-    let author = author(seed);
-    (0u64..2_000_000)
-        .map(|nonce| {
-            CommitMeta::new(CommitContents {
-                author,
-                parents: parents.clone(),
-                payload: BlobHash::of_contents(&nonce.to_le_bytes()),
-            })
-        })
-        .find(|m| m.hash().as_bytes().iter().take_while(|&&b| b == 0).count() == depth)
-        .unwrap()
-}
-
-fn sig(seed: u8, meta: &CommitMeta) -> SignatureEvidence {
-    SignatureEvidence {
-        author: author(seed),
-        commit: *meta.hash(),
-        signature: Signature::from(
-            SigningKey::from_bytes(&[seed; 32])
-                .sign(meta.hash().as_bytes())
-                .to_bytes(),
-        ),
-    }
-}
+use support::{
+    at_depth as meta, proof as sig, seeded_author as author, signed_commit as commit_item,
+    signed_fragment,
+};
 
 fn root_range(head: &CommitMeta) -> FragmentRange {
     FragmentRange {
         head: *head.hash(),
         boundary: BTreeSet::new(),
-    }
-}
-
-fn commit_item(seed: u8, meta: &CommitMeta) -> UnverifiedItem {
-    UnverifiedItem::Commit {
-        meta: meta.clone(),
-        signatures: vec![sig(seed, meta)],
     }
 }
 
@@ -93,7 +54,7 @@ fn a_decoder_reconstructs_omitted_hashes_and_parent_references_as_verification_p
     });
     let verified = UnverifiedItem::verify_fragment(
         root_range(&head),
-        vec![sig(1, &head), sig(2, &middle)],
+        vec![sig(1, *head.hash()), sig(2, *middle.hash())],
         decoder,
     )
     .unwrap();
@@ -126,7 +87,7 @@ fn decoder_failure_stops_consumption_without_producing_a_certificate() {
         })
     });
     assert_eq!(
-        UnverifiedItem::verify_fragment(root_range(&head), vec![sig(1, &head)], decoder)
+        UnverifiedItem::verify_fragment(root_range(&head), vec![sig(1, *head.hash())], decoder)
             .unwrap_err(),
         VerificationError::InvalidItem
     );
@@ -149,13 +110,13 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
         }
         .verify()
     };
-    let err = verify(vec![sig(1, &root), sig(2, &head)]).unwrap_err();
+    let err = verify(vec![sig(1, *root.hash()), sig(2, *head.hash())]).unwrap_err();
     assert!(
         matches!(err, VerificationError::MissingSignature { author: a, commit }
         if a == author(1) && [*left.hash(), *right.hash()].contains(&commit))
     );
     assert_eq!(
-        verify(vec![sig(1, &left), sig(2, &head)]).unwrap_err(),
+        verify(vec![sig(1, *left.hash()), sig(2, *head.hash())]).unwrap_err(),
         VerificationError::MissingSignature {
             author: author(1),
             commit: *right.hash()
@@ -163,10 +124,10 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
     );
 
     let verified = verify(vec![
-        sig(1, &root),
-        sig(1, &left),
-        sig(1, &right),
-        sig(2, &head),
+        sig(1, *root.hash()),
+        sig(1, *left.hash()),
+        sig(1, *right.hash()),
+        sig(2, *head.hash()),
     ])
     .unwrap();
     assert_eq!(
@@ -193,7 +154,7 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
     );
 
     // An author can instead sign a later member authored by somebody else.
-    let co_signed = verify(vec![sig(1, &head), sig(2, &head)]).unwrap();
+    let co_signed = verify(vec![sig(1, *head.hash()), sig(2, *head.hash())]).unwrap();
     assert_eq!(
         co_signed.signature_boundary()[&author(1)],
         BTreeSet::from([*head.hash()])
@@ -208,10 +169,10 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
     let head = meta(3, vec![*middle.hash()], 2);
     let mut source = CommitGraph::new();
     source
-        .ingest(commit_item(1, &root).verify().unwrap(), |_| 1)
+        .ingest(commit_item(&root, 1).verify().unwrap(), |_| 1)
         .unwrap();
     source
-        .ingest(commit_item(2, &boundary).verify().unwrap(), |_| 2)
+        .ingest(commit_item(&boundary, 2).verify().unwrap(), |_| 2)
         .unwrap();
     assert_eq!(source.minimal_cover().loose_commits.len(), 2);
     assert!(source.minimal_cover().fragments.is_empty());
@@ -235,13 +196,9 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
     };
     source
         .ingest(
-            UnverifiedItem::Fragment {
-                range: middle_range.clone(),
-                commits: vec![middle.clone()],
-                signatures: vec![sig(2, &middle)],
-            }
-            .verify()
-            .unwrap(),
+            signed_fragment(&middle_range, vec![middle.clone()], 2)
+                .verify()
+                .unwrap(),
             |_| 3,
         )
         .unwrap();
@@ -258,7 +215,11 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
             UnverifiedItem::Fragment {
                 range: range.clone(),
                 commits: vec![head.clone(), middle.clone(), boundary.clone(), root.clone()],
-                signatures: vec![sig(3, &head), sig(2, &middle), sig(1, &root)],
+                signatures: vec![
+                    sig(3, *head.hash()),
+                    sig(2, *middle.hash()),
+                    sig(1, *root.hash()),
+                ],
             }
             .verify()
             .unwrap(),
@@ -402,7 +363,7 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
         let signatures: Vec<_> = members
             .iter()
             .zip(&authors)
-            .map(|(m, &a)| sig(a, m))
+            .map(|(m, &a)| sig(a, *m.hash()))
             .collect();
         members.shuffle(&mut rng);
         let verified = UnverifiedItem::verify_fragment(

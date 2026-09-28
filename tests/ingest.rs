@@ -1,71 +1,15 @@
 //! Contracts for stateless verification, atomic admission, and minimal-cover relay.
+mod support;
+
 use std::collections::{BTreeSet, HashMap};
 
-use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
-    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
-    FragmentRange, IngestError, IngestReport, ItemId, MaterializationCursor, Signature,
-    SignatureEvidence, UnverifiedItem, VerifiedItem, Vis, WritePermission,
+    CommitGraph, CommitHash, ExportError, FragmentRange, IngestError, IngestReport, ItemId,
+    MaterializationCursor, UnverifiedItem, VerifiedItem, Vis, WritePermission,
 };
-
-fn author(seed: u8) -> Author {
-    Author::try_from(
-        SigningKey::from_bytes(&[seed; 32])
-            .verifying_key()
-            .as_bytes()
-            .as_slice(),
-    )
-    .unwrap()
-}
-
-fn at_depth(seed: u8, parents: Vec<CommitHash>, wanted: usize) -> CommitMeta {
-    let author = author(seed);
-    (0u64..10_000_000)
-        .map(|nonce| {
-            CommitMeta::new(CommitContents {
-                parents: parents.clone(),
-                author,
-                payload: BlobHash::of_contents(&nonce.to_le_bytes()),
-            })
-        })
-        .find(|meta| {
-            meta.hash()
-                .as_bytes()
-                .iter()
-                .take_while(|byte| **byte == 0)
-                .count()
-                == wanted
-        })
-        .expect("find a real hash at the requested depth")
-}
-
-fn proof(seed: u8, hash: CommitHash) -> SignatureEvidence {
-    SignatureEvidence {
-        author: author(seed),
-        commit: hash,
-        signature: Signature::from(
-            SigningKey::from_bytes(&[seed; 32])
-                .sign(hash.as_bytes())
-                .to_bytes(),
-        ),
-    }
-}
-
-fn item(meta: &CommitMeta, seed: u8) -> UnverifiedItem {
-    UnverifiedItem::Commit {
-        meta: meta.clone(),
-        signatures: vec![proof(seed, *meta.hash())],
-    }
-}
-
-fn fragment(range: &FragmentRange, commits: Vec<CommitMeta>, seed: u8) -> UnverifiedItem {
-    // Do not normalize/filter members: malformed fragments must remain malformed.
-    UnverifiedItem::Fragment {
-        range: range.clone(),
-        commits,
-        signatures: vec![proof(seed, range.head)],
-    }
-}
+use support::{
+    at_depth, proof, seeded_author as author, signed_commit as item, signed_fragment as fragment,
+};
 
 fn assert_ingest_rejected_without_changes(
     graph: &mut CommitGraph<usize>,
