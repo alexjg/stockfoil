@@ -146,6 +146,64 @@ either previously captured viewpoint.
 A commit diff isn't a document patch. A commit can participate in both views
 while its visible value changes because another commit stopped overwriting it.
 
+## Incremental materialization
+
+`CommitGraph::visit_changes(&cursor, &after, callback)` combines delivery and
+participation updates in one traversal. It returns
+`Result<MaterializationCursor, DiffError>`; `diff` remains available for callers
+that only need participation comparisons.
+
+Start an empty materializer with `MaterializationCursor::new()` (or `default()`).
+The cursor owns both the previously processed delivery heads and the previous
+viewpoint. These are deliberately separate: a historical or signed viewpoint may
+exclude delivered commits that the materializer has already stored. Read-only
+`delivery_heads()` and `view_point()` accessors expose the snapshots.
+
+Each callback receives a `MaterializationChange<'_, P>` with:
+
+* `meta: &CommitMeta` and `payload: &P`, borrowed without cloning.
+* `newly_delivered: bool`, indicating that the commit lies outside the cursor's
+  processed delivery history. Store this data even when it does not participate.
+* `visibility: Vis`, classifying participation in the old and requested views.
+
+A commit is visited once if newly delivered or if its participation changed,
+never twice when both conditions hold. Newly delivered denied commits are visited
+with `Vis::Neither`. Already stored commits whose participation is unchanged are
+omitted. Additions and removals are visited in ancestors-before-descendants order,
+including ancestry through omitted commits; concurrent ordering is unspecified.
+
+```rust
+let next_cursor = graph.visit_changes(&cursor, &after, |change| {
+    if change.newly_delivered {
+        log.add_operations_from(change.meta, change.payload, false);
+    }
+    match change.visibility {
+        Vis::After => log.set_commit_visibility(*change.meta.hash(), true),
+        Vis::Before => log.set_commit_visibility(*change.meta.hash(), false),
+        Vis::Both | Vis::Neither => {}
+    }
+})?;
+cursor = next_cursor;
+```
+
+The returned cursor captures all currently delivered history, including pending
+local drafts, and the requested viewpoint, even if no callbacks ran. Keep it
+with the successfully updated materializer state. The input cursor is not mutated;
+reusing it replays changes. The callback runs to completion with no early-break
+protocol, and its side effects are not rolled back if it panics.
+
+All history heads in the cursor and target viewpoint are validated before any
+callback. A missing head returns `DiffError::MissingCommit`; unknown permission
+bounds grant nothing as in `diff`. A cursor can be reused on another graph with
+its delivered history, regardless of graph-local chain assignments, provided the
+caller retains the corresponding materializer state. Admission and signatures
+are not checked by this traversal.
+
+This remains a commit-level update stream, not a document patch. For example,
+revoking an overwriting assignment may restore an older value without revisiting
+that older commit. `tests/materialization.rs` exercises that flow with a retained
+operation store, along with historical reads, drafts, and permission-only changes.
+
 ## MVR demo
 
 The graph retains every delivered assignment. The MVR selects the causally

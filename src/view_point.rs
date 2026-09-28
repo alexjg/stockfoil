@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    Author, CommitGraph, CommitHash, QueryError, WritePermission, ancestor_clock::AncestorClock,
+    Author, CommitGraph, CommitHash, QueryError, WritePermission,
+    ancestor_clock::{AncestorClock, ChainTime},
 };
 
 /// An owned snapshot of history heads and write permissions.
@@ -57,7 +58,11 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
             .graph
             .commit_time(commit)
             .ok_or(QueryError::UnknownCommit(*commit))?;
-        Ok(match (
+        Ok(self.visibility_at(time))
+    }
+
+    pub(crate) fn visibility_at(&self, time: ChainTime) -> Vis {
+        match (
             self.before.contains_time(time),
             self.after.contains_time(time),
         ) {
@@ -65,7 +70,7 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
             (false, true) => Vis::After,
             (true, true) => Vis::Both,
             (false, false) => Vis::Neither,
-        })
+        }
     }
 
     /// Each changed commit once, in topological (ancestors-before-descendants) order.

@@ -24,6 +24,8 @@ pub use commit_meta::{CommitContents, CommitMeta};
 mod parsing;
 mod view_point;
 pub use view_point::{CommitDiff, ViewPoint, ViewPointDiff, Vis, VisDiff};
+mod materialization;
+pub use materialization::{MaterializationChange, MaterializationCursor};
 mod signature;
 pub use signature::Signature;
 mod sedimentree;

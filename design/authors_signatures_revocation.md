@@ -210,12 +210,16 @@ A viewpoint contains enough information to determine the set of contributing
 commits regardless of future changes to the write permissions, commit graph, or
 available signatures. This means we can define a diff API in terms of viewpoints.
 
-We use `traverse_delivered_since` to incorporate newly delivered commits into
-the CRDT's operation store, independently of whether they contribute under a
-viewpoint. Comparing viewpoints determines participation changes, including
+`visit_changes` incorporates newly delivered commits and participation changes
+through one callback. A `MaterializationCursor` tracks the processed delivery
+heads separately from the materialized viewpoint, so historical reads do not
+rewind delivery. Comparing viewpoints determines participation changes, including
 changes to previously delivered commits when newly selected history supplies
 frontier proofs. Newly captured signed viewpoints can also change as drafts are
-admitted. The CRDT uses that comparison to produce document-level changes.
+admitted. The CRDT uses these updates to produce document-level changes. The
+lower-level `traverse_since` and `diff` APIs remain available independently.
+See [incremental materialization](authors_signatures_api.md#incremental-materialization)
+for the combined API and cursor contract.
 
 #### Working and Signed Viewpoints
 

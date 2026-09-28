@@ -6,8 +6,9 @@ use std::{
 
 use crate::{
     Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
-    FragmentRange, FragmentReadError, ItemId, SedimentreeView, Signature, SignatureError,
-    SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, VisDiff, WritePermission,
+    FragmentRange, FragmentReadError, ItemId, MaterializationChange, MaterializationCursor,
+    SedimentreeView, Signature, SignatureError, SignatureEvidence, UnverifiedItem, ViewPoint,
+    ViewPointDiff, Vis, VisDiff, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
     sedimentree::MinimalCover,
 };
@@ -655,6 +656,80 @@ impl<P: Clone> CommitGraph<P> {
             graph: self,
             before: self.participation(before)?,
             after: self.participation(after)?,
+        })
+    }
+
+    /// Visit newly delivered commits and participation changes in one traversal.
+    ///
+    /// A commit is visited exactly once if it is outside `cursor`'s processed
+    /// delivery history or its participation changes from `cursor.view_point()`
+    /// to `after`. This includes newly delivered commits that participate in
+    /// neither viewpoint. Metadata and payloads are borrowed, not cloned.
+    ///
+    /// Visits are topological (ancestors before descendants), for both additions
+    /// and removals and including ancestry through omitted commits. Concurrent
+    /// commits have unspecified relative order, which may differ between replicas.
+    ///
+    /// The returned cursor records all currently delivered history and `after`,
+    /// even when no callbacks run. Retain it only with the successfully updated
+    /// materializer state. The input cursor is never modified; replaying it
+    /// repeats the changes. Callback side effects are not rolled back on panic.
+    ///
+    /// Like [`Self::diff`], this includes pending local work without validating
+    /// admission or signatures. All history heads in the cursor and `after`
+    /// must be delivered, otherwise [`DiffError::MissingCommit`] is returned
+    /// before any callbacks run. Unknown permission bounds grant nothing.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::collections::{HashMap, HashSet};
+    /// use stockfoil::{CommitGraph, MaterializationCursor, Vis};
+    ///
+    /// let graph = CommitGraph::<String>::new();
+    /// let mut cursor = MaterializationCursor::new();
+    /// let mut stored = HashMap::new();
+    /// let mut participating = HashSet::new();
+    /// let after = graph.view_point();
+    /// cursor = graph.visit_changes(&cursor, &after, |change| {
+    ///     let hash = *change.meta.hash();
+    ///     if change.newly_delivered {
+    ///         stored.insert(hash, change.payload.clone());
+    ///     }
+    ///     match change.visibility {
+    ///         Vis::After => { participating.insert(hash); }
+    ///         Vis::Before => { participating.remove(&hash); }
+    ///         Vis::Both | Vis::Neither => {}
+    ///     }
+    /// })?;
+    /// # Ok::<(), stockfoil::DiffError>(())
+    /// ```
+    pub fn visit_changes<'graph>(
+        &'graph self,
+        cursor: &MaterializationCursor,
+        after: &ViewPoint,
+        mut visit: impl FnMut(MaterializationChange<'graph, P>),
+    ) -> Result<MaterializationCursor, DiffError> {
+        let delivered = self.history_clock(&cursor.delivery_heads)?;
+        let diff = self.diff(&cursor.view_point, after)?;
+        // Delivery can extend beyond both participation clocks: do not stop at
+        // their latest visible positions or omit newly delivered denied commits.
+        for (idx, node) in &self.nodes {
+            let time = self.nodes.chain_time(idx);
+            let newly_delivered = !delivered.contains_time(time);
+            let visibility = diff.visibility_at(time);
+            if newly_delivered || matches!(visibility, Vis::Before | Vis::After) {
+                visit(MaterializationChange {
+                    meta: &node.meta,
+                    payload: &self.store[&idx],
+                    newly_delivered,
+                    visibility,
+                });
+            }
+        }
+        Ok(MaterializationCursor {
+            delivery_heads: self.heads().collect(),
+            view_point: after.clone(),
         })
     }
 

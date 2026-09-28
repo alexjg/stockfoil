@@ -28,7 +28,8 @@ impl fmt::Display for SignatureError {
 
 impl Error for SignatureError {}
 
-/// The graph lacks the data needed to compare two viewpoints.
+/// The graph lacks delivered history needed to compare viewpoints or advance
+/// a materialization cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffError {
     MissingCommit(CommitHash),
