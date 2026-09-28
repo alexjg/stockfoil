@@ -1,6 +1,6 @@
-use super::MvRegisterMap;
 use std::collections::{BTreeSet, HashMap};
 use stockfoil::WritePermission;
+use stockfoil_mv_register::MvRegisterMap;
 
 fn grant_access(docs: &mut [&mut MvRegisterMap]) {
     let permissions = docs

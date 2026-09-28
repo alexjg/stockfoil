@@ -1,7 +1,7 @@
 //! Revocation changes both a write's value and its overwriting effect.
-use super::MvRegisterMap;
 use std::collections::{BTreeSet, HashMap};
 use stockfoil::WritePermission;
+use stockfoil_mv_register::MvRegisterMap;
 
 fn values(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()

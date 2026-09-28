@@ -1,8 +1,8 @@
 //! One document-level signing flow; signature validation belongs in graph tests.
 use std::collections::{BTreeSet, HashMap};
 
-use super::MvRegisterMap;
 use stockfoil::WritePermission;
+use stockfoil_mv_register::MvRegisterMap;
 
 fn values(value: &str) -> BTreeSet<String> {
     BTreeSet::from([value.to_owned()])

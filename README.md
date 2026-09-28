@@ -35,8 +35,9 @@ materialized state **and** its cursor before updating that copy.
 
 Executable examples:
 
-* [Multi-value registers](tests/mv_register/implementation.rs): one callback for
-  new assignments, revocation, cached current values, and historical reads.
+* [Multi-value registers](examples/mv-register): one callback for new assignments,
+  revocation, cached current values, and historical reads, with a runnable
+  Subduction WebSocket synchronization demo.
 * [Observed-remove set](tests/orset/mod.rs): the delivery-only case, processing
   `newly_delivered` events with the same cursor API.
 
@@ -44,6 +45,15 @@ See the [materialization API guide](design/authors_signatures_api.md#incremental
 for the full contract. `diff`, `traverse`, and `traverse_since` are lower-level
 options for graph inspection and specialized consumers, not prerequisites for
 materialization.
+
+Run the register demo (starts a local Subduction server automatically):
+
+```sh
+cargo run -p stockfoil-mv-register
+```
+
+See its [README](examples/mv-register/README.md) for connecting to an existing
+server. `cargo test` runs the library and example tests.
 
 ## A history lesson
 

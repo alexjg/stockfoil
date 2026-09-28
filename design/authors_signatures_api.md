@@ -12,8 +12,9 @@ sketch: no compatibility APIs or format migrations.
   cannot encode an arbitrary `P`: callers must bind received payloads to this
   hash before ingestion or use. Signature
   verification authenticates the envelope and hash, not an unchecked decoded
-  value. The MVR demo hashes its local assignments using BCS, but only merges
-  in-memory replicas; it does not implement an untrusted payload decoder.
+  value. The MVR demo hashes its local assignments using BCS. Its example-only
+  Subduction adapter reconstructs hashes from exact received payload bytes,
+  verifies the original author signatures, then decodes assignments.
 * Remove signatures from `CommitContents`, `CommitMeta`, and the hashed encoding.
   Deliver them separately as `(author, commit_hash, signature)`.
 * Add an authored commit builder, roughly `commit_by(author, payload)`. Parents
@@ -143,7 +144,7 @@ by this traversal.
 This remains a commit-level update stream, not a document patch. For example,
 revoking an overwriting assignment may restore an older value without revisiting
 that older commit. Keep the operations needed to recompute such effects.
-`tests/mv_register/implementation.rs` demonstrates this with a cached materialized
+`examples/mv-register/src/lib.rs` demonstrates this with a cached materialized
 view; `tests/orset/mod.rs` shows the simpler delivery-only case using the same API.
 
 ## Viewpoints and lower-level queries
@@ -218,11 +219,12 @@ maximal *participating* assignments for each key. Revoking an assignment removes
 both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
-The implementation lives in `tests/mv_register/implementation.rs`. Its materializer
+The implementation lives in `examples/mv-register/src/lib.rs`. Its materializer
 owns a cursor, all delivered assignments, their participation, and cached values.
 One `visit_changes` callback stores new assignments and updates participation,
 then affected keys are recomputed from the retained writes. `get` reads the cache.
-Local edits, signing, permission changes, and merge all call that same update path.
+Local edits, signing, permission changes, merge, and network ingestion all call
+that same update path.
 
 `get_at` clones the materialized state together with its cursor and updates that
 private copy to the requested viewpoint. Historical reads therefore use the same
@@ -231,8 +233,9 @@ They return `DiffError` if a history head is missing. Delivered working snapshot
 remain readable before signing; admission is not validated on reads. Merge still
 transfers only authenticated history.
 
-The example owns its signing key and has no external-signer wrapper or wire
-protocol. Its document API is:
+The example owns its signing key and has no external-signer wrapper. Its
+Subduction demo uses a private versioned BCS wire envelope, not a stable Stockfoil
+format; see `examples/mv-register/README.md`. Its document API is:
 
 * `new()` and `author()` create and identify a replica, initially permitted to
   read its own writes.
@@ -244,7 +247,8 @@ protocol. Its document API is:
 * `merge(&other)` transfers authenticated history, not permissions or drafts.
   `fork()` creates a new key, copies permissions, and merges that history.
 
-The tests are sibling modules and cannot inspect the private graph. They cover
+The register integration tests live in `examples/mv-register/tests` and cannot
+inspect the private graph. They cover
 concurrent register values, revocation restoring overwritten values, and one
 prepare/publish/relay flow preserving historical drafts. Additional tests cover
 denied delivery followed by permission grants, late frontier proofs, and isolated

@@ -1,3 +1,8 @@
+[workspace]
+members = ["examples/mv-register"]
+default-members = [".", "examples/mv-register"]
+resolver = "3"
+
 [package]
 name = "stockfoil"
 version = "0.1.0"

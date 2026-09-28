@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use stockfoil::WritePermission;
 
-use super::MvRegisterMap;
+use stockfoil_mv_register::MvRegisterMap;
 
 fn values(value: &str) -> BTreeSet<String> {
     BTreeSet::from([value.to_owned()])

@@ -1,0 +1,21 @@
+[package]
+name = "stockfoil-mv-register"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+stockfoil = { path = "../.." }
+bcs = "0.2.1"
+ed25519-dalek = "2"
+eyre = "0.6.14"
+future_form = "0.3.0"
+hex = "0.4"
+rand = "0.10.2"
+serde = { version = "1", features = ["derive"] }
+sedimentree_core = { version = "=0.14.2", features = ["std"] }
+subduction_core = { version = "=0.18.2", features = ["std"] }
+subduction_crypto = { version = "=0.9.2", features = ["std"] }
+subduction_websocket = { version = "=0.12.2", features = ["tokio_client", "tokio_server"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }

@@ -1,11 +1,15 @@
 //! Multi-value registers materialized through a single `visit_changes` callback.
 //! Retain all assignments so revocation can reveal previously overwritten values.
-//! This example only merges in-memory replicas.
+//! See [`sync`] for synchronization through a real Subduction WebSocket server.
+
+pub mod sync;
+mod transport;
+mod wire;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ed25519_dalek::{Signer, SigningKey};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use stockfoil::{
     Author, CommitGraph, CommitHash, DiffError, MaterializationCursor, Signature, ViewPoint, Vis,
     WritePermission,
@@ -18,7 +22,7 @@ pub struct MvRegisterMap {
     materialized: Materialized,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Assignment {
     key: String,
     value: String,
@@ -79,6 +83,12 @@ impl Materialized {
 
     fn get(&self, key: &str) -> BTreeSet<String> {
         self.values.get(key).cloned().unwrap_or_default()
+    }
+}
+
+impl Default for MvRegisterMap {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
