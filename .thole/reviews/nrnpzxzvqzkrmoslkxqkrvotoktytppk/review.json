@@ -1,0 +1,21 @@
+{
+  "change_id": "nrnpzxzvqzkrmoslkxqkrvotoktytppk",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "838b64549543eced",
+      "post_image_hash": "d9e777dd16cda04c",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "tests/commit_graph.rs": {
+      "shadow_file": "tests_commit_graph.rs.am",
+      "pre_image_hash": "6dab7512520fc0e3",
+      "post_image_hash": "2e0bf504f29c3b58",
+      "pre_shadow_file": "tests_commit_graph.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

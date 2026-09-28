@@ -1,0 +1,58 @@
+{
+  "change_id": "ovxvuvkqqvmonqmomxrllsvxkqontqvr",
+  "algorithm": "patience",
+  "next_id": 2,
+  "files": {
+    "design/sedimentree_sync.md": {
+      "shadow_file": "design_sedimentree_sync.md.am",
+      "pre_image_hash": "e437d04ed0b5afcd",
+      "post_image_hash": "377ba1e0eeaae657",
+      "pre_shadow_file": "design_sedimentree_sync.md_pre.am"
+    },
+    "src/ingest.rs": {
+      "shadow_file": "src_ingest.rs.am",
+      "pre_image_hash": "b10bb1b6ee116226",
+      "post_image_hash": "5a1df21d797d00ac",
+      "pre_shadow_file": "src_ingest.rs_pre.am"
+    },
+    "tests/ingest.rs": {
+      "shadow_file": "tests_ingest.rs.am",
+      "pre_image_hash": "cca65f4ccbe861fb",
+      "post_image_hash": "b7fb8d100f725685",
+      "pre_shadow_file": "tests_ingest.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "3204f2b861ddc686",
+      "post_image_hash": "1fad0440384a917d",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    }
+  },
+  "annotations": [
+    {
+      "file_path": "src/commit_graph.rs",
+      "start_cursor": "010310cf9f3e60e2111320965ed419cf86f489933f02",
+      "end_cursor": "010310cf9f3e60e2111320965ed419cf86f489e93f02",
+      "original_text": "            if !in_excluded(hash) {\n                return Err(invalid);\n            }",
+      "context_before": "            if range.boundary.contains(hash) {\n                continue;\n            }",
+      "context_after": "            stack.push(self.by_hash[hash]);\n        }\n        // All members are reachable, so every cached direct boundary reference",
+      "body": "Why do we need to check this? Surely if we have already verified the hash graph of the fragment then we know that this can't ever be true?",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    },
+    {
+      "file_path": "src/commit_graph.rs",
+      "start_cursor": "010310cf9f3e60e2111320965ed419cf86f489bc3e02",
+      "end_cursor": "010310cf9f3e60e2111320965ed419cf86f489ea3e02",
+      "original_text": "            if range.boundary.contains(hash) {",
+      "context_before": "        }\n        let mut stack = Vec::new();\n        for hash in &item.dependencies {",
+      "context_after": "                continue;\n            }\n            if !in_excluded(hash) {",
+      "body": "Surely this is already verified not to be the case when we verify the fragment?",
+      "kind": "review",
+      "state": "active",
+      "side": "post"
+    }
+  ],
+  "comment": ""
+}

@@ -5,7 +5,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use stockfoil::{
     Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
     FragmentRange, IngestError, ItemId, Signature, SignatureEvidence, UnverifiedItem, VerifiedItem,
-    WritePermission,
+    Vis, WritePermission,
 };
 
 fn author(seed: u8) -> Author {
@@ -352,6 +352,14 @@ fn minimal_fragment_relays_cross_author_evidence_but_never_arbitrary_subitems() 
     relay.merge(&receiver);
     assert_eq!(relay.minimal_cover(), cover);
     assert!(relay.has_commit(c.hash()));
+    // Historical membership survives certificate replacement and relay even
+    // though the captured heads are no longer independently exportable.
+    for graph in [&source, &receiver, &relay] {
+        let membership = graph.diff(&captured, &captured).unwrap();
+        assert_eq!(membership.visibility(a.hash()), Ok(Vis::Both));
+        assert_eq!(membership.visibility(b.hash()), Ok(Vis::Both));
+        assert_eq!(membership.visibility(c.hash()), Ok(Vis::Neither));
+    }
     assert_not_exportable(&relay, ItemId::Commit(*b.hash()));
     relay
         .export(&ItemId::Fragment(range))

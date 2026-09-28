@@ -14,7 +14,7 @@ use std::{
 use ed25519_dalek::SigningKey;
 use stockfoil::{
     BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, IngestError, ItemId,
-    QueryError, ResolveError, Signature, SignatureError, SignatureEvidence, UnverifiedItem,
+    QueryError, Signature, SignatureError, SignatureEvidence, UnverifiedItem,
     VerificationError, ViewPoint, Vis, WritePermission,
 };
 
@@ -75,6 +75,10 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
     assert!(graph.minimal_cover().loose_commits.is_empty());
     assert!(graph.minimal_cover().fragments.is_empty());
     let rejected = ViewPoint::from_parts(vec![*child.hash()], HashMap::new());
+    assert_eq!(
+        graph.diff(&before, &rejected).unwrap_err(),
+        DiffError::MissingCommit(*child.hash())
+    );
     assert_eq!(
         graph.ingest_signature(
             author(&alice),
@@ -235,6 +239,10 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
     )]));
     support::receive_commit(&mut graph, c.clone(), 1);
     let before = graph.view_point();
+    assert_eq!(
+        graph.diff(&before, &before).unwrap().visibility(c.hash()),
+        Ok(Vis::Neither)
+    );
 
     // Buffer the unverified envelope outside the graph until all parents exist.
     let pending = receipt(frontier.clone(), &bob);
@@ -244,8 +252,26 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
         Err(IngestError::MissingDependency(hash)) if hash == *missing.hash()
     ));
     assert_eq!(graph.view_point(), before); // Reading its parent link isn't proof.
+    assert_eq!(
+        graph.diff(&before, &before).unwrap().visibility(c.hash()),
+        Ok(Vis::Neither)
+    );
     support::receive_commit(&mut graph, missing, 2);
     graph.ingest(pending, |_| 3).unwrap();
+    let after = graph.view_point();
+    let diff = graph.diff(&before, &after).unwrap();
+    // The newly delivered frontier reveals an older commit, not its own denied
+    // author's writes, and cannot retroactively grant access in the old view.
+    assert_eq!(diff.visibility(c.hash()), Ok(Vis::After));
+    assert_eq!(diff.visibility(frontier.hash()), Ok(Vis::Neither));
+    assert_eq!(
+        graph.diff(&before, &before).unwrap().visibility(c.hash()),
+        Ok(Vis::Neither)
+    );
+    let changes = diff.changed_commits().collect::<Vec<_>>();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].commit_id, *c.hash());
+    assert_eq!(changes[0].visibility_delta, stockfoil::VisDiff::After);
     let mut newly_delivered = Vec::new();
     graph.traverse_since(before.heads(), |_, value| {
         newly_delivered.push(*value);
@@ -255,7 +281,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
 }
 
 #[test]
-fn pending_evidence_waits_for_admission_before_resolving_old_views() {
+fn historical_views_use_delivered_history_independently_of_admission() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
     let tip = commit(&alice, 2, &[*root.hash()]);
@@ -271,19 +297,23 @@ fn pending_evidence_waits_for_admission_before_resolving_old_views() {
     source.ingest_local_commit(tip.clone(), 2);
     sign(&mut source, &alice, *tip.hash());
 
-    // A fresh process cannot resolve an assumed dependency from a pending tip.
+    // A fresh process cannot compare a snapshot whose head is missing.
     let mut peer = CommitGraph::new();
     assert!(matches!(
         peer.diff(&old, &old),
         Err(DiffError::MissingCommit(_))
     ));
-    // Later evidence still resolves old snapshots over actual local history.
+    // Delivered drafts suffice for diffing, even before admission.
     // Neither node is a fragment checkpoint, so there is no batch envelope.
     assert_ne!(root.hash().as_bytes()[0], 0);
     assert_ne!(tip.hash().as_bytes()[0], 0);
     peer.ingest_local_commit(root.clone(), 1);
     peer.ingest_local_commit(tip.clone(), 2);
     sign(&mut peer, &alice, *tip.hash());
+    let membership = peer.diff(&old, &old).unwrap();
+    assert_eq!(membership.visibility(root.hash()), Ok(Vis::Both));
+    assert_eq!(membership.visibility(tip.hash()), Ok(Vis::Neither));
+    assert!(!peer.has_commit(root.hash()));
     assert!(peer.minimal_cover().loose_commits.is_empty());
     sign(&mut peer, &alice, *root.hash());
     assert!(peer.publishable_commit(root.hash()).is_some());
@@ -304,6 +334,23 @@ fn pending_evidence_waits_for_admission_before_resolving_old_views() {
     );
     let mut forwarded = CommitGraph::new();
     forwarded.merge(&peer);
+    for graph in [&peer, &forwarded] {
+        let membership = graph.diff(&old, &old).unwrap();
+        assert_eq!(membership.visibility(root.hash()), Ok(Vis::Both));
+        assert_eq!(membership.visibility(tip.hash()), Ok(Vis::Neither));
+        let unknown = CommitHash::from([99; 32]);
+        assert_eq!(
+            membership.visibility(&unknown),
+            Err(QueryError::UnknownCommit(unknown))
+        );
+        // Querying a transported snapshot must not adopt its permissions.
+        let current = graph.view_point();
+        assert!(current.write_permissions().is_empty());
+        assert_eq!(
+            graph.diff(&current, &current).unwrap().visibility(root.hash()),
+            Ok(Vis::Neither)
+        );
+    }
 }
 
 #[test]
@@ -373,6 +420,10 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
     // once signed, nor let the signature grant her write permission again.
     source.set_write_permissions(&HashMap::from([(author(&bob), WritePermission::Unbounded)]));
     sign(&mut source, &alice, *root.hash());
+    let current = source.view_point();
+    let diff = source.diff(&working, &current).unwrap();
+    assert_eq!(diff.visibility(root.hash()), Ok(Vis::Before));
+    assert_eq!(diff.visibility(child.hash()), Ok(Vis::Both));
     peer.merge(&source);
     assert_eq!(peer.heads().collect::<Vec<_>>(), vec![*child.hash()]);
     assert!(peer.view_point().write_permissions().is_empty());
@@ -491,6 +542,11 @@ fn received_commits_need_their_own_authors_signature_coverage() {
     support::receive_commit(&mut graph, root.clone(), 1);
     assert!(graph.has_commit(root.hash()));
     graph.ingest(pending, |_| 2).unwrap();
+    let admitted = graph.signed_view_point();
+    let diff = graph.diff(&before, &admitted).unwrap();
+    for meta in [&root, &child] {
+        assert_eq!(diff.visibility(meta.hash()), Ok(Vis::After));
+    }
 
     // Neither a duplicate local insertion nor signatures can undo revocation.
     grant(&mut graph, &[&alice]);
@@ -499,4 +555,8 @@ fn received_commits_need_their_own_authors_signature_coverage() {
         graph.ingest_signature(author(&bob), *root.hash(), signature(&bob, *root.hash())),
         Err(SignatureError::NotPendingLocalCommit(*root.hash()))
     );
+    let current = graph.view_point();
+    let diff = graph.diff(&admitted, &current).unwrap();
+    assert_eq!(diff.visibility(root.hash()), Ok(Vis::Before));
+    assert_eq!(diff.visibility(child.hash()), Ok(Vis::Both));
 }

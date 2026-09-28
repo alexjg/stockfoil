@@ -7,7 +7,7 @@ use support::{author, key, sign, signature};
 
 use ed25519_dalek::SigningKey;
 use stockfoil::{
-    CommitGraph, CommitHash, ResolveError, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
+    CommitGraph, CommitHash, DiffError, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
 };
 
 fn prepare(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHash {
@@ -149,6 +149,10 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
     assert_eq!(peer.heads().collect::<Vec<_>>(), expected);
+    assert_eq!(
+        peer.diff(&signed, &working).unwrap_err(),
+        DiffError::MissingCommit(joined)
+    );
 
     sign(&mut graph, &alice, draft);
     expected = vec![draft, right];
@@ -158,8 +162,19 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     sign(&mut graph, &alice, joined);
     assert_eq!(graph.signed_view_point(), working);
     peer.merge(&graph);
-    for snapshot in [&signed, &working] {
-        assert_changes(&peer.diff(snapshot, snapshot).unwrap(), &[], &[]);
+    for graph in [&graph, &peer] {
+        let old = graph.diff(&signed, &signed).unwrap();
+        for hash in [left, right] {
+            assert_eq!(old.visibility(&hash), Ok(Vis::Both));
+        }
+        for hash in [draft, joined] {
+            assert_eq!(old.visibility(&hash), Ok(Vis::Neither));
+        }
+        let current = graph.diff(&working, &working).unwrap();
+        for hash in [left, right, draft, joined] {
+            assert_eq!(current.visibility(&hash), Ok(Vis::Both));
+        }
+        assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[draft, joined]);
     }
 }
 
@@ -171,7 +186,8 @@ fn pending_write_bounds_apply_only_to_working_history() {
     let root = append(&mut graph, &alice, 0);
     let bound = prepare(&mut graph, &bob, 1);
     // Bob is denied, but his commit can bound Alice's permission in histories
-    // that contain it. Denial must not bypass admission checks in resolve.
+    // that contain it. Its absence from a peer must still make diff fail,
+    // even though Bob's own writes cannot contribute.
     graph.set_write_permissions(&HashMap::from([(
         author(&alice),
         WritePermission::Bounded(vec![bound]),
@@ -185,6 +201,14 @@ fn pending_write_bounds_apply_only_to_working_history() {
     assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
     let mut peer = CommitGraph::new();
     peer.merge(&graph);
+    assert_eq!(
+        peer.diff(&signed, &working).unwrap_err(),
+        DiffError::MissingCommit(bound)
+    );
+    assert_eq!(
+        peer.diff(&working, &signed).unwrap_err(),
+        DiffError::MissingCommit(bound)
+    );
 
     sign(&mut graph, &bob, bound);
     assert_eq!(graph.view_point(), working);
@@ -255,6 +279,18 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
     );
     assert_eq!(batch_working.heads(), graph.view_point().heads());
     peer.merge(&graph);
+    for graph in [&graph, &peer] {
+        for snapshot in [&initial, &batch_signed] {
+            let old = graph.diff(snapshot, snapshot).unwrap();
+            assert_eq!(old.visibility(&base), Ok(Vis::Both));
+            assert_eq!(old.visibility(&first), Ok(Vis::Neither));
+            assert_eq!(old.visibility(&tip), Ok(Vis::Neither));
+        }
+        let current = graph.diff(&batch_working, &batch_working).unwrap();
+        for hash in [base, first, tip] {
+            assert_eq!(current.visibility(&hash), Ok(Vis::Both));
+        }
+    }
 
     assert_eq!(
         graph.ingest_signature(author(&key), tip, signature(&key, tip)),

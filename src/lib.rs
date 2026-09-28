@@ -7,7 +7,7 @@ mod author;
 pub use author::Author;
 mod errors;
 pub use errors::{
-    DiffError, ExportError, FragmentReadError, IngestError, QueryError, ResolveError,
+    DiffError, ExportError, FragmentReadError, IngestError, QueryError,
     SignatureError, VerificationError,
 };
 mod ingest;

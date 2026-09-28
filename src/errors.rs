@@ -28,26 +28,6 @@ impl fmt::Display for SignatureError {
 
 impl Error for SignatureError {}
 
-/// A viewpoint could not be resolved against admitted graph history.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolveError {
-    /// The commit is not present in the graph.
-    MissingCommit(CommitHash),
-    /// The commit is delivered local work but has not passed verified admission.
-    PendingLocalCommit(CommitHash),
-}
-
-impl fmt::Display for ResolveError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingCommit(hash) => write!(f, "missing delivered commit: {hash:?}"),
-            Self::PendingLocalCommit(hash) => write!(f, "pending local commit: {hash:?}"),
-        }
-    }
-}
-
-impl Error for ResolveError {}
-
 /// The graph lacks the data needed to compare two viewpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffError {
@@ -63,14 +43,6 @@ impl fmt::Display for DiffError {
 }
 
 impl Error for DiffError {}
-
-impl From<DiffError> for ResolveError {
-    fn from(error: DiffError) -> Self {
-        match error {
-            DiffError::MissingCommit(hash) => Self::MissingCommit(hash),
-        }
-    }
-}
 
 /// A participation query used a hash that is not present in the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]

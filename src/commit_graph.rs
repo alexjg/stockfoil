@@ -636,8 +636,14 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    /// Compare participation optimistically, including pending local history.
-    /// Received viewpoints must be resolved before they drive a materialized view.
+    /// Compare participation over delivered history, including pending local drafts.
+    /// Returns [`DiffError::MissingCommit`] if either viewpoint names a missing
+    /// history head, even when its author is denied permission. Unknown permission
+    /// bounds grant nothing; they are not missing-history errors.
+    ///
+    /// This does not validate admission or signatures. Callers requiring admitted
+    /// history can check every head with [`Self::has_commit`]; admission is
+    /// parent-closed, so admitted heads imply admitted ancestors.
     pub fn diff(
         &self,
         before: &ViewPoint,
@@ -1272,6 +1278,14 @@ mod tests {
         let mut relay = CommitGraph::new();
         relay.merge(&peer);
         assert_eq!(relay.minimal_cover(), cover);
+
+        // Pruning export certificates must not change captured membership,
+        // including on replicas that only received the replacement fragment.
+        for graph in [&graph, &peer, &relay] {
+            let membership = graph.diff(&old_view, &old_view).unwrap();
+            assert_eq!(membership.visibility(root.hash()), Ok(crate::Vis::Both));
+            assert_eq!(membership.visibility(head.hash()), Ok(crate::Vis::Neither));
+        }
     }
 
     #[test]

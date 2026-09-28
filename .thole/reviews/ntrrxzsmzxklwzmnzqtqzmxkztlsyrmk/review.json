@@ -1,0 +1,33 @@
+{
+  "change_id": "ntrrxzsmzxklwzmnzqtqzmxkztlsyrmk",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "tests/view_point_diff.rs": {
+      "shadow_file": "tests_view_point_diff.rs.am",
+      "pre_image_hash": "cd4bc2f375f362e5",
+      "post_image_hash": "1740b770b8cf3bc9",
+      "pre_shadow_file": "tests_view_point_diff.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "6ad5cd670dd4a995",
+      "post_image_hash": "882994803964c7d4",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "tests/auth.rs": {
+      "shadow_file": "tests_auth.rs.am",
+      "pre_image_hash": "34d64d2842c3cdd1",
+      "post_image_hash": "a7212a863cea5663",
+      "pre_shadow_file": "tests_auth.rs_pre.am"
+    },
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "9a38e67169c6b12c",
+      "post_image_hash": "47adfa16a8da6ced",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

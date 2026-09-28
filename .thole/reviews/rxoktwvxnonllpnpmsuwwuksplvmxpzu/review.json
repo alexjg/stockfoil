@@ -1,0 +1,93 @@
+{
+  "change_id": "rxoktwvxnonllpnpmsuwwuksplvmxpzu",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "tests/ingest.rs": {
+      "shadow_file": "tests_ingest.rs.am",
+      "pre_image_hash": "9e9d8411e86c9c8c",
+      "post_image_hash": "cca65f4ccbe861fb",
+      "pre_shadow_file": "tests_ingest.rs_pre.am"
+    },
+    "src/ancestor_clock.rs": {
+      "shadow_file": "src_ancestor_clock.rs.am",
+      "pre_image_hash": "e5e83e4aa5a52e75",
+      "post_image_hash": "c7a04b06b13b311f",
+      "pre_shadow_file": "src_ancestor_clock.rs_pre.am"
+    },
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "e0a7ee78d53fda25",
+      "post_image_hash": "dbe27f390d7ea2d9",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    },
+    "tests/verification.rs": {
+      "shadow_file": "tests_verification.rs.am",
+      "pre_image_hash": "39a9cd4707a09a47",
+      "post_image_hash": "b1b78229e3aa890f",
+      "pre_shadow_file": "tests_verification.rs_pre.am"
+    },
+    "tests/support/mod.rs": {
+      "shadow_file": "tests_support_mod.rs.am",
+      "pre_image_hash": "755f6eb226668ca6",
+      "post_image_hash": "6dad7b9b4c3cd743",
+      "pre_shadow_file": "tests_support_mod.rs_pre.am"
+    },
+    "src/ingest.rs": {
+      "shadow_file": "src_ingest.rs.am",
+      "pre_image_hash": "d8d0857370a563ca",
+      "post_image_hash": "b10bb1b6ee116226",
+      "pre_shadow_file": "src_ingest.rs_pre.am"
+    },
+    "src/sedimentree.rs": {
+      "shadow_file": "src_sedimentree.rs.am",
+      "pre_image_hash": "af53085eae2ef053",
+      "post_image_hash": "088bd6be6da0cd22",
+      "pre_shadow_file": "src_sedimentree.rs_pre.am"
+    },
+    "design/ancestor_vectors.typ": {
+      "shadow_file": "design_ancestor_vectors.typ.am",
+      "pre_image_hash": "67d40e4bacacf30f",
+      "post_image_hash": "bc460c4328d9984c",
+      "pre_shadow_file": "design_ancestor_vectors.typ_pre.am"
+    },
+    "design/authors_signatures_revocation.md": {
+      "shadow_file": "design_authors_signatures_revocation.md.am",
+      "pre_image_hash": "8776f3ac94795c62",
+      "post_image_hash": "ec8202d068cfbc87",
+      "pre_shadow_file": "design_authors_signatures_revocation.md_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "440c035ded04e686",
+      "post_image_hash": "3204f2b861ddc686",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "design/sedimentree_sync.md": {
+      "shadow_file": "design_sedimentree_sync.md.am",
+      "pre_image_hash": "ef61cd7d3e0c7b04",
+      "post_image_hash": "e437d04ed0b5afcd",
+      "pre_shadow_file": "design_sedimentree_sync.md_pre.am"
+    },
+    "tests/fragment_certificates.rs": {
+      "shadow_file": "tests_fragment_certificates.rs.am",
+      "pre_image_hash": "aea10c625af818ee",
+      "post_image_hash": "ab918e3df4e6afc4",
+      "pre_shadow_file": "tests_fragment_certificates.rs_pre.am"
+    },
+    "design/authors_signatures_api.md": {
+      "shadow_file": "design_authors_signatures_api.md.am",
+      "pre_image_hash": "e353078fd7fcfe40",
+      "post_image_hash": "d2390875dc276842",
+      "pre_shadow_file": "design_authors_signatures_api.md_pre.am"
+    },
+    "src/errors.rs": {
+      "shadow_file": "src_errors.rs.am",
+      "pre_image_hash": "b762b26104434a29",
+      "post_image_hash": "e3f66c1dc28057bb",
+      "pre_shadow_file": "src_errors.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

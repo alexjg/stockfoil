@@ -9,15 +9,13 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use stockfoil::{
-    Author, CommitGraph, CommitHash, ResolveError, Signature, ViewPoint, Vis, WritePermission,
+    Author, CommitGraph, CommitHash, DiffError, Signature, ViewPoint, Vis, WritePermission,
 };
 
 pub struct MvRegisterMap {
     graph: CommitGraph<Assignment>,
     signing_key: SigningKey,
     pending: BTreeSet<CommitHash>,
-    // Locally captured working views can be read before their edits are signed.
-    local_views: Vec<ViewPoint>,
 }
 
 #[derive(Clone, Serialize)]
@@ -32,7 +30,6 @@ impl MvRegisterMap {
             graph: CommitGraph::new(),
             signing_key: SigningKey::from_bytes(&rand::random()),
             pending: BTreeSet::new(),
-            local_views: Vec::new(),
         };
         doc.set_write_permissions(&HashMap::from([(doc.author(), WritePermission::Unbounded)]));
         doc
@@ -53,7 +50,6 @@ impl MvRegisterMap {
         let hash = *meta.hash();
         self.graph.ingest_local_commit(meta, assignment);
         self.pending.insert(hash);
-        self.remember_view();
         hash
     }
 
@@ -67,7 +63,6 @@ impl MvRegisterMap {
                     .unwrap();
             }
         }
-        self.remember_view();
     }
 
     pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
@@ -78,7 +73,6 @@ impl MvRegisterMap {
 
     pub fn set_write_permissions(&mut self, permissions: &HashMap<Author, WritePermission>) {
         self.graph.set_write_permissions(permissions);
-        self.remember_view();
     }
 
     pub fn view_point(&self) -> ViewPoint {
@@ -89,7 +83,7 @@ impl MvRegisterMap {
         self.get_at(&self.view_point(), key).unwrap()
     }
 
-    pub fn get_at(&self, view: &ViewPoint, key: &str) -> Result<BTreeSet<String>, ResolveError> {
+    pub fn get_at(&self, view: &ViewPoint, key: &str) -> Result<BTreeSet<String>, DiffError> {
         let participation = self.graph.diff(view, view)?;
         let mut writes = BTreeMap::new();
         self.graph.traverse(|meta, assignment| {
@@ -112,13 +106,5 @@ impl MvRegisterMap {
 
     pub fn merge(&mut self, other: &Self) {
         self.graph.merge(&other.graph);
-        self.remember_view();
-    }
-
-    fn remember_view(&mut self) {
-        let view = self.view_point();
-        if !self.local_views.contains(&view) {
-            self.local_views.push(view);
-        }
     }
 }

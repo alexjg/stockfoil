@@ -245,34 +245,35 @@ working document. Captured viewpoints stay unchanged. To preserve historical
 signing status, save both viewpoints; the working one alone doesn't record
 which commits were admitted then.
 
-#### Resolving Viewpoints
+#### Comparing Viewpoints
 
 A viewpoint describes which commits contribute to some view of the document.
-`resolve` checks that its selected heads exist and are admitted. A head absent
-from the graph returns `ResolveError::MissingCommit(hash)`; a delivered pending
-local head returns `ResolveError::PendingLocalCommit(hash)`. Since admitted
-history is verified and parent-closed by invariant, checking the heads establishes
-admission of the whole selected history. There is no separate signature-frontier
-coverage check or authenticated set to consult.
+`diff` requires every history head in both viewpoints to be delivered. A head
+absent from the graph returns `DiffError::MissingCommit(hash)`, regardless of
+write permissions. Delivered pending local heads are accepted, allowing local
+materialization and diffs before signing without making those drafts admitted.
+Signing changes neither a captured viewpoint's meaning nor its comparability
+on a graph that already has its history.
 
-A working viewpoint naming pending local heads cannot resolve until those
-commits are admitted. Signing can make that same description resolvable without
-changing its meaning. Resolution doesn't manage signing requests or return a
-list of pending ones, and it offers no "trust this frontier" option.
+Calculating participation is separate from validating admission. `diff` checks
+graph history and write permissions only, not admission or signatures, for both
+local and received viewpoints. Callers requiring admitted history can check
+that `has_commit` holds for each head. Since admission is verified and
+parent-closed, that also establishes admission of the selected ancestors.
 
-Calculating participation is separate from validating admission. `diff` is
-optimistic: it checks graph history and write permissions only, not admission.
-Locally captured working viewpoints can drive materialization and diffs before
-signing; that doesn't make their drafts admitted. Received viewpoints must pass
-`resolve` before driving a materialized view or being used in its diffs.
+For a single-view membership query, prepare `diff(&view, &view)`. On the
+resulting diff, `visibility(&commit)` returns `Vis::Both` for a contributing
+commit and `Vis::Neither` for a known non-contributing commit. An unknown commit
+is a `QueryError::UnknownCommit`, not proof of invisibility.
 
 Actual signature and ancestry evidence remains available independently for
 transport verification and export. Evidence outside the selected history may
 help admit a commit, but cannot expand a captured viewpoint or supply a
-write-frontier bound outside its history. Missing graph data or pending local
-heads are resolution errors, not proof that affected commits are invisible.
+write-frontier bound outside its history. Unknown permission bounds grant
+nothing; missing history heads prevent the comparison rather than making
+selected commits invisible.
 
-Any process that resolves the same viewpoint obtains the same commit
+Any process with the selected history delivered obtains the same commit
 participation, regardless of arrival order or additional local knowledge. This
 confers process independence without requiring a shared authorization log or DAG.
 

@@ -90,8 +90,8 @@ and `write_permissions`. Give it a `heads() -> &[CommitHash]` accessor
 and a read-only `write_permissions()` map.
 `ViewPoint::from_parts(heads, write_permissions)` reconstructs the
 snapshot after transport or storage; it doesn't validate its claims. The
-viewpoint survives graph mutation and can be resolved elsewhere once its history
-has been admitted.
+viewpoint survives graph mutation and can be compared elsewhere once its history
+has been delivered.
 
 Working and signed viewpoints have the same shape but can select different
 heads and histories. No authentication frontier or extra local-changes field is
@@ -105,26 +105,19 @@ Proposed graph methods:
 * `signed_view_point() -> ViewPoint` captures the maximal admitted commits as
   heads and the current write permissions. Admitted ancestors underneath drafts
   are retained, not lost by merely filtering the working heads.
-* `resolve(&ViewPoint) -> Result<ResolvedViewPoint, ResolveError>` validates that
-  each head exists and is admitted, then prepares repeated participation queries.
-  Heads absent from the graph yield `ResolveError::MissingCommit(hash)`;
-  delivered pending local heads yield `ResolveError::PendingLocalCommit(hash)`.
-  Parent closure guarantees that the selected history is admitted too. There is
-  no separate signature-frontier coverage check, signing-task list, or "trust
-  this frontier" flag.
-* `diff(&ViewPoint, &ViewPoint) -> Result<ViewPointDiff, DiffError>` optimistically
-  calculates participation from graph history and write permissions only,
-  without checking admission or requiring signatures to have arrived. Missing
-  graph data can still prevent the comparison.
+* `diff(&ViewPoint, &ViewPoint) -> Result<ViewPointDiff<'_, P>, DiffError>`
+  calculates participation from delivered graph history and write permissions,
+  including pending local drafts. A missing history head in either viewpoint
+  yields `DiffError::MissingCommit(hash)`, even under total permission denial.
+  Admission and signatures are not checked.
 
-Diffing isn't signature verification. Local working viewpoints can be used
-immediately, but a received viewpoint must pass `resolve` before driving a
-materialized view or being used in its diffs. Keep participation calculation
-separate from that check so local editing doesn't wait for signing IO.
+Diffing isn't signature verification. Any viewpoint whose history is delivered
+can be compared, so local editing doesn't wait for signing IO. Callers requiring
+admitted history can check each head with `has_commit`; parent-closed admission
+then guarantees that the selected ancestors are admitted too.
 
-Queries on the prepared objects:
+Queries on the prepared diff:
 
-* `ResolvedViewPoint::visible(&CommitHash) -> Result<bool, QueryError>`.
 * `ViewPointDiff::visibility(&CommitHash) -> Result<Vis, QueryError>`, where
   `Vis` is `Before`, `After`, `Both`, or `Neither`.
 * `ViewPointDiff::changed_commits()` iterates `CommitDiff` values with
@@ -135,10 +128,11 @@ Queries on the prepared objects:
 A known commit outside a viewpoint's history is invisible there. An unknown
 hash is a query error, not proof of invisibility. Permission bounds are evaluated
 only within the selected history: a pending draft cannot serve as a bound in a
-signed viewpoint that excludes it. Missing graph data or pending local heads are
-resolution errors, not changes to the viewpoint's meaning. A working viewpoint
-can exist and be used locally before its history is admitted; later signing can
-make it resolvable without changing its selected history or participation.
+signed viewpoint that excludes it. Unknown permission bounds grant nothing;
+only missing history heads prevent diff construction. Pending local heads are
+valid for diffing, and later signing changes neither their selected history nor
+participation. For a single-view membership query, use `diff(&view, &view)`:
+`Vis::Both` means visible and `Vis::Neither` means invisible.
 
 Comparing working and signed viewpoints gives the participation changes awaiting
 signatures. Compare their selected histories as well for signing-status UI:
@@ -158,9 +152,11 @@ both its value and its overwriting effect. An allowed
 assignment still overwrites its ancestors through revoked intermediate commits.
 
 The implementation lives in `tests/mv_register/implementation.rs`. It computes
-values on reads rather than maintaining a second state cache. Locally captured
-working viewpoints remain readable before signing; imported viewpoints must
-resolve against admitted history first.
+values on reads rather than maintaining a second state cache. `get_at` uses
+`diff(view, view)` for both local and imported snapshots, returning `DiffError`
+if a history head is missing. Delivered working snapshots remain readable before
+signing; the example does not track snapshot provenance or validate admission on
+reads. Merge still transfers only authenticated history.
 
 The example owns its signing key and has no external-signer wrapper or wire
 protocol. Its document API is:

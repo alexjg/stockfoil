@@ -1,0 +1,33 @@
+{
+  "change_id": "xyvkwuqkuykwmrvokxrnxympklmouuux",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "86cdd0c358133e5f",
+      "post_image_hash": "53d7fab3386549c7",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    },
+    "design/sedimentree_sync_api.md": {
+      "shadow_file": "design_sedimentree_sync_api.md.am",
+      "pre_image_hash": "7b130727e32011b4",
+      "post_image_hash": "cf787e6a8703cb67",
+      "pre_shadow_file": "design_sedimentree_sync_api.md_pre.am"
+    },
+    "src/sedimentree.rs": {
+      "shadow_file": "src_sedimentree.rs.am",
+      "pre_image_hash": "9acbc6d9144c1c16",
+      "post_image_hash": "c4c7b586f5a1424e",
+      "pre_shadow_file": "src_sedimentree.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "188acfcc074cc338",
+      "post_image_hash": "fa9df561266b0fb6",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

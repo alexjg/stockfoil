@@ -1,0 +1,51 @@
+{
+  "change_id": "ynuxspkvuxpnluxyuyllsuznlpovrnks",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "tests/view_point_diff.rs": {
+      "shadow_file": "tests_view_point_diff.rs.am",
+      "pre_image_hash": "1740b770b8cf3bc9",
+      "post_image_hash": "8e878db38653254e",
+      "pre_shadow_file": "tests_view_point_diff.rs_pre.am"
+    },
+    "tests/mv_register/implementation.rs": {
+      "shadow_file": "tests_mv_register_implementation.rs.am",
+      "pre_image_hash": "f9e80901bfe2a8a4",
+      "post_image_hash": "a15600d39dc5633b",
+      "pre_shadow_file": "tests_mv_register_implementation.rs_pre.am"
+    },
+    "tests/commit_graph.rs": {
+      "shadow_file": "tests_commit_graph.rs.am",
+      "pre_image_hash": "be5047b0cf7ce92f",
+      "post_image_hash": "b84a465ebd5c4364",
+      "pre_shadow_file": "tests_commit_graph.rs_pre.am"
+    },
+    "tests/orset/mod.rs": {
+      "shadow_file": "tests_orset_mod.rs.am",
+      "pre_image_hash": "b1543a9919d8f534",
+      "post_image_hash": "5fe0c318cb37aad7",
+      "pre_shadow_file": "tests_orset_mod.rs_pre.am"
+    },
+    "src/commit_graph.rs": {
+      "shadow_file": "src_commit_graph.rs.am",
+      "pre_image_hash": "882994803964c7d4",
+      "post_image_hash": "65d53dad912cf394",
+      "pre_shadow_file": "src_commit_graph.rs_pre.am"
+    },
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "4af6a7a6b23694fe",
+      "post_image_hash": "36756ddb2c4239a4",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    },
+    "tests/support/mod.rs": {
+      "shadow_file": "tests_support_mod.rs.am",
+      "pre_image_hash": "659e8f5d426744c3",
+      "post_image_hash": "755f6eb226668ca6",
+      "pre_shadow_file": "tests_support_mod.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

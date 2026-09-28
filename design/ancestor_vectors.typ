@@ -152,8 +152,9 @@ same member calculation.
 The portable `ViewPoint` is unchanged: it owns delivered commit hashes and
 write permissions. It contains no chain labels, node indices, or ancestry
 clocks. Those are local implementation details, and are never transported or
-compared across replicas. A received viewpoint is resolved against admitted
-history; optimistic local diffing may also include pending local commits.
+compared across replicas. Diffing requires both viewpoints' history heads to be
+delivered and may include pending local commits. Admission is a separate concern:
+callers requiring admitted history can check each head with `has_commit`.
 
 Preparing a viewpoint produces a `PreparedView` with:
 

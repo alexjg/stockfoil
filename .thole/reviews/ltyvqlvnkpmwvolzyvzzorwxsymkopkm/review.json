@@ -1,0 +1,27 @@
+{
+  "change_id": "ltyvqlvnkpmwvolzyvzzorwxsymkopkm",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "tests/auth.rs": {
+      "shadow_file": "tests_auth.rs.am",
+      "pre_image_hash": "a7212a863cea5663",
+      "post_image_hash": "a540ec87d41bff39",
+      "pre_shadow_file": "tests_auth.rs_pre.am"
+    },
+    "design/authors_signatures_api.md": {
+      "shadow_file": "design_authors_signatures_api.md.am",
+      "pre_image_hash": "fa3e9a4cec4cbf0e",
+      "post_image_hash": "1c16560d835926b2",
+      "pre_shadow_file": "design_authors_signatures_api.md_pre.am"
+    },
+    "tests/sedimentree.rs": {
+      "shadow_file": "tests_sedimentree.rs.am",
+      "pre_image_hash": "47adfa16a8da6ced",
+      "post_image_hash": "4af6a7a6b23694fe",
+      "pre_shadow_file": "tests_sedimentree.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

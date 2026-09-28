@@ -1,0 +1,33 @@
+{
+  "change_id": "rqumzkkvpswylwuttxuuqnsvqxztvwqn",
+  "algorithm": "patience",
+  "next_id": 0,
+  "files": {
+    "Cargo.toml": {
+      "shadow_file": "Cargo.toml.am",
+      "pre_image_hash": "354411c3411ebee2",
+      "post_image_hash": "787d3f26183caafc",
+      "pre_shadow_file": "Cargo.toml_pre.am"
+    },
+    "Cargo.lock": {
+      "shadow_file": "Cargo.lock.am",
+      "pre_image_hash": "2c75a0a8efd2c3a6",
+      "post_image_hash": "c682dc88d7ba3c26",
+      "pre_shadow_file": "Cargo.lock_pre.am"
+    },
+    "tests/orset/mod.rs": {
+      "shadow_file": "tests_orset_mod.rs.am",
+      "pre_image_hash": "2cbf78c51f139bba",
+      "post_image_hash": "ddad3b2385d9ba96",
+      "pre_shadow_file": "tests_orset_mod.rs_pre.am"
+    },
+    "tests/orset/serialization.rs": {
+      "shadow_file": "tests_orset_serialization.rs.am",
+      "pre_image_hash": "af64724c8602eb6e",
+      "post_image_hash": "fe8ba0890a991d24",
+      "pre_shadow_file": "tests_orset_serialization.rs_pre.am"
+    }
+  },
+  "annotations": [],
+  "comment": ""
+}

@@ -168,7 +168,6 @@ fn assert_views(
     oracle: &Oracle,
     views: &[ViewPoint],
     unknown: CommitHash,
-    drafts: bool,
 ) {
     let expected: Vec<_> = views.iter().map(|v| oracle.visible(v)).collect();
     for (i, view) in views.iter().enumerate() {
@@ -216,7 +215,7 @@ fn assert_views(
             vec![*oracle.nodes.keys().next().unwrap(), unknown],
         ] {
             let invalid = ViewPoint::from_parts(heads, permissions.clone());
-            // Diff and resolve must reject missing heads even under total denial.
+            // Diff must reject missing heads on either side even under total denial.
             assert_eq!(
                 graph.diff(&views[0], &invalid).unwrap_err(),
                 DiffError::MissingCommit(unknown)
@@ -290,7 +289,7 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
         let old = left.view_point();
         let prefix = Oracle::new(nodes[..40].iter().cloned());
         assert_ancestry(&left, &prefix, &hashes);
-        assert_views(&left, &prefix, std::slice::from_ref(&old), unknown, false);
+        assert_views(&left, &prefix, std::slice::from_ref(&old), unknown);
         let mut right = left.clone();
         for i in 40..70 {
             receive(&mut left, &nodes[i], i);
@@ -318,7 +317,7 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
         let snapshots = views(&nodes, unknown, vec![old, left_view, right_view]);
         for graph in [&left, &right] {
             assert_ancestry(graph, &oracle, &hashes);
-            assert_views(graph, &oracle, &snapshots, unknown, false);
+            assert_views(graph, &oracle, &snapshots, unknown);
         }
 
         // Choose the highest numbered ready node, rather than insertion order.
@@ -340,10 +339,10 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
         }
         assert_ne!(order, (0..nodes.len()).collect::<Vec<_>>());
         assert_ancestry(&reordered, &oracle, &hashes);
-        assert_views(&reordered, &oracle, &snapshots, unknown, false);
+        assert_views(&reordered, &oracle, &snapshots, unknown);
 
-        // Working membership includes drafts, but resolve still requires
-        // admission. Every local insertion below has all parents present.
+        // Diff includes delivered drafts without requiring admission.
+        // Every local insertion below has all parents present.
         let mut drafts = CommitGraph::new();
         drafts.set_write_permissions(&allowed());
         let mut draft_snapshots = Vec::new();
@@ -357,7 +356,7 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
         draft_snapshots.push(drafts.view_point());
         let draft_views = views(&nodes, unknown, draft_snapshots);
         assert_ancestry(&drafts, &oracle, &hashes);
-        assert_views(&drafts, &oracle, &draft_views, unknown, true);
+        assert_views(&drafts, &oracle, &draft_views, unknown);
 
         // Explicit witnesses keep the permission oracle honest: denial of the
         // middle node 4 does not cut the path 0 -> 3 -> 4 -> 6.
@@ -368,6 +367,11 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
                 WritePermission::Bounded(vec![*nodes[6].hash()]),
             )]),
         );
+        let membership = left.diff(&witness, &witness).unwrap();
+        for i in [0, 3, 6] {
+            assert_eq!(membership.visibility(nodes[i].hash()), Ok(Vis::Both));
+        }
+        assert_eq!(membership.visibility(nodes[4].hash()), Ok(Vis::Neither));
         assert_eq!(
             oracle.visible(&witness),
             HashSet::from([*nodes[0].hash(), *nodes[3].hash(), *nodes[6].hash(),])

@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
-    Author, CommitGraph, CommitHash, NodeIdx, QueryError, WritePermission,
+    Author, CommitGraph, CommitHash, QueryError, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime},
-    commit_graph::{Node, NodeStore},
+    commit_graph::Node,
 };
 
 /// An owned snapshot of history heads and write permissions.
@@ -21,8 +21,10 @@ pub struct ViewPoint {
 
 impl ViewPoint {
     /// Reconstruct a description, for example after transport or storage.
-    /// This does not validate its claims; resolve received viewpoints against
-    /// admitted history before using them to drive a materialized view.
+    /// This does not validate its claims. [`CommitGraph::diff`] requires every
+    /// history head to be delivered, but does not check admission or signatures.
+    /// Callers requiring admitted history can check each head with
+    /// [`CommitGraph::has_commit`].
     pub fn from_parts(
         heads: Vec<CommitHash>,
         write_permissions: HashMap<Author, WritePermission>,
