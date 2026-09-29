@@ -75,6 +75,7 @@ export type TransportItem =
       readonly boundary: readonly CommitHash[];
       readonly commits: readonly Commit[];
       readonly signatures: readonly SignatureEvidence[];
+      readonly checkpoints: readonly Uint8Array[];
     };
 ```
 
@@ -260,9 +261,17 @@ item identity do not require republication.
 to delete. A simple publisher can ignore it. Applications maintaining an exact
 inventory should publish additions before retiring superseded entries.
 
-Transport items own their metadata, signatures, and payload bytes, so a returned
-batch remains usable after later graph changes or certificate pruning. Item order
-is unspecified; receivers use the pending ingestion queue.
+Exported fragments also carry sorted, deduplicated 12-byte checkpoint prefixes as
+owned `Uint8Array`s. These come from Stockfoil's certified cover, excluding the
+head, boundaries, and boundary ancestry. They are reconciliation metadata, not
+additional authentication evidence. `ingest` validates their 12-byte shape but
+ignores their claimed contents, deriving canonical metadata locally. A decoder
+whose wire format omits hints can supply an empty list; omitted JS fields also
+default to empty.
+
+Exported items own their metadata, signatures, checkpoint bytes, and payload
+bytes, so a returned batch remains usable after later graph changes or certificate
+pruning. Item order is unspecified; receivers use the pending ingestion queue.
 
 ## Errors
 

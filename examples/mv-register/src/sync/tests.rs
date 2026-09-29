@@ -49,6 +49,12 @@ fn fragment_payloads_verify_relay_and_replay() {
         .export(&ItemId::Fragment(range.clone()))
         .unwrap();
     let bytes = wire::encode(&source, &item).unwrap();
+    let mut metadata_only_change = item.clone();
+    let UnverifiedItem::Fragment { checkpoints, .. } = &mut metadata_only_change else {
+        unreachable!()
+    };
+    checkpoints.insert(stockfoil::Checkpoint([255; 12]));
+    assert_eq!(wire::encode(&source, &metadata_only_change).unwrap(), bytes);
     let mut peer = MvRegisterMap::new();
     peer.set_write_permissions(source.view_point().write_permissions());
     assert_eq!(

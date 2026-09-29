@@ -13,9 +13,9 @@ use std::{
 
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use stockfoil::{
-    Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
-    Fragment, FragmentRange, FragmentReadError, IngestError, ItemId, LooseCommit,
-    SedimentreeSummary, SignatureEvidence, UnverifiedItem,
+    Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportCursor,
+    ExportError, Fragment, FragmentRange, FragmentReadError, IngestError, ItemId,
+    LooseCommit, SedimentreeSummary, SignatureEvidence, UnverifiedItem,
 };
 use support::{author, key, sign};
 
@@ -189,6 +189,7 @@ fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
     let signatures = members.iter().map(evidence).collect();
     UnverifiedItem::Fragment {
         range,
+        checkpoints: BTreeSet::new(),
         commits: members,
         signatures,
     }
@@ -527,8 +528,14 @@ fn assert_structural_cover(graph: &CommitGraph<CommitHash>, expected: Sedimentre
 // The cover must be parent-closed, verifiable, and mergeable into an empty peer.
 fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: &Case) {
     let published = model.published(&case.commits);
-    let (_, memberships) = oracle(&case.commits, &published);
+    let (canonical, memberships) = oracle(&case.commits, &published);
     let inventory = graph.minimal_cover();
+    let (changes, _) = graph.export_changes(&ExportCursor::default());
+    assert!(changes.retired.is_empty());
+    let mut additions: HashMap<_, _> = changes.added.into_iter()
+        .map(|item| (item.id(), item))
+        .collect();
+    assert_eq!(additions.len(), inventory.loose_commits.len() + inventory.fragments.len());
     let mut covered = BTreeSet::new();
     let mut dependencies = BTreeSet::new();
     let mut items = Vec::new();
@@ -540,7 +547,24 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
             }
             ItemId::Fragment(range) => memberships[&range.head].clone(),
         };
-        let verified = graph.export(&id).unwrap().verify().unwrap();
+        let exported = graph.export(&id).unwrap();
+        let added = additions.remove(&id).expect("same direct and incremental inventory");
+        assert_eq!(exported.id(), added.id());
+        if let ItemId::Fragment(range) = &id {
+            let summary = inventory.fragments.iter().find(|f| &f.range == range).unwrap();
+            let oracle = canonical.fragments.iter().find(|f| &f.range == range).unwrap();
+            for item in [&exported, &added] {
+                let UnverifiedItem::Fragment { checkpoints, .. } = item else {
+                    panic!("fragment identity must have fragment contents")
+                };
+                assert_eq!(checkpoints, &summary.checkpoints);
+                assert_eq!(checkpoints, &oracle.checkpoints);
+                // BTreeSet iteration is strictly sorted and deduplicated.
+                assert!(checkpoints.iter().zip(checkpoints.iter().skip(1)).all(|(a, b)| a < b));
+            }
+        }
+        // Verification ignores reconciliation hints and authenticates full members.
+        let verified = exported.verify().unwrap();
         assert_eq!(verified.id(), &id);
         let actual: Vec<_> = verified.commits().map(hash).collect();
         assert_eq!(actual, export_order(&case.commits, &expected));
@@ -548,6 +572,7 @@ fn check_direct_inventory(graph: &CommitGraph<CommitHash>, model: &Model, case: 
         covered.extend(actual);
         items.push(verified);
     }
+    assert!(additions.is_empty());
     assert_eq!(
         covered, published,
         "the cover must relay every admitted node"
@@ -813,12 +838,14 @@ fn long_same_depth_checkpoint_chain_preserves_every_boundary_fragment() {
         let UnverifiedItem::Fragment {
             range: exported_range,
             commits,
+            checkpoints,
             ..
         } = exported
         else {
             panic!("checkpoint must export as a fragment")
         };
         assert_eq!(&exported_range, range);
+        assert!(checkpoints.is_empty());
         assert_eq!(commits.iter().map(hash).collect::<Vec<_>>(), [range.head]);
     }
     // Verify the actual inventory and let an empty peer buffer unordered items,
@@ -885,11 +912,19 @@ fn deeper_head_containment_does_not_hide_uncovered_payloads_or_boundaries() {
         model.ingest(meta, false);
         check(&graph, &model, &case, "partial deeper coverage");
     }
-    let item = graph
-        .export(&ItemId::Fragment(fragment.range.clone()))
-        .unwrap()
-        .verify()
-        .unwrap();
+    let mut exported = graph.export(&ItemId::Fragment(fragment.range.clone())).unwrap();
+    let UnverifiedItem::Fragment { checkpoints, .. } = &mut exported else {
+        panic!("expected fragment")
+    };
+    // Checkpoint 1 is reachable through the bypass from 3 but belongs to
+    // boundary 2's history. Root 0, boundary 2, and head 5 are excluded too.
+    assert_eq!(checkpoints, &fragment.checkpoints);
+    for i in [0, 1, 2, 5] {
+        assert!(!checkpoints.contains(&Checkpoint(h(i).as_bytes()[..12].try_into().unwrap())));
+    }
+    // Reconciliation hints have no role in authentication.
+    *checkpoints = BTreeSet::from([Checkpoint([255; 12])]);
+    let item = exported.verify().unwrap();
     assert_eq!(
         item.dependencies().copied().collect::<BTreeSet<_>>(),
         [h(0), h(1), h(2)].into()
@@ -1068,6 +1103,7 @@ fn deferred_invalid_fragment_does_not_roll_back_its_dependency_or_block_valid_wa
     // statelessly verifiable but graph-dependent canonical placement is invalid.
     let members: Vec<_> = [0, 17, 18].map(|i| case.commits[i].clone()).into();
     let invalid = UnverifiedItem::Fragment {
+        checkpoints: BTreeSet::new(),
         range: case_range(case, 18),
         signatures: members.iter().map(evidence).collect(),
         commits: members,
@@ -1156,6 +1192,7 @@ fn redundant_ancestor_boundary_is_retained_even_when_normalization_excludes_its_
                 range,
                 commits,
                 signatures,
+                ..
             } = &item
             else {
                 panic!("nonzero fixture must be a fragment")

@@ -450,63 +450,68 @@ impl<P: Clone> CommitGraph<P> {
     /// Read a cover item or its signed head announcement at any depth. Fragment
     /// certificates follow stored signature-boundary references, never a search
     /// for author coverage. A head announcement is not a fragment certificate.
+    /// Returned contents are owned; checkpoint hints come from the local cover,
+    /// never from received metadata.
     pub fn export(&self, id: &ItemId) -> Result<UnverifiedItem, ExportError> {
         let cover = self.minimal_cover();
-        let exportable = match id {
-            ItemId::Commit(hash) => {
-                cover.loose_commits.iter().any(|c| &c.commit == hash)
-                    || cover.fragments.iter().any(|f| &f.range.head == hash)
+        match id {
+            ItemId::Commit(hash)
+                if cover.loose_commits.iter().any(|c| &c.commit == hash)
+                    || cover.fragments.iter().any(|f| &f.range.head == hash) =>
+            {
+                Ok(self.export_certified_commit(hash))
             }
-            ItemId::Fragment(range) => cover.fragments.iter().any(|f| &f.range == range),
-        };
-        if !exportable {
-            return Err(ExportError::NotInMinimalCover(id.clone()));
+            ItemId::Fragment(range) => cover
+                .fragments
+                .into_iter()
+                .find(|f| &f.range == range)
+                .map(|fragment| self.export_certified_fragment(fragment))
+                .ok_or_else(|| ExportError::NotInMinimalCover(id.clone())),
+            _ => Err(ExportError::NotInMinimalCover(id.clone())),
         }
-        Ok(self.export_certified(id))
     }
 
     // The caller has checked that this is a current cover entry or its signed
     // head announcement. Do not recompute the cover for each exported item.
-    fn export_certified(&self, id: &ItemId) -> UnverifiedItem {
-        match id {
-            ItemId::Commit(hash) => {
-                let node = &self.nodes[self.by_hash[hash]];
-                UnverifiedItem::Commit {
-                    meta: node.meta.clone(),
-                    signatures: node
-                        .signature_evidence()
-                        .filter(|evidence| &evidence.author == node.meta.author())
-                        .collect(),
-                }
-            }
-            ItemId::Fragment(range) => {
-                let head = self.by_hash[&range.head];
-                let fragment = self.nodes[head].canonical_fragment().unwrap();
-                let mut commits = Vec::new();
-                self.traverse_fragment(range, |meta, _| {
-                    commits.push(meta.clone());
-                    ControlFlow::Continue(())
+    fn export_certified_commit(&self, hash: &CommitHash) -> UnverifiedItem {
+        let node = &self.nodes[self.by_hash[hash]];
+        UnverifiedItem::Commit {
+            meta: node.meta.clone(),
+            signatures: node
+                .signature_evidence()
+                .filter(|evidence| &evidence.author == node.meta.author())
+                .collect(),
+        }
+    }
+
+    // Reuse the cover's normalized checkpoints, not a second member/depth scan.
+    fn export_certified_fragment(&self, summary: crate::Fragment) -> UnverifiedItem {
+        let head = self.by_hash[&summary.range.head];
+        let fragment = self.nodes[head].canonical_fragment().unwrap();
+        let mut commits = Vec::new();
+        self.traverse_fragment(&summary.range, |meta, _| {
+            commits.push(meta.clone());
+            ControlFlow::Continue(())
+        })
+        .expect("cover fragment is indexed");
+        UnverifiedItem::Fragment {
+            range: summary.range,
+            commits,
+            signatures: self.fragments[fragment]
+                .signature_boundary
+                .iter()
+                .flat_map(|(&author, targets)| {
+                    targets.iter().map(move |&idx| {
+                        let node = &self.nodes[idx];
+                        SignatureEvidence {
+                            author,
+                            commit: *node.meta.hash(),
+                            signature: node.signatures[&author],
+                        }
+                    })
                 })
-                .expect("cover fragment is indexed");
-                UnverifiedItem::Fragment {
-                    range: range.clone(),
-                    commits,
-                    signatures: self.fragments[fragment]
-                        .signature_boundary
-                        .iter()
-                        .flat_map(|(&author, targets)| {
-                            targets.iter().map(move |&idx| {
-                                let node = &self.nodes[idx];
-                                SignatureEvidence {
-                                    author,
-                                    commit: *node.meta.hash(),
-                                    signature: node.signatures[&author],
-                                }
-                            })
-                        })
-                        .collect(),
-                }
-            }
+                .collect(),
+            checkpoints: summary.checkpoints,
         }
     }
 
@@ -519,13 +524,24 @@ impl<P: Clone> CommitGraph<P> {
         let cover = self.minimal_cover();
         let inventory: BTreeSet<_> = cover
             .loose_commits
-            .into_iter()
+            .iter()
             .map(|commit| ItemId::Commit(commit.commit))
-            .chain(cover.fragments.into_iter().map(|fragment| ItemId::Fragment(fragment.range)))
+            .chain(
+                cover.fragments.iter().map(|fragment| ItemId::Fragment(fragment.range.clone())),
+            )
             .collect();
-        let added = inventory
-            .difference(&since.inventory)
-            .map(|id| self.export_certified(id))
+        let added = cover
+            .loose_commits
+            .into_iter()
+            .filter(|commit| !since.inventory.contains(&ItemId::Commit(commit.commit)))
+            .map(|commit| self.export_certified_commit(&commit.commit))
+            .chain(
+                cover.fragments.into_iter()
+                    .filter(|fragment| {
+                        !since.inventory.contains(&ItemId::Fragment(fragment.range.clone()))
+                    })
+                    .map(|fragment| self.export_certified_fragment(fragment)),
+            )
             .collect();
         let retired = since.inventory.difference(&inventory).cloned().collect();
         (
@@ -974,6 +990,7 @@ impl<P: Clone> CommitGraph<P> {
                 range,
                 commits,
                 signatures,
+                checkpoints: BTreeSet::new(),
             }
         };
         let item = item.verify().ok()?;
@@ -1549,6 +1566,7 @@ mod tests {
         // The second received fragment carries its own certificate, including
         // evidence shared with the first. No historical signature insertion.
         let incoming = UnverifiedItem::Fragment {
+            checkpoints: BTreeSet::new(),
             range: FragmentRange {
                 head: *right.hash(),
                 boundary: BTreeSet::new(),

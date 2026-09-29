@@ -90,6 +90,8 @@ pub(crate) fn encode(doc: &MvRegisterMap, item: &UnverifiedItem) -> Result<Vec<u
             range,
             commits,
             signatures,
+            // Reconciliation hints are not part of this example's wire format.
+            ..
         } => Item::Fragment {
             head: *range.head.as_bytes(),
             boundary: range.boundary.iter().map(|hash| *hash.as_bytes()).collect(),
@@ -161,6 +163,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded> {
             let boundary: BTreeSet<_> = boundary.into_iter().map(CommitHash::from).collect();
             ensure!(boundary.len() == count, "duplicate boundary");
             UnverifiedItem::Fragment {
+                // This example's BCS envelope omits optional reconciliation hints.
+                checkpoints: BTreeSet::new(),
                 range: FragmentRange {
                     head: CommitHash::from(head),
                     boundary,

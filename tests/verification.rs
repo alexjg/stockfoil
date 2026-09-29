@@ -281,6 +281,7 @@ fn boundaries_are_exclusive_assumptions_without_external_parent_metadata() {
     assert_eq!(
         UnverifiedItem::Fragment {
             range: range.clone(),
+            checkpoints: BTreeSet::new(),
             commits: vec![head.clone()],
             signatures: vec![evidence(1, *head.hash()), evidence(2, *boundary.hash())],
         }
@@ -353,6 +354,7 @@ fn external_parents_are_derived_exactly_after_collecting_all_members() {
     // Admission, not stateless verification, detects that it is excluded history.
     let verified = UnverifiedItem::Fragment {
         range,
+        checkpoints: BTreeSet::new(),
         commits: vec![head.clone(), middle, external],
         signatures: vec![evidence(1, *head.hash()), evidence(2, *head.hash())],
     }
@@ -394,6 +396,7 @@ fn boundaries_discovered_only_through_excluded_history_are_allowed_statelessly()
     let boundary = at_depth(2, vec![*excluded.hash()], 1);
     let head = at_depth(1, vec![*boundary.hash(), *excluded.hash()], 1);
     let verified = UnverifiedItem::Fragment {
+        checkpoints: BTreeSet::new(),
         range: FragmentRange {
             head: *head.hash(),
             boundary: BTreeSet::from([*boundary.hash(), *older_boundary.hash()]),
@@ -444,6 +447,7 @@ fn coverage_crosses_other_authors_and_order_is_lexicographic_topological() {
     for _ in 0..2 {
         let verified = UnverifiedItem::Fragment {
             range: range.clone(),
+            checkpoints: BTreeSet::new(),
             commits: records.clone(),
             signatures: signatures.clone(),
         }
@@ -495,6 +499,7 @@ fn coverage_cannot_run_forward_or_sideways_between_members() {
     assert_eq!(
         UnverifiedItem::Fragment {
             range,
+            checkpoints: BTreeSet::new(),
             commits: vec![left.clone(), right.clone(), head.clone()],
             signatures: vec![evidence(1, *right.hash()), evidence(2, *head.hash())],
         }
@@ -508,6 +513,7 @@ fn coverage_cannot_run_forward_or_sideways_between_members() {
     let same_author_head = at_depth(1, vec![*left.hash()], 1);
     assert_eq!(
         UnverifiedItem::Fragment {
+            checkpoints: BTreeSet::new(),
             range: FragmentRange {
                 head: *same_author_head.hash(),
                 boundary: BTreeSet::new(),
@@ -531,6 +537,7 @@ fn fragment_rejects_signature_targets_outside_its_members() {
     let later = at_depth(1, vec![*head.hash()], 0);
     assert_eq!(
         UnverifiedItem::Fragment {
+            checkpoints: BTreeSet::new(),
             range: FragmentRange {
                 head: *head.hash(),
                 boundary: BTreeSet::new(),

@@ -143,6 +143,14 @@ pruning use this certified cover. Boundary history remains independently
 obtainable. Relays may ingest items in any arrival order; graph-owned queueing
 ensures admission and delivery occur only once dependencies are admitted.
 
+`export` and `export_changes` return owned `UnverifiedItem` records. Their fragment
+variants include `checkpoints: BTreeSet<Checkpoint>`, filled from the certified
+cover's sorted, deduplicated 12-byte prefixes. Verification ignores these hints;
+`VerifiedItem` still contains the full authenticated member metadata and IDs.
+Admission and re-export derive canonical checkpoints locally. Decoders whose
+formats omit hints can supply an empty set. Checkpoints do not change item
+identity or export-cursor behavior.
+
 ## Binary Format
 
 Subduction expects a binary format for commits and for fragments. The idea here

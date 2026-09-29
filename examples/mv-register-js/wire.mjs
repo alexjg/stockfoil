@@ -113,7 +113,8 @@ export function decode(input) {
   else if (tag === 1) {
     const head = hash(), boundary = r.vector(hash);
     if (new Set(boundary).size !== boundary.length) throw new Error('duplicate boundary');
-    item = { kind: 'fragment', head, boundary, commits: r.vector(commit) };
+    // This private format carries no checkpoint hints; Stockfoil derives them.
+    item = { kind: 'fragment', head, boundary, commits: r.vector(commit), checkpoints: [] };
   } else throw new Error('unknown example item variant');
   item.signatures = r.vector(evidence);
   r.finish();

@@ -143,6 +143,8 @@ pub(crate) enum TransportItem {
         boundary: Vec<String>,
         commits: Vec<Commit>,
         signatures: Vec<Evidence>,
+        #[serde(default)]
+        checkpoints: Vec<serde_bytes::ByteBuf>,
     },
 }
 
@@ -174,8 +176,18 @@ impl TransportItem {
                 boundary,
                 commits,
                 signatures,
+                checkpoints,
             } => {
                 let head = hash(&head)?;
+                let checkpoints = checkpoints
+                    .into_iter()
+                    .map(|bytes| {
+                        let prefix = bytes.into_vec().try_into().map_err(|_| {
+                            Error::input("checkpoint must contain exactly 12 bytes")
+                        })?;
+                        Ok(stockfoil::Checkpoint(prefix))
+                    })
+                    .collect::<Result<_, Error>>()?;
                 let mut bounds = BTreeSet::new();
                 for bound in hashes(boundary)? {
                     if !bounds.insert(bound) {
@@ -197,6 +209,7 @@ impl TransportItem {
                             boundary: bounds,
                         },
                         commits: members,
+                        checkpoints,
                         signatures: signatures
                             .into_iter()
                             .map(Evidence::into_core)
@@ -233,6 +246,7 @@ impl TransportItem {
                 range,
                 commits,
                 signatures,
+                checkpoints,
             } => Self::Fragment {
                 head: hex(range.head.as_slice()),
                 boundary: range.boundary.iter().map(|h| hex(h.as_slice())).collect(),
@@ -241,6 +255,10 @@ impl TransportItem {
                     .map(commit)
                     .collect::<Result<_, Error>>()?,
                 signatures: signatures.into_iter().map(Into::into).collect(),
+                checkpoints: checkpoints
+                    .into_iter()
+                    .map(|checkpoint| serde_bytes::ByteBuf::from(checkpoint.0.to_vec()))
+                    .collect(),
             },
         })
     }
@@ -423,6 +441,7 @@ mod tests {
         let original = meta(Vec::new());
         let h = hex(original.hash().as_slice());
         let duplicate_members = TransportItem::Fragment {
+            checkpoints: Vec::new(),
             head: h.clone(),
             boundary: vec![],
             signatures: vec![],
@@ -436,6 +455,7 @@ mod tests {
             "duplicate fragment member"
         );
         let duplicate_boundaries = TransportItem::Fragment {
+            checkpoints: Vec::new(),
             head: h.clone(),
             boundary: vec![h.clone(), h],
             commits: vec![],

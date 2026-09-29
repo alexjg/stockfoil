@@ -47,6 +47,8 @@ export type TransportItem =
       readonly boundary: readonly CommitHash[];
       readonly commits: readonly Commit[];
       readonly signatures: readonly SignatureEvidence[];
+      /** 12-byte reconciliation hints, not evidence. Exports are sorted, unique copies. */
+      readonly checkpoints: readonly Uint8Array[];
     };
 
 export interface MaterializationChange {

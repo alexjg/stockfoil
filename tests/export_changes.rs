@@ -4,7 +4,7 @@ mod support;
 use std::collections::{BTreeSet, HashMap};
 
 use stockfoil::{
-    CommitGraph, ExportChanges, ExportCursor, FragmentRange, ItemId, UnverifiedItem,
+    Checkpoint, CommitGraph, ExportChanges, ExportCursor, FragmentRange, ItemId, UnverifiedItem,
     WritePermission,
 };
 use support::{at_depth, author, key, proof, sign, signed_commit, signed_fragment};
@@ -12,6 +12,13 @@ use support::{at_depth, author, key, proof, sign, signed_commit, signed_fragment
 fn receive(graph: &mut CommitGraph<()>, item: UnverifiedItem) {
     let report = graph.ingest(item.verify().unwrap(), |_| ()).unwrap();
     assert!(report.rejected.is_empty());
+}
+
+fn checkpoints(item: &UnverifiedItem) -> &BTreeSet<Checkpoint> {
+    let UnverifiedItem::Fragment { checkpoints, .. } = item else {
+        panic!("expected fragment")
+    };
+    checkpoints
 }
 
 fn assert_changes(changes: &ExportChanges, added: &[ItemId], retired: &[ItemId]) {
@@ -128,6 +135,7 @@ fn permissions_and_different_sufficient_proofs_do_not_republish_the_same_item() 
         &mut graph,
         UnverifiedItem::Fragment {
             range: range.clone(),
+            checkpoints: BTreeSet::new(),
             commits: vec![root.clone(), head.clone()],
             signatures: vec![proof(1, *root.hash()), proof(2, *head.hash())],
         },
@@ -141,6 +149,7 @@ fn permissions_and_different_sufficient_proofs_do_not_republish_the_same_item() 
         &mut graph,
         UnverifiedItem::Fragment {
             range,
+            checkpoints: BTreeSet::new(),
             commits: vec![root, head.clone()],
             signatures: vec![proof(1, *head.hash()), proof(2, *head.hash())],
         },
@@ -178,13 +187,39 @@ fn a_deeper_fragment_retires_a_previously_published_fragment() {
     receive(&mut graph, signed_fragment(&old, vec![root.clone()], 1));
     let (initial, cursor) = graph.export_changes(&ExportCursor::default());
     assert_changes(&initial, &[ItemId::Fragment(old.clone())], &[]);
+    let captured = graph.export(&ItemId::Fragment(old.clone())).unwrap();
+    assert!(checkpoints(&captured).is_empty());
+    assert_eq!(checkpoints(&initial.added[0]), checkpoints(&captured));
+    let expected = BTreeSet::from([Checkpoint(root.hash().as_bytes()[..12].try_into().unwrap())]);
 
     receive(&mut graph, signed_fragment(&new, vec![root, head], 1));
     assert!(graph.export(&ItemId::Fragment(old.clone())).is_err());
     let (changes, next) = graph.export_changes(&cursor);
-    assert_changes(&changes, &[ItemId::Fragment(new)], &[ItemId::Fragment(old)]);
+    assert_changes(&changes, &[ItemId::Fragment(new.clone())], &[ItemId::Fragment(old)]);
+    let direct = graph.export(&ItemId::Fragment(new)).unwrap();
+    assert_eq!(checkpoints(&changes.added[0]), &expected);
+    assert_eq!(checkpoints(&direct), &expected);
+    assert_eq!(graph.minimal_cover().fragments[0].checkpoints, expected);
     let (noop, _) = graph.export_changes(&next);
     assert_changes(&noop, &[], &[]);
+
+    // Permissions affect materialization, not checkpoint metadata or identity.
+    graph.set_write_permissions(&HashMap::from([(author(&key(1)), WritePermission::Unbounded)]));
+    let (noop, _) = graph.export_changes(&next);
+    assert_changes(&noop, &[], &[]);
+    graph.set_write_permissions(&HashMap::new());
+    let (noop, _) = graph.export_changes(&next);
+    assert_changes(&noop, &[], &[]);
+    assert_eq!(checkpoints(&graph.export(&direct.id()).unwrap()), &expected);
+    assert_eq!(checkpoints(&changes.added[0]), &expected);
+
+    // Direct and incremental captures own their metadata and certificates,
+    // even after the source prunes and retires their range.
+    assert!(checkpoints(&captured).is_empty());
+    assert!(checkpoints(&initial.added[0]).is_empty());
+    let mut direct_receiver = CommitGraph::new();
+    receive(&mut direct_receiver, captured);
+    assert_eq!(direct_receiver.minimal_cover().fragments.len(), 1);
 
     // The retired fragment's previously returned certificate remains usable.
     let mut receiver = CommitGraph::new();
@@ -192,6 +227,48 @@ fn a_deeper_fragment_retires_a_previously_published_fragment() {
         receive(&mut receiver, item);
     }
     assert_eq!(receiver.minimal_cover(), graph.minimal_cover());
+}
+
+#[test]
+fn checkpoint_hints_do_not_override_authenticated_members_or_canonical_reexports() {
+    let root = at_depth(1, [], 1);
+    let head = at_depth(1, [*root.hash()], 2);
+    let range = FragmentRange {
+        head: *head.hash(),
+        boundary: BTreeSet::new(),
+    };
+    let id = ItemId::Fragment(range.clone());
+    let mut source = CommitGraph::new();
+    receive(&mut source, signed_fragment(&range, vec![root, head], 1));
+    let exported = source.export(&id).unwrap();
+    let expected = exported.clone().verify().unwrap();
+    assert!(!checkpoints(&exported).is_empty());
+
+    for hints in [BTreeSet::new(), BTreeSet::from([Checkpoint([255; 12])])] {
+        let mut incoming = exported.clone();
+        let UnverifiedItem::Fragment { checkpoints: received_hints, .. } = &mut incoming else {
+            panic!("expected fragment")
+        };
+        *received_hints = hints;
+        let verified = incoming.verify().unwrap();
+        assert_eq!(verified.id(), expected.id());
+        assert_eq!(
+            verified.commits().map(|meta| *meta.hash()).collect::<Vec<_>>(),
+            expected.commits().map(|meta| *meta.hash()).collect::<Vec<_>>()
+        );
+        assert_eq!(verified.signature_boundary(), expected.signature_boundary());
+        let mut receiver = CommitGraph::new();
+        let report = receiver.ingest(verified, |_| ()).unwrap();
+        assert!(report.rejected.is_empty());
+        assert_eq!(receiver.minimal_cover(), source.minimal_cover());
+        assert_eq!(
+            checkpoints(&receiver.export(&id).unwrap()),
+            checkpoints(&exported)
+        );
+        let (changes, _) = receiver.export_changes(&ExportCursor::default());
+        assert_changes(&changes, std::slice::from_ref(&id), &[]);
+        assert_eq!(checkpoints(&changes.added[0]), checkpoints(&exported));
+    }
 }
 
 #[test]

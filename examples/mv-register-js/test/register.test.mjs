@@ -63,7 +63,7 @@ test('wire roundtrips, truncation, version, trailing bytes, signature/payload fo
   const source = make(t); source.set('title', 'hello');
   const item = source.graph.exportChanges(new ExportCursor()).added[0];
   const encoded = encode(item);
-  assert.deepEqual(decode(encoded), item);
+  assert.deepEqual(decode(encoded), item.kind === 'fragment' ? { ...item, checkpoints: [] } : item);
   for (let n = 0; n < encoded.length; n++) assert.throws(() => decode(encoded.slice(0, n)));
   assert.throws(() => decode(Uint8Array.from([...encoded, 0])));
   const version = encoded.slice(); version[0] = 2;

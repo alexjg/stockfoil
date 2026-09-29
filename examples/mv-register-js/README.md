@@ -58,6 +58,11 @@ The npm transport is pinned to `@automerge/subduction` **0.21.2**, matching Rust
 `sedimentree_core` **0.14.2**, `subduction_core` **0.18.2**,
 `subduction_crypto` **0.9.2**, and `subduction_websocket` **0.12.2**.
 Its API and this private example envelope are not stable cross-version formats.
+Stockfoil now exports 12-byte checkpoint prefixes, but this pinned Subduction
+release still requires full checkpoint IDs in `addFragment`. The adapter retains
+its member scan until it can use
+[Subduction #310](https://github.com/inkandswitch/subduction/pull/310)'s prefix
+constructor and batch insertion API. The private BCS envelope remains unchanged.
 
 This demo trusts peers to advertise correct Subduction transport metadata (as the
 native example does); Stockfoil still independently authenticates the original

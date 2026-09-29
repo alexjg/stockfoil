@@ -105,6 +105,7 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
     let verify = |signatures| {
         UnverifiedItem::Fragment {
             range: range.clone(),
+            checkpoints: BTreeSet::new(),
             commits: members.clone(),
             signatures,
         }
@@ -214,6 +215,7 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         .ingest(
             UnverifiedItem::Fragment {
                 range: range.clone(),
+                checkpoints: BTreeSet::new(),
                 commits: vec![head.clone(), middle.clone(), boundary.clone(), root.clone()],
                 signatures: vec![
                     sig(3, *head.hash()),

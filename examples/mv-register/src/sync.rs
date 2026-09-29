@@ -43,6 +43,7 @@ impl Replica {
                         .await?;
                 }
                 UnverifiedItem::Fragment { range, commits, .. } => {
+                    // The pinned Subduction API still takes full checkpoint IDs.
                     let checkpoints = checkpoint_ids(range.head, commits.iter());
                     ensure!(range.boundary.len() <= 255, "too many fragment boundaries");
                     ensure!(checkpoints.len() <= 65535, "too many fragment checkpoints");

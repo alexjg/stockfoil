@@ -115,6 +115,14 @@ the entire batch is stored; retries can duplicate items. Retired inventory IDs
 are not revocations or instructions to delete commits. The default publisher can
 ignore them. A public binary `load`/`save` format is not implemented.
 
+Additions use the same `TransportItem` type as ingestion. Fragments include
+`checkpoints`, a sorted, deduplicated array of owned 12-byte `Uint8Array` prefixes.
+Stockfoil derives exports from interior nonzero-depth commits, excluding the head
+and boundary history. Standalone commits have no checkpoint field. Ingestion
+validates hint byte lengths but does not trust their contents; canonical metadata
+is derived locally. Decoders can supply an empty list when their format carries
+no hints (omitted JS fields also default to empty).
+
 Call `graph.dispose()` to promptly release its Wasm memory. Disposal is idempotent;
 subsequent graph operations throw `Disposed`. Owned batches, viewpoints, and
 cursors remain usable independently of the disposed graph.

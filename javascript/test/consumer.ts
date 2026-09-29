@@ -21,6 +21,17 @@ graph.addSignature({ author, commit: hash, signature: new Uint8Array(64) });
 graph.changes(new SlimCursor(), graph.signedViewPoint());
 new SlimGraph().changes(new MaterializationCursor(), graph.viewPoint());
 const published = graph.exportChanges(new ExportCursor());
+const exports: readonly TransportItem[] = published.added;
+for (const item of exports) {
+  graph.ingest(item); // Checkpoint hints do not establish authenticity.
+  if (item.kind === "fragment") {
+    const prefixes: readonly Uint8Array[] = item.checkpoints;
+    prefixes.forEach(prefix => prefix.byteLength);
+  } else {
+    // @ts-expect-error standalone commits have no checkpoint metadata
+    item.checkpoints;
+  }
+}
 graph.exportChanges(published.cursor.clone());
 graph.isAncestor(hash, draft.hash);
 graph.hasCommit(hash);

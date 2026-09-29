@@ -7,7 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    Author, CommitHash, CommitMeta, FragmentRange, Signature, SignatureError, VerificationError,
+    Author, Checkpoint, CommitHash, CommitMeta, FragmentRange, Signature, SignatureError,
+    VerificationError,
 };
 
 /// Transport evidence: a signature with an explicit signer and target.
@@ -69,6 +70,12 @@ pub enum UnverifiedItem {
         /// all boundary ancestry. Admission checks this canonical placement.
         commits: Vec<CommitMeta>,
         signatures: Vec<SignatureEvidence>,
+        /// Non-authoritative reconciliation hints, ignored by verification.
+        /// Admission and re-export derive canonical metadata locally: sorted,
+        /// deduplicated 12-byte prefixes of nonzero-depth interior commits,
+        /// excluding the head, boundaries, and all boundary ancestry.
+        /// These never replace full authenticated member IDs.
+        checkpoints: BTreeSet<Checkpoint>,
     },
 }
 
@@ -94,6 +101,7 @@ impl UnverifiedItem {
         hashes.into_iter()
     }
 
+    /// Authenticate full member metadata and IDs, ignoring checkpoint hints.
     pub fn verify(self) -> Result<VerifiedItem, VerificationError> {
         match self {
             Self::Commit { meta, signatures } => verify_metadata(
@@ -105,6 +113,7 @@ impl UnverifiedItem {
                 range,
                 commits,
                 signatures,
+                ..
             } => Self::verify_fragment(range, signatures, commits.into_iter().map(Ok)),
         }
     }
