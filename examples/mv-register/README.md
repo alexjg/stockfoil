@@ -111,3 +111,11 @@ checks cover malformed envelopes, payload/signature tampering, wrong server
 identity, deferred dependencies, fragment relay, historical views, revocation,
 and draft publication. Network tests and fixtures live in
 [`src/sync/tests.rs`](src/sync/tests.rs).
+
+For real Rust/JavaScript interoperability, see
+[`../mv-register-js`](../mv-register-js/README.md). Its `npm run test:interop`
+starts this binary with the test-only `--interop` JSON-lines control protocol
+([`src/sync/interop.rs`](src/sync/interop.rs)). Control messages carry configuration
+and commands; all history travels through the loopback Subduction server. The
+JavaScript replica uses Stockfoil Wasm and the published Subduction Wasm
+WebSocket client directly. The default native demo is unchanged.

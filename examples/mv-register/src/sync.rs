@@ -222,5 +222,8 @@ pub async fn run(remote: Option<RemoteServer>) -> Result<()> {
     result
 }
 
+/// Line-oriented control protocol for the JavaScript interoperability test.
+pub mod interop;
+
 #[cfg(test)]
 mod tests;

@@ -55,6 +55,23 @@ cargo run -p stockfoil-mv-register
 See its [README](examples/mv-register/README.md) for connecting to an existing
 server. `cargo test` runs the library and example tests.
 
+## JavaScript
+
+The [JavaScript package](javascript) exposes the same graph through Wasm, with
+TypeScript declarations, byte payloads, and cursor-based change batches. It uses
+wasm-bodge for Node.js/browser packaging; signing and transport stay outside the
+library.
+
+The [JS register example](examples/mv-register-js) synchronizes with the Rust
+register through a real Subduction WebSocket server. After building the package
+(see its [build instructions](javascript/README.md)):
+
+```sh
+npm --prefix examples/mv-register-js ci
+npm --prefix examples/mv-register-js test
+npm --prefix examples/mv-register-js run test:interop
+```
+
 ## Receiving out-of-order history
 
 `CommitGraph::ingest` accepts verified items in any arrival order. It captures

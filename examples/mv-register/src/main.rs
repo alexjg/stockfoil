@@ -7,6 +7,9 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let usage = "Usage: stockfoil-mv-register [--server ws://HOST:PORT --server-peer HEX_PUBLIC_KEY]\n\
                  Without arguments, starts an in-memory loopback Subduction server.";
+    if args.as_slice() == ["--interop"] {
+        return sync::interop::run().await;
+    }
     let remote = match args.as_slice() {
         [] => None,
         [help] if help == "--help" || help == "-h" => {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["examples/mv-register"]
+members = ["examples/mv-register", "javascript"]
 default-members = [".", "examples/mv-register"]
 resolver = "3"
 

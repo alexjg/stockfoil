@@ -1,0 +1,14 @@
+{
+  "name": "stockfoil-mv-register-js",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:interop": "node interop.mjs"
+  },
+  "dependencies": {
+    "@automerge/subduction": "0.21.2",
+    "stockfoil": "file:../../javascript"
+  }
+}
