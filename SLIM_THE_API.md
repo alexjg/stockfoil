@@ -4,7 +4,7 @@
 
 The Rust and JavaScript multi-value-register examples demonstrate a useful idea: implement a CRDT's payload and materializer, then use Stockfoil for authenticated history and Subduction for synchronization. Unfortunately, the amount of surrounding code makes that idea look much harder than it ought to be.
 
-The examples currently implement several reusable library responsibilities: a wire protocol, conversion to Subduction records, asynchronous task ownership, connection cleanup, and replication-progress observation. They also demonstrate advanced register features and, especially in JavaScript, act as comprehensive integration tests.
+The examples originally implemented several reusable library responsibilities: a wire protocol, conversion to Subduction records, asynchronous task ownership, connection cleanup, and replication-progress observation. Stockfoil now owns the envelope; the remaining transport responsibilities are still visible. They also demonstrate advanced register features and, especially in JavaScript, act as comprehensive integration tests.
 
 The goal should be that an application author writes **their payload and materializer, plus a small publication/ingestion loop**. They should not need to implement a wire protocol or supervise Subduction's runtime tasks.
 
@@ -14,13 +14,19 @@ This document examines three ways to get there:
 2. Improve the Stockfoil API.
 3. Remove unnecessary scope and defensive complexity from the examples.
 
-API sketches below are illustrative proposals. The local-checkout follow-up below records the existing APIs now adopted by the examples.
+Subduction API sketches below remain proposals. The follow-ups record adopted APIs and the implemented Stockfoil codec work.
+
+## Follow-up: implemented payload codecs
+
+[`CODEC.md`](CODEC.md) refines and implements the original default-codec proposal: one Stockfoil envelope, with **required application commit and whole-fragment codecs** owned by the graph. Rust and Wasm share framing, Hexane metadata columns, authentication, and admission. Both examples now ingest opaque bytes and export transport metadata without implementing a Stockfoil wire protocol.
+
+The former `wire.rs` and `wire.mjs` are removed. Application `codec.rs`/`codec.mjs` retain only canonical BCS assignments and genuine key-dictionary/run fragment compression. Permissions, external signing, deferred-rejection reports, and retry-safe publication remain explicit. The APIs are `CommitGraph::new(codec)` / `new CommitGraph(codec)`. One graph directly owns codec orchestration and history; structured insertion/export helpers are private rather than a second public API.
 
 ## Follow-up: using the local Subduction checkout
 
-Both examples now temporarily use `../subduction`: Rust path dependencies for all four Subduction/Sedimentree crates, and an npm `file:` dependency on `subduction_wasm`. The JS package must be built into its `dist/` directory; linking the source package does not build Wasm. See the [JS example setup](examples/mv-register-js/README.md#run).
+Both examples now temporarily use `../subduction`: Rust path dependencies for the Subduction/Sedimentree crates, and an npm `file:` dependency on `subduction_wasm`. The JS package must be built into its `dist/` directory; linking the source package does not build Wasm. See the [JS example setup](examples/mv-register-js/README.md#run).
 
-Against the inspected checkout (`0e697e07`):
+At the earlier inspected checkout (`0e697e07`; see the managed-client follow-up below):
 
 | Capability | Status |
 | --- | --- |
@@ -37,6 +43,29 @@ No new Subduction implementation was needed for the batch/prefix switch. Publica
 
 Subduction already sends `HeadsUpdate` acknowledgements for newly inserted pushed items. The outstanding proposal is a round-correlated completion guarantee callers can await, not inventing acknowledgements from scratch. Likewise, JS already has a named sync-result wrapper; the missing piece is richer outcome/completion semantics, not merely a class name.
 
+## Follow-up: adopted managed Tokio client
+
+The Rust example now uses `subduction_tokio::TokioClient` and its bundled
+`WebSocketConnector`. This replaces the concrete core/handler/transport aliases,
+manual task spawning and tracking, connection deadline orchestration, identity
+comparison, abort/drain procedure, and custom `Drop`. The example explicitly
+selects memory storage, an ephemeral signer, and open policy; Subduction enforces
+`ExpectedPeer::Known` and owns connection/task lifetime. Reconnection remains off.
+
+The managed handle supplies every runtime operation the example needs:
+`store_built_batch`, `sync_with_peer`, and `get_blobs`. Shutdown reports are checked
+for forced termination, unfinished tasks, and fatal failures. Cleanup continues
+across all clients and the server even if an earlier operation or close failed.
+Checkpoint assertions use a test-owned storage handle, not raw-core access.
+
+This resolves the native lifecycle work below, not all replication ergonomics.
+The loopback server helper stays separate; inbound server management is not part
+of `subduction_tokio`. Snapshot loading and bounded convergence checks remain
+because there is no incremental stored-item feed or stronger sync completion
+contract. Export cursors still advance only after successful local storage.
+JavaScript still uses the Wasm client; this Tokio-specific migration does not
+provide a managed JavaScript runtime.
+
 ## Where the code goes
 
 At the original review, before adopting the local checkout, excluding the register implementations and standalone test files:
@@ -47,12 +76,12 @@ At the original review, before adopting the local checkout, excluding the regist
 | Connection and task management | 187 lines | Included in transport below |
 | Publication, ingestion, and sync orchestration | 230 lines | 74 lines |
 
-Relevant files:
+Current files:
 
-- [`examples/mv-register/src/wire.rs`](examples/mv-register/src/wire.rs)
+- [`examples/mv-register/src/codec.rs`](examples/mv-register/src/codec.rs): application payloads only; the original `src/wire.rs` is removed.
 - [`examples/mv-register/src/transport.rs`](examples/mv-register/src/transport.rs)
 - [`examples/mv-register/src/sync.rs`](examples/mv-register/src/sync.rs)
-- [`examples/mv-register-js/wire.mjs`](examples/mv-register-js/wire.mjs)
+- [`examples/mv-register-js/codec.mjs`](examples/mv-register-js/codec.mjs): application payloads only; the original `wire.mjs` is removed.
 - [`examples/mv-register-js/transport.mjs`](examples/mv-register-js/transport.mjs)
 
 The JS runnable scenario is also a 146-line integration test, [`interop.mjs`](examples/mv-register-js/interop.mjs), backed by a 107-line [Rust control-protocol helper](examples/mv-register/src/sync/interop.rs). Neither is representative of the code an application needs simply to synchronize.
@@ -150,53 +179,26 @@ Both examples also now consume Stockfoil's canonical 12-byte checkpoint prefixes
 - Rust uses `Fragment::from_parts`, which was already available in the previously pinned crate.
 - JavaScript uses `Checkpoint.fromBytes` and `Fragment.fromCheckpointPrefixes` from the local checkout; these were not exposed by the previously pinned JS 0.21.2 package.
 
-The fragment-member scans are removed. All four Rust dependencies now resolve to sibling source, not registry copies. The JS dependency points to the same checkout's built Wasm package; rebuild that package after upstream source changes.
+The fragment-member scans are removed. All Rust Subduction dependencies now resolve to sibling source, not registry copies. The JS dependency points to the same checkout's built Wasm package; rebuild that package after upstream source changes.
 
 Batch storage is not universally transactional. Preserve the rule that the publication cursor advances only after the batch has been stored successfully; retries must tolerate partial prior writes. Retired Stockfoil cover entries are not automatically requests to delete transport history.
 
 ## 2. Improve the Stockfoil API
 
-### 2.1 Provide a default versioned wire codec
+### 2.1 Stockfoil envelope and required payload codecs — implemented
 
-This is the largest cross-language opportunity.
-
-The examples' wire modules implement:
-
-- Commit and fragment envelopes.
-- Author-signature evidence.
-- Metadata reconstruction from exact payload bytes.
-- Versioning and structural validation.
-- Conversion between serialized records and graph ingestion.
-
-Those are mostly Stockfoil concerns. The application-specific part is encoding and decoding a register assignment.
-
-Provide a default codec, implemented once in Rust and exposed through Wasm, along these lines:
+The original “default codec” proposal is superseded by [`CODEC.md`](CODEC.md). Applications supply **both** canonical commit encoding and compressed whole-fragment encoding. The graph owns this codec, so callers use:
 
 ```text
-graph.export_encoded(cursor, codec) -> encoded_items + next_cursor
-graph.ingest_encoded(bytes, codec) -> ingest_report
+graph.export_changes(cursor) -> encoded_items + next_cursor
+graph.ingest(bytes) -> ingest_report
 ```
 
-Each exported item should include its opaque blob and the metadata needed to advertise it: commit ID and parents, or fragment head, boundary, and checkpoints. Consumers should not have to parse their own outgoing blob to discover that information.
+Exports contain opaque bytes plus commit ID/parent metadata or fragment range/checkpoint prefixes. Adapters do not decode their outgoing blobs. Stockfoil owns framing, exact canonical-byte authentication, ordered-parent reconstruction, author evidence, and admission. Hexane-backed metadata compression is internal; application compression stays independent.
 
-This is especially straightforward for the JS graph, which already owns byte payloads. Rust's `CommitGraph<P>` cannot serialize an arbitrary `P`: it needs an explicit payload codec or a byte-oriented convenience layer. A borrowed export view exposing metadata and payloads together would also remove repeated `publishable_commit()` lookups.
+Rust and JS examples no longer implement envelope framing, signature serialization, member-hash reconstruction, or temporary payload maps. Their small BCS readers/writers remain for **application payloads**, not Stockfoil envelopes.
 
-The codec must preserve the current trust boundaries:
-
-- Hash and authenticate exact payload bytes, not a decoded-and-reencoded approximation.
-- Preserve parent order and multiplicity in signed metadata, even if transport parents are sets.
-- Retain original-author evidence; transport authentication cannot replace it.
-- Verify input and perform graph-dependent admission checks.
-- Keep author permissions local rather than importing them from network payloads.
-- Keep parser validation and resource limits in the codec rather than deleting them to make examples shorter.
-
-This would eliminate almost all envelope code from both examples, including the handwritten JS BCS reader/writer.
-
-#### Preserve custom compression
-
-A default codec should not foreclose Stockfoil's purpose: allowing a CRDT to encode runs and bundles efficiently. Keep extension points for application-specific fragment/bundle compression. Do not require every CRDT to serialize each commit independently through a generic serialization trait.
-
-Nor does adopting a default transport codec necessarily settle the entire persistence API. Versioning, compatibility commitments, and a general binary `load`/`save` design need explicit decisions. An initially experimental, versioned codec is preferable to an accidentally permanent example format.
+The implemented trust boundary preserves parent order/multiplicity, original-author signatures, explicit local permissions, and deferred rejection reporting. Inbound per-item limits bound parsing and cooperative application decoding, not aggregate queue size. Local export remains possible when a certified fragment grows beyond those limits; a receiver must explicitly approve a larger budget and retry. Whole-document persistence and fixed-memory streaming remain separate future work.
 
 ### 2.2 Provide a thin optional Stockfoil–Subduction adapter
 
@@ -227,7 +229,7 @@ Start with small publisher/receiver helpers, not a large `SyncedDocument` abstra
 
 Secondary improvements include:
 
-- An export view containing payloads alongside metadata.
+- Additional low-level borrowed export views, if needed; ordinary encoded exports already avoid caller payload lookups.
 - A convenience for checking deferred rejections in `IngestReport`.
 - An immediate-signing convenience for simple applications, while retaining external/asynchronous signing and the draft workflow.
 
@@ -290,12 +292,12 @@ Do not remove:
 
 Likewise, do not replace convergence polling with a fixed sleep. It makes the example shorter by making it unreliable.
 
-Using a maintained codec dependency could remove the handwritten JS BCS machinery before a Stockfoil codec exists, but it would not remove the duplicated envelope schema and verification glue. It is a smaller interim improvement, not the final boundary.
+The Stockfoil codec now removes the duplicated envelope schema and verification glue. A maintained BCS dependency could still replace the JS application's small payload reader/writer, but that is separate from the library ownership change.
 
 ## Recommended implementation order
 
 1. **Separate the JS demo from the integration test.** Immediate readability improvement without API changes or lost coverage.
-2. **Add Stockfoil's default wire codec.** The largest reduction shared by Rust and JS.
+2. **Stockfoil-owned envelope with required application payload codecs — complete.** Shared Rust/Wasm implementation and both examples migrated; see `CODEC.md`.
 3. **Add Subduction's managed Rust client, expected-peer enforcement, and proper close semantics.** The largest Rust-specific reduction; identity enforcement is independently worth fixing promptly.
 4. **Extract a thin integration adapter.** Both examples now use existing batch storage and checkpoint-prefix constructors; the remaining conversion and cursor management can be shared.
 5. **Add incremental receive notifications and explicit sync-completion semantics.** Replace repeated whole-store scans and application-specific progress polling.

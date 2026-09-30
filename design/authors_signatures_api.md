@@ -5,31 +5,32 @@ This is the implementation sketch for
 The in-memory graph and MVR demo implement this API. This is an experimental
 sketch: no compatibility APIs or format migrations.
 
+`CommitGraph<C: PayloadCodec>` directly owns canonical hashing, encoded exports,
+byte ingestion, typed payloads, and graph history; see [`CODEC.md`](../CODEC.md).
+Structured insertion, admission, and export are private helpers on this same
+graph, not a separate public API. No caller-side payload binding is required.
+
 ## Commit metadata and signatures
 
 * Every commit has an author in its hashed contents. `CommitMeta::author()`
-  returns `&Author`; `payload_hash()` exposes the payload hash. `CommitGraph<P>`
-  cannot encode an arbitrary `P`: callers must bind received payloads to this
-  hash before ingestion or use. Signature
-  verification authenticates the envelope and hash, not an unchecked decoded
-  value. The MVR demo hashes its local assignments using BCS. Its example-only
-  Subduction adapter reconstructs hashes from exact received payload bytes,
-  verifies the original author signatures, then decodes assignments.
+  returns `&Author`; `payload_hash()` exposes the payload hash.
+  `CommitGraph<C>` binds received payloads to this hash through its codec,
+  requires exact standalone canonical re-encoding, and reconstructs fragment
+  hashes before verifying signatures. The MVR codec uses canonical BCS
+  assignments; its transport adapter passes opaque bytes to Stockfoil.
 * Remove signatures from `CommitContents`, `CommitMeta`, and the hashed encoding.
   Deliver them separately as `(author, commit_hash, signature)`.
-* Add an authored commit builder, roughly `commit_by(author, payload)`. Parents
-  are the graph heads, including unsigned drafts and commits that don't
-  currently contribute, so normal prepared work meets the local ingestion
-  precondition. Preparation fixes the author, parents, payload, and hash before
-  any signing IO.
-* Add a local ingestion path, `ingest_local_commit(meta, payload) -> IngestReport`. It
-  asserts that every parent is already delivered before any mutation, panicking
-  on misuse rather than buffering causally unready work. Parents may be unsigned
-  local drafts; they need not be admitted. It immediately delivers our prepared
-  commit as `pending_local`, advancing the working heads but leaving it
-  unpublished. `pending_local` means delivered but unsigned/unadmitted local
-  work only, never work awaiting causal dependencies. Ordinary incoming
-  ingestion must not do this.
+* `commit(author, payload)` canonically encodes a payload and inserts an authored
+  draft. Parents are the graph heads, including unsigned drafts and commits that
+  don't currently contribute. `describe_commit(author, &payload)` computes the
+  same metadata without inserting it. Preparation fixes the author, parents,
+  payload, and hash before any signing IO.
+* Private local insertion requires every parent to be already delivered. Parents
+  may be unsigned local drafts; they need not be admitted. It immediately delivers
+  the prepared commit as `pending_local`, advancing working heads but leaving it
+  unpublished. `pending_local` means delivered but unsigned/unadmitted local work
+  only, never work awaiting causal dependencies. Byte ingestion cannot introduce
+  unauthenticated drafts through this path.
 * Add `ingest_signature(author, hash, signature) -> Result<IngestReport, SignatureError>`
   for known, already delivered pending local commits only; a signature cannot be
   ingested before its local commit. Verify real Ed25519 signatures; verified
@@ -51,8 +52,9 @@ synchronous. A later frontier signature may cover a batch of local commits. We
 don't need a signature per keystroke or a resolver API listing pending requests.
 Signing never grants write permission.
 
-`commit_by(author, payload)` is the commit builder. An author is mandatory even
-when signatures haven't arrived yet.
+`CommitGraph::commit(author, payload)` combines canonical encoding and draft
+insertion, returning a fallible `Draft` containing hash, signing bytes, and report.
+An author is mandatory even when signatures haven't arrived yet.
 
 ## Delivery and permissions
 
@@ -76,14 +78,17 @@ when signatures haven't arrived yet.
 * Add `WritePermission::{Unbounded, Bounded(Vec<CommitHash>), Denied}` and
   `set_write_permissions(&HashMap<Author, WritePermission>)`. This replaces the
   whole map; missing authors are denied. Snapshot the input, don't borrow it.
-* `minimal_cover` selects authenticated transport items; `export` supplies their
-  metadata and stored signature evidence. Pending local work and queued received
+* Internal cover selection chooses authenticated transport items;
+  `export_changes` supplies their encoded bytes and transport metadata. Structured
+  verification types and structural summaries remain private. Pending local work and queued received
   items are excluded. A
   descendant export must not leak unsigned local ancestors. Publication is
   independent of the working heads and document visibility. Actual transport
   evidence is retained independently for export and verification.
-* `merge(&other) -> IngestReport` exchanges those items, verifies them, and
-  admits them as dependencies become ready, draining the destination's queue too.
+* `CommitGraph::merge(&other)` exchanges encoded items through the receiver's
+  codec and limits, verifies them, and admits them as dependencies become ready,
+  draining the destination's queue too. It returns a report or a `MergeError`
+  preserving partial progress.
   The sender's queue, local drafts, and write permissions do not travel through
   merge. Cloning a graph, in contrast, clones its queued items and owned payloads.
   Receiving data must not grant access. Revoked, admitted commits remain
@@ -95,23 +100,21 @@ permission grants.
 
 ## Received queue and operation reports
 
-`ingest(VerifiedItem, payload_callback) -> Result<IngestReport, IngestError>`
-accepts verified items in any arrival order. Missing dependencies are not an
-error (`MissingDependency` has been removed). The queue currently has no resource
-limits. Unverified transport input and application-specific payload validation
-remain outside this API.
+`CommitGraph::ingest(&[u8]) -> Result<IngestReport, Error<C::Error>>` accepts
+encoded items in any arrival order. It decodes, reconstructs canonical hashes,
+and verifies signatures before private admission. Missing dependencies are not
+an error. Per-item decode limits do not impose aggregate queue quotas.
 
-The payload callback runs immediately, even when the item must wait, once for
-each member not already delivered. The graph owns the returned payloads, never
-the callback. Exact queued duplicates reuse their stored payloads without calling
-it again; distinct member sets or signature evidence claiming the same `ItemId`
-are not conflated. All callbacks complete before graph or queue mutation, so a
-callback panic leaves both unchanged (not the callback's external side effects).
-Existing delivered payloads always win, including copies delivered by local
-insertion or another item after queueing.
+Application decoding runs before mutation, even when an item must wait. The graph
+owns the returned payloads. Exact queued duplicates reuse retained payloads,
+though each encoded input still undergoes decoding and verification; distinct
+member sets or signature evidence claiming the same `ItemId` are not conflated.
+Codec external side effects are not rolled back. Existing delivered payloads
+always win, including copies delivered by local insertion or another item after
+queueing.
 
-A directly received, ready fragment with invalid placement returns
-`Err(IngestError::InvalidFragment)` before callbacks or mutation. For a queued
+A directly received, ready fragment with invalid placement returns an admission
+error carrying `IngestError::InvalidFragment` before graph/queue mutation. For a queued
 fragment, placement can only be checked once its dependencies are admitted. If
 invalid then, it is removed and reported as a per-item rejection by the operation
 that unblocked it, without delivering any of its members. Successful dependencies
@@ -125,8 +128,11 @@ items and newly certifiable local work drain automatically until neither can mak
 progress; callers need not resubmit queued items.
 
 Received ingestion and local signing return `Result<IngestReport, ...>`; local
-insertion and merge return `IngestReport` directly. Inspect the report on every
-operation that can admit history:
+commits return a fallible `Draft` containing `Draft::report`, and encoded native
+merges return `Result<IngestReport, MergeError<C::Error>>`. A failed
+merge retains earlier admissions/rejections in `MergeError::report` alongside
+its typed `error`. Inspect the report on every operation that can admit history,
+including partial merge failures:
 
 * `admitted: Vec<ItemId>` lists admitted certificates, including duplicate and
   local certificates, not newly delivered commits. Use `visit_changes` for
@@ -154,9 +160,9 @@ viewpoint. These are deliberately separate: a historical or signed viewpoint may
 exclude delivered commits that the materializer has already stored. Read-only
 `delivery_heads()` and `view_point()` accessors expose the snapshots.
 
-Each callback receives a `MaterializationChange<'_, P>` with:
+Each callback receives a `MaterializationChange<'_, C::Payload>` with:
 
-* `meta: &CommitMeta` and `payload: &P`, borrowed without cloning.
+* `meta: &CommitMeta` and `payload: &C::Payload`, borrowed without cloning.
 * `newly_delivered: bool`, indicating that the commit lies outside the cursor's
   processed delivery history. Store this data even when it does not participate.
 * `visibility: Vis`, classifying participation in the old and requested views.
@@ -199,7 +205,8 @@ This remains a commit-level update stream, not a document patch. For example,
 revoking an overwriting assignment may restore an older value without revisiting
 that older commit. Keep the operations needed to recompute such effects.
 `examples/mv-register/src/lib.rs` demonstrates this with a cached materialized
-view; `tests/orset/mod.rs` shows the simpler delivery-only case using the same API.
+view; `src/commit_graph/tests/orset/mod.rs` shows the simpler delivery-only case
+using the same materialization API with an internal fixture codec.
 
 ## Viewpoints and lower-level queries
 
@@ -225,7 +232,7 @@ Select a target using `view_point()` or `signed_view_point()`, then pass it to
 * `signed_view_point() -> ViewPoint` captures the maximal admitted commits as
   heads and the current write permissions. Admitted ancestors underneath drafts
   are retained, not lost by merely filtering the working heads.
-* `diff(&ViewPoint, &ViewPoint) -> Result<ViewPointDiff<'_, P>, DiffError>`
+* `diff(&ViewPoint, &ViewPoint) -> Result<ViewPointDiff<'_, C>, DiffError>`
   calculates participation from delivered graph history and write permissions,
   including pending local drafts. A missing history head in either viewpoint
   yields `DiffError::MissingCommit(hash)`, even under total permission denial.
@@ -290,26 +297,29 @@ remain readable before signing; admission is not validated on reads. Merge still
 transfers only authenticated history.
 
 The example owns its signing key and has no external-signer wrapper. Its
-Subduction demo uses a private versioned BCS wire envelope, not a stable Stockfoil
-format; see `examples/mv-register/README.md`. Its document API is:
+Subduction demo uses Stockfoil's [shared v1 envelope](codec-wire-v1.md), with an
+application codec for BCS assignments and key-dictionary/run fragment compression;
+see `examples/mv-register/README.md`. Its document API is:
 
 * `new()` and `author()` create and identify a replica, initially permitted to
   read its own writes.
 * `prepare_set(key, value)` makes a local draft; `publish()` signs pending work.
-  `set(key, value)` does both.
+  `set(key, value)` does both. These operations return `eyre::Result`.
 * `set_write_permissions(...)` changes participation without discarding history.
 * `view_point()`, `get(key)`, and `get_at(view, key)` support current and historical
   reads.
 * `merge(&other)` transfers authenticated history, not permissions or drafts.
   `fork()` creates a new key, copies permissions, and merges that history.
+  Both are fallible; merge refreshes materialization even on partial failure.
 
 The register integration tests live in `examples/mv-register/tests` and cannot
 inspect the private graph. They cover
 concurrent register values, revocation restoring overwritten values, and one
 prepare/publish/relay flow preserving historical drafts. Additional tests cover
 denied delivery followed by permission grants, late frontier proofs, and isolated
-historical reads. The OR-set example in `tests/orset/mod.rs` uses `visit_changes`
-as well, processing only `newly_delivered` events and retaining surviving add IDs.
+historical reads. The internal OR-set fixture in
+`src/commit_graph/tests/orset/mod.rs` uses `visit_changes` as well, processing only
+`newly_delivered` events and retaining surviving add IDs.
 It intentionally models delivery only, not revocation: its operations ignore
 `visibility`. Neither example needs raw traversal or a separate participation diff.
 

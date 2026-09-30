@@ -2,6 +2,46 @@
 
 A library for building CRDTs on top of authenticated commit DAGs.
 
+## Payload codecs and encoded history
+
+Construct `CommitGraph::new(codec)` with an application `PayloadCodec`. Both
+canonical commit encoding and **whole-fragment compression** are required: the
+application can use columns, dictionaries, or runs across commits. Stockfoil
+owns the envelope, compressed graph metadata, signature verification, admission,
+and encoded exports. Signing keys, permissions, materialization, and transport
+remain application concerns.
+
+```rust
+let mut graph = CommitGraph::new(RegisterCodec);
+let draft = graph.commit(author, assignment)?;
+// Sign draft.signing_bytes externally; inspect reports for deferred rejections.
+let report = graph.ingest_signature(author, draft.hash, signature)?;
+
+let (changes, next) = graph.export_changes(&published)?;
+adapter.store(changes.added).await?; // Each item has metadata and opaque bytes.
+published = next;                  // Only after successful batch storage.
+let received = graph.ingest(&encoded_bytes)?;
+```
+
+See [`CODEC.md`](CODEC.md) for the contract and
+[`design/codec-wire-v1.md`](design/codec-wire-v1.md) for the interoperable v1
+format. [Implementation notes](design/codec-implementation.md) cover the current
+Hexane integration and compression measurements. Payload compression is still
+application-defined. The [Rust register codec](examples/mv-register/src/codec.rs)
+and [JS codec](examples/mv-register-js/codec.mjs) implement matching BCS assignment
+bytes and key-dictionary/run fragment packing.
+
+`CommitGraph<C: PayloadCodec>` is the single graph implementation: it owns the
+codec, typed payloads, history, and received queue directly. Structured insertion
+and export helpers are private. Both synchronization and persistence use
+`export_changes(cursor)` → store/send `EncodedItem.bytes` → `ingest(bytes)`.
+An empty cursor exports the full current signed inventory; advance a destination's
+cursor only after successful storage. `ItemId` identifies inventory entries in
+reports and retirements, while `TransportMetadata` supplies the extra parents and
+checkpoint hints adapters need. Structural summaries and cover-selection types
+are not public APIs. The `*Shape` types remain public inputs to application codecs.
+No Subduction dependency is introduced into Stockfoil core.
+
 ## Materializing a CRDT
 
 Use `CommitGraph::visit_changes` as the standard update path. Keep a
@@ -38,7 +78,7 @@ Executable examples:
 * [Multi-value registers](examples/mv-register): one callback for new assignments,
   revocation, cached current values, and historical reads, with a runnable
   Subduction WebSocket synchronization demo.
-* [Observed-remove set](tests/orset/mod.rs): the delivery-only case, processing
+* [Observed-remove set](src/commit_graph/tests/orset/mod.rs): the delivery-only case, processing
   `newly_delivered` events with the same cursor API.
 
 See the [materialization API guide](design/authors_signatures_api.md#incremental-materialization)
@@ -47,7 +87,8 @@ options for graph inspection and specialized consumers, not prerequisites for
 materialization.
 
 The register examples temporarily depend on a sibling Subduction checkout at
-`../subduction`. See their READMEs for local Rust/Wasm setup.
+`../subduction`. The Rust example uses `subduction_tokio` for managed outbound
+connections and task ownership. See their READMEs for local Rust/Wasm setup.
 
 Run the register demo (starts a local Subduction server automatically):
 
@@ -61,9 +102,10 @@ server. `cargo test` runs the library and example tests.
 ## JavaScript
 
 The [JavaScript package](javascript) exposes the same graph through Wasm, with
-TypeScript declarations, byte payloads, and cursor-based change batches. It uses
-wasm-bodge for Node.js/browser packaging; signing and transport stay outside the
-library.
+TypeScript declarations, typed payload codecs, and cursor-based change batches.
+`new CommitGraph(codec)` uses the native envelope; payloads are structured-cloned
+and synchronous codec re-entry is rejected. It uses wasm-bodge for Node.js/browser
+packaging; signing and transport stay outside the library.
 
 The [JS register example](examples/mv-register-js) synchronizes with the Rust
 register through a real Subduction WebSocket server. After building the package
@@ -77,18 +119,25 @@ npm --prefix examples/mv-register-js run test:interop
 
 ## Receiving out-of-order history
 
-`CommitGraph::ingest` accepts verified items in any arrival order. It captures
-payloads immediately and queues items whose dependencies are not yet admitted.
+`CommitGraph::ingest` accepts encoded bytes in any arrival order. It decodes and
+verifies before mutation, then queues items whose dependencies are not yet admitted.
 Queued received items are not delivered history: they do not affect viewpoints,
 materialization, or export. Local unsigned drafts remain a separate concept.
 
 Admission, including local signing, automatically wakes waiting items.
-`ingest`, `ingest_signature`, `ingest_local_commit`, and `merge` return an
-`IngestReport` describing admitted certificates, deferred rejections, and the
-remaining pending-item count. Inspect `rejected`: a valid dependency can expose
-an invalid queued fragment without itself being rejected. Admission is atomic
-per item, not per batch. `pending_items()` and `missing_dependencies()` expose
-queue progress. There are currently no queue resource limits.
+`ingest` and `ingest_signature` return an `IngestReport`; `commit` includes one
+in its `Draft`. Native `merge` returns a report on success and retains partial
+progress in `MergeError::report` on failure. Inspect `rejected`: a valid dependency
+can expose an invalid queued fragment without itself being rejected. Admission
+is atomic per item, not per batch. `pending_items()` and `missing_dependencies()`
+expose queue progress.
+
+`DecodeLimits` bounds each inbound envelope and its reconstructed canonical
+payloads. It does not limit trusted local commits/exports, the whole graph, or
+the pending queue. Certified fragments can grow beyond the defaults; a receiver
+may explicitly increase its budget and retry with `set_decode_limits` (JS:
+`setDecodeLimits`). Application decoders must cooperate with these budgets.
+There are currently no aggregate queue limits or authenticated fragment chunking.
 
 ## A history lesson
 
@@ -146,26 +195,19 @@ be useful anytime you have the following things:
 
 ## Stockfoil
 
-If you have a data structure which meets these requirements then you can use
-stockfoil. You have to provide a trait which looks like this:
+Implement `PayloadCodec` for a data structure meeting these requirements. You get:
 
-```rust
-trait Commit {
+* A shared binary envelope for individual commits and compressed fragments.
+* Authenticated certified covers and transport metadata for Sedimentree.
+* An in-memory synchronous graph with out-of-order admission, drafts, revocation,
+  materialization cursors, and retry-safe export snapshots.
+* The same encoding and verification pipeline in Rust and Wasm/JavaScript.
 
-}
-```
+## Fixed memory: future direction
 
-And then you get out of it:
-
-* An efficient binary format for encoding the commit graph as both individual
-  commits and bundles of commits
-* An implementation of the "fragments" structure that sedimentree expects
-* A sans-IO state machine based API to the commit graph which works in a fixed
-  amount of memory and spools everything to/from disk/network.
-* An in-memory synchronous API to the commit graph
-* An asynchronous API to the commit grap
-
-## Fixed Memory
+The current implementation is in-memory, not a fixed-memory or asynchronous
+storage engine. The following sections describe future streaming goals, not
+properties supplied by the current `Vec`-based codec API.
 
 One of the goals of stockfoil is to make it possible to perform all interactions
 with the commit graph in a constant amount of memory. The idea here is to make

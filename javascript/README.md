@@ -112,8 +112,8 @@ framing/count validation happens before application decoding. Decoders receive
 the limits and must enforce them **before expanding untrusted counts**. Core also
 checks decoded canonical totals, but cannot sandbox allocations or CPU consumed
 inside application code. These are **inbound per-item** budgets, not pending-queue
-quotas. They do not restrict local `commit`/`describeCommit` or `export`/
-`exportChanges`; a locally produced envelope can exceed a receiver's budgets.
+quotas. They do not restrict local `commit`/`describeCommit` or `exportChanges`;
+a locally produced envelope can exceed a receiver's budgets.
 
 `graph.setDecodeLimits(options)` replaces the inbound limits, merging the supplied
 partial options with the same defaults as the constructor, **not the previous
@@ -204,9 +204,10 @@ async function publish() {
 }
 ```
 
-`graph.export(id)` returns one `EncodedItem`; `exportChanges(cursor)` returns
-`{added, retired, cursor}`. Every addition contains complete native envelope
-`bytes` and derived `metadata`:
+`exportChanges(cursor)` is the output flow for both synchronization and persistence;
+`ingest(bytes)` is the input flow. It returns `{added, retired, cursor}`. Every
+addition is an `EncodedItem` containing complete native envelope `bytes` and
+derived `metadata`:
 
 - Commit: `{kind: "commit", hash, parents}` (transport parent set).
 - Fragment: `{kind: "fragment", head, boundary, checkpoints}`; checkpoints are
@@ -216,7 +217,12 @@ Use one cursor per destination and serialize publication. Advance it only after
 storing the entire batch; failed encoding leaves the original cursor reusable.
 Retries can duplicate items. Retired IDs are not revocations or unconditional
 instructions to delete history. Exported bytes remain usable after graph edits or
-disposal. A whole-document binary `load`/`save` API is not implemented.
+disposal. An empty cursor exports the complete signed inventory. To persist it,
+store framed item bytes durably before advancing the cursor; reload with
+`ingest(bytes)`. Append-only logs can ignore retirements. Drafts, queued received
+items, permissions, and keys are not included. There is no separate snapshot or
+single-item export API. `FragmentShape`, `MemberShape`, and `ParentRef` remain
+public codec context, not an alternative transport representation.
 
 Call `graph.dispose()` to promptly release Wasm memory. Disposal is idempotent;
 subsequent operations throw `Disposed`. Owned batches, viewpoints, and cursors

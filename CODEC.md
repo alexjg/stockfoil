@@ -1,6 +1,8 @@
 # Application-defined payload codecs and encoded graph APIs
 
-Status: design and implementation plan; the APIs below are sketches, not current implementation.
+Status: implemented in Rust, Wasm/JavaScript, and both register examples. This document records the design and implementation sequence; [`design/codec-wire-v1.md`](design/codec-wire-v1.md) specifies interoperable bytes and acceptance rules. Current dependencies, resource defaults, and compression measurements are in the [implementation notes](design/codec-implementation.md). Public contracts live in [`src/codec.rs`](src/codec.rs), [`src/commit_graph.rs`](src/commit_graph.rs), and [`javascript/src/types.ts`](javascript/src/types.ts).
+
+Implementation decisions: required application `format_id`, cooperative `DecodeLimits` on both decoders, inbound-only limits with explicit retry/reconfiguration, structured-cloned JS payloads, guarded synchronous callbacks, and encoded native merges with partial-error reports. `CommitGraph<C: PayloadCodec>` directly owns the codec, payloads, history, and queue. There is one graph implementation; structured insertion/export helpers are private.
 
 ## Decision and motivation
 
@@ -18,14 +20,14 @@ The intended boundary is:
 | Hash reconstruction and graph admission | CRDT materialization |
 | Transport metadata and export cursors | Signing keys and write-permission policy |
 
-There is one Stockfoil envelope, not a pluggable whole-envelope codec. An application supplies a required payload codec when constructing its graph. Normal synchronization code calls `export`, `export_changes`, and `ingest` without implementing framing, signature handling, or payload-lookup callbacks.
+There is one Stockfoil envelope, not a pluggable whole-envelope codec. An application supplies a required payload codec when constructing its graph. Synchronization and persistence call `export_changes` and `ingest` without implementing framing, signature handling, or payload-lookup callbacks.
 
 This refines the codec proposal in [`SLIM_THE_API.md`](SLIM_THE_API.md): do not replace application-specific bundle compression with a default codec or make all graphs exclusively byte-oriented.
 
 ## Goals
 
 - Preserve application-specific compression across an entire fragment.
-- Make `CommitGraph::export` return a complete encoded item and its transport metadata.
+- Make `CommitGraph::export_changes` return complete encoded items and their transport metadata.
 - Make `CommitGraph::ingest` accept encoded bytes and coordinate decoding, authentication, and admission.
 - Retain typed application payloads, including suitable immutable storage handles.
 - Preserve existing commit identities for unchanged canonical payload bytes and metadata.
@@ -63,6 +65,9 @@ pub trait PayloadCodec {
     type Payload: Clone;
     type Error: std::error::Error + 'static;
 
+    /// Trusted application format/version; incoming IDs never select code.
+    fn format_id(&self) -> &str;
+
     /// Canonical bytes used to compute a commit's payload hash.
     /// Also the payload body of a standalone commit.
     fn encode_commit(
@@ -73,6 +78,7 @@ pub trait PayloadCodec {
     fn decode_commit(
         &self,
         bytes: &[u8],
+        limits: &DecodeLimits,
     ) -> Result<Self::Payload, Self::Error>;
 
     /// Encode the whole batch together, exploiting application structure.
@@ -87,6 +93,7 @@ pub trait PayloadCodec {
         &self,
         shape: &FragmentShape,
         bytes: &[u8],
+        limits: &DecodeLimits,
     ) -> Result<Vec<Self::Payload>, Self::Error>;
 }
 ```
@@ -156,11 +163,14 @@ pub struct CommitGraph<C: PayloadCodec> {
 }
 ```
 
-Proposed signatures (interface sketch, not an implementation):
+Selected public signatures (see `src/commit_graph.rs` and its private codec module for the complete implementation):
 
 ```rust
 impl<C: PayloadCodec> CommitGraph<C> {
     pub fn new(codec: C) -> Self;
+    pub fn with_limits(codec: C, limits: DecodeLimits) -> Self;
+    pub fn set_decode_limits(&mut self, limits: DecodeLimits);
+    pub fn decode_limits(&self) -> &DecodeLimits;
 
     /// Encode, hash, and insert an unsigned local draft.
     pub fn commit(
@@ -176,11 +186,6 @@ impl<C: PayloadCodec> CommitGraph<C> {
         signature: Signature,
     ) -> Result<IngestReport, SignatureError>;
 
-    pub fn export(
-        &self,
-        id: &ItemId,
-    ) -> Result<ExportedItem, Error<C::Error>>;
-
     pub fn export_changes(
         &self,
         since: &ExportCursor,
@@ -191,6 +196,12 @@ impl<C: PayloadCodec> CommitGraph<C> {
         &mut self,
         bytes: &[u8],
     ) -> Result<IngestReport, Error<C::Error>>;
+
+    /// Earlier successful admissions/rejections survive a later error.
+    pub fn merge(
+        &mut self,
+        other: &Self,
+    ) -> Result<IngestReport, MergeError<C::Error>>;
 }
 
 pub struct Draft {
@@ -200,20 +211,26 @@ pub struct Draft {
 }
 ```
 
-`Error<C::Error>` is a placeholder for the final error organization. Preserve distinguishable codec, framing, canonical-encoding, verification, export-selection, and admission failures rather than flattening everything into strings.
+`Error<C::Error>` distinguishes codec, framing, canonical-encoding, verification, resource-limit, and admission failures. `MergeError<E>` carries both the accumulated `report: IngestReport` and underlying `error: Error<E>`; inspect reports on failure as well as success.
 
-`commit` replaces the normal caller's `commit_by` plus `ingest_local_commit` sequence. The caller still signs externally, possibly asynchronously. Unsigned local work retains its existing materialization and publication semantics.
+`commit` combines canonical encoding, metadata construction, and local draft insertion. The caller still signs externally, possibly asynchronously. Unsigned local work retains its existing materialization and publication semantics.
 
 `export_changes` becomes fallible because application encoding can fail. An error must not advance publication state. The returned cursor describes the captured exported inventory, not whatever edits happen later while an application awaits storage.
 
 Materialization remains based on `visit_changes`, with a borrowed `C::Payload` in each event. Permission changes and historical reads do not require a new materialization model.
 
-The existing metadata verification/admission engine should remain reusable internally. Whether its structured entry points remain public is an API-surface decision; they should not be prerequisites for ordinary application synchronization.
+Codec orchestration and graph algorithms operate on the same `CommitGraph<C>` fields. Structural summaries, cover selection, individual-item selection, and structured verification/admission are internal implementation details, not alternate graph APIs. Applications cannot bypass canonical encoding or authentication through structured insertion.
+
+The public transfer flow is `export_changes(cursor)` → store/send each `EncodedItem.bytes` → `ingest(bytes)`. There is no public `export(id)`, `as_sedimentree`, or `minimal_cover`. The `Fragment`, `LooseCommit`, summary/cover, `UnverifiedItem`, and `VerifiedItem` types are internal. `ItemId` identifies admitted/rejected/retired inventory entries; `TransportMetadata` additionally supplies parents and checkpoint hints needed by transport adapters.
+
+`FragmentShape`, `MemberShape`, and `ParentRef` remain public codec context for topology- and author-aware application compression. They do not expose a second transport representation. `CommitMeta` remains available to materializers.
+
+Native cloning clones the codec, payloads, drafts, queue, and permissions; shared handles still obey immutability laws. Native `merge` checks format IDs and transfers encoded exports through the receiver's codec, rather than trusting Rust type equality. It transfers neither sender permissions nor unsigned/queued history.
 
 ## 4. Encoded exports and transport metadata
 
 ```rust
-pub struct ExportedItem {
+pub struct EncodedItem {
     pub metadata: TransportMetadata,
     pub bytes: Vec<u8>,
 }
@@ -230,7 +247,7 @@ pub enum TransportMetadata {
 }
 
 pub struct ExportChanges {
-    pub added: Vec<ExportedItem>,
+    pub added: Vec<EncodedItem>,
     pub retired: Vec<ItemId>,
 }
 ```
@@ -242,7 +259,6 @@ The transport parent set is deliberately separate from the ordered, possibly rep
 Preserve existing export behavior:
 
 - Select the certified cover, not every structurally discoverable fragment.
-- Continue supporting eligible signed head announcements through `export`.
 - Do not export unsigned drafts or queued received history.
 - Derive checkpoint hints locally; hints are not authentication evidence.
 - Keep exported bytes and metadata valid after later graph edits or certificate pruning.
@@ -263,32 +279,32 @@ Do not simply standardize the current example BCS envelope without examining its
 
 ### Use Hexane for fragment metadata
 
-Use [`hexane`](https://docs.rs/hexane/1.0.0-alpha.5/hexane/) as the planned implementation of Stockfoil's columnar fragment-metadata encoding, rather than building new RLE and delta codecs. Hexane is maintained as part of Automerge by the Stockfoil maintainer, so it is an appropriate core dependency. Its RLE, delta, boolean, and raw-byte facilities fit this metadata well.
+The implementation uses pinned [`hexane =1.0.0-alpha.5`](https://docs.rs/hexane/1.0.0-alpha.5/hexane/) for Stockfoil's columnar fragment-metadata encoding, rather than building new RLE and delta codecs. Hexane is maintained as part of Automerge by the Stockfoil maintainer, so it is an appropriate core dependency. Its RLE, delta, boolean, and raw-byte facilities fit this metadata well.
 
-Keep Hexane behind Stockfoil's wire module: `PayloadCodec`, `FragmentShape`, and `ExportedItem` should not expose Hexane types. The same Rust implementation will compile into Wasm; JavaScript applications should not need a separate metadata codec.
+Keep Hexane behind Stockfoil's wire module: `PayloadCodec`, `FragmentShape`, and `EncodedItem` should not expose Hexane types. The same Rust implementation will compile into Wasm; JavaScript applications should not need a separate metadata codec.
 
-An initial column layout to implement and measure:
+The implemented v1 column layout (all columns explicitly use LEB128):
 
-| Data | Proposed representation |
+| Data | Representation |
 | --- | --- |
 | Author keys | A dictionary of unique full keys, written once per fragment |
 | Author for each member | RLE-encoded author-dictionary indices |
 | Parent count for each member | RLE-encoded counts; a linear chain becomes a run of ones |
 | Parent-reference kind | Boolean column over flattened parent entries: internal member or external hash |
-| Internal parent references | RLE-encoded backward distances from the current member; compare against delta-encoded absolute indices before fixing the format |
+| Internal parent references | RLE-encoded backward distances from the current member |
 | External parent hashes | A dictionary of full hashes, with an RLE-encoded index column for external parent entries |
-| Signature signers and targets | Author-dictionary indices and member indices, using RLE/delta encoding where useful |
+| Signature signers and targets | RLE-encoded author-dictionary indices and member indices |
 | Actual signatures | Raw fixed-size bytes for the retained evidence, not a signature per member |
 
 Flatten parents in member order and preserve each member's original parent order and multiplicity. Counts and kind tags reconstruct that sequence while consuming the internal/external reference columns. Dictionary deduplication must not deduplicate or sort the logical parent lists. The declared fragment boundary remains distinct from its external parents, even if their physical encoding shares a hash table.
 
 Do not add a full member-hash or payload-hash column: reconstruct these from the shape and canonical application payload bytes. Full external hashes, author keys, and retained signatures are essentially incompressible; the gain comes from not repeating them and from compressing the integer structure around them.
 
-For a long same-author chain, author indices, parent counts, reference kinds, and backward distances should collapse into runs. Measure the **complete** metadata section, including column framing and dictionaries, rather than reporting only the compressed integer streams. Branching and mixed-author workloads must remain efficient and correct too.
+For a long same-author chain, author indices, parent counts, reference kinds, and backward distances collapse into runs. Tests measure **complete** metadata, including framing and dictionaries: a 10,000-member single-author chain is 106 bytes without evidence/body, and a 1,000-member mixed-author branching case is 3,942 bytes. A complete signed 101-member test-codec envelope is 256 bytes versus 4,617 canonical payload bytes. Backward distances beat absolute-index deltas on chains, but not every branching shape; [Implementation notes](design/codec-implementation.md#compression-measurements) record that tradeoff and the regression ceilings.
 
 Prefer Hexane's sequential encoders for one-shot exports; this does not require replacing Stockfoil's in-memory graph with mutable Hexane columns. On receipt, use its validating/fallible loading APIs. Stockfoil must still check exact column cardinalities, checked sums of parent counts, dictionary bounds, reference validity, and resource budgets. A tiny RLE stream can describe an enormous number of entries: do not blindly expand it into `FragmentShape` before enforcing limits. Fully finish validation before graph mutation.
 
-The sibling Subduction lockfile already includes Hexane `1.0.0-alpha.5` through Automerge. Use that inspected API as a starting point and pin the selected release when implementing this phase. Do not assume the `latest` documentation matches a prerelease API. Explicitly fix column types, integer widths, and the integer wire codec in the Stockfoil format: the inspected Hexane release supports LEB128 and optional Bijou64 encodings, and a dependency default must not silently choose our format. Check conversions to native/Wasm index sizes and respect the chosen delta encoding's numeric domain.
+Hexane is pinned to `=1.0.0-alpha.5`. Column values and framing lengths are constrained to u32 on native and Wasm; v1 explicitly selects LEB128, not optional Bijou64 or a dependency default. A checked preflight scan rejects oversized/overflowing runs and malformed integers before Hexane's fallible validating loader expands them. This also protects against unchecked arithmetic in the inspected prerelease loader. No delta columns are accepted in v1.
 
 Stockfoil still defines the column schema, framing, and format version. Hexane supplies the column encoding primitives, not the Stockfoil protocol. Golden byte fixtures must keep dependency upgrades from accidentally changing that protocol. This change is to fragment transport encoding only, not the canonical commit-hash encoding.
 
@@ -300,11 +316,11 @@ Application fragment encoding remains free to use columns, dictionaries, runs, o
 
 ### Application format identity
 
-The envelope version and the application's payload format/version are separate concerns. Decide their representation before freezing the wire format.
+The envelope starts with `STKF`, version 1 and item kind. The separately framed application format ID is 1–128 UTF-8 bytes and must exactly match trusted local configuration. It is not an additional commit-hash domain; existing identities remain unchanged.
 
 The application configures the expected codec. An unauthenticated identifier in an incoming envelope must not select arbitrary code or silently change how the application interprets history. Reject unsupported or mismatched formats.
 
-Changing the canonical commit payload encoding changes commit identities. Changing only fragment packing need not. Document upgrade rules accordingly, and decide whether any additional format-domain binding is needed without silently changing the current hash definition.
+Changing the canonical commit payload encoding changes commit identities. Changing only fragment packing need not. A format upgrade requires deliberate codec configuration; the format ID does not cryptographically bind application semantics. Applications requiring that binding must include it in their canonical payload bytes.
 
 ## 6. Encoding, authentication, and mutation order
 
@@ -403,13 +419,14 @@ published = batch.cursor;
 const report = graph.ingest(blob);
 ```
 
-The application supplies commit and fragment payload-codec operations; the wrapper maps them into the native orchestration. Details to settle during implementation:
+The application supplies `formatId`, `encodeCommit`, `decodeCommit`, `encodeFragment`, and `decodeFragment`; both decoders receive cooperative limits. The wrapper maps these into native orchestration:
 
-- Bridging synchronous JS codec callbacks without unsafe graph re-entry or retaining Wasm borrows across callbacks.
-- Ownership and immutability of retained JS payloads; accepting arbitrary mutable objects without an ownership policy would violate the codec contract.
-- Preserving useful JS codec errors and native validation error codes.
-- Copying byte results safely rather than exposing invalidatable Wasm-memory views.
-- Passing fragment shape/batches efficiently rather than repeatedly crossing the Wasm boundary for every metadata field.
+- Callbacks are synchronous; Promise/thenable results are rejected. A JS busy guard and native nonblocking lock reject re-entry into the same graph, including reads and disposal.
+- Payloads are structured-cloned at ownership boundaries, including encoder inputs and materialization output. Shared memory and non-cloneable values are rejected; custom prototypes are not preserved.
+- Callback exceptions remain the `cause` of `StockfoilError("CodecError")`. Native validation failures retain distinct codes.
+- Byte arrays, shapes, and limits are owned copies, not invalidatable Wasm-memory views; fragment shape/batches cross as complete values.
+
+See the [JavaScript package guide](javascript/README.md) for exact declarations, ownership rules, and `setDecodeLimits` replacement semantics.
 
 Rust and JS implementations of an application codec must agree on canonical commit bytes and decode each other's fragment bodies. They need not always choose identical fragment packing.
 
@@ -417,7 +434,9 @@ Rust and JS implementations of an application codec must agree on canonical comm
 
 The `Vec` signatures are an initial in-memory sketch, not a promise of fixed-memory decoding. The current graph already retains application payloads, but a codec must not introduce unbounded intermediate allocations unnecessarily.
 
-Before accepting network input through the new API, define bounds for envelope size, counts, references, and decoded output. Give application decoders an enforceable/cooperative budget contract rather than only checking the returned vector's length after they have allocated it. Compressed-size limits alone do not bound decompressed output or work.
+`DecodeLimits` defaults to 8 MiB envelope bytes, 65,536 members, 1,000,000 parent references, 65,536 signatures, and 8 MiB total reconstructed canonical payload bytes. Core bounds framing/columns before expansion; application decoders receive the limits and must cooperate before allocating. Core checks canonical totals afterward, but cannot sandbox codec CPU or allocations.
+
+These limits govern **inbound ingestion only**, including native merge. They do not constrain trusted local commits or exports: an automatically growing certified fragment can exceed a receiver's budget after older certificates have been pruned. Blocking export at that point would strand retained history. A receiver may explicitly increase limits and retry the same bytes; no authenticated chunking or smaller fallback certificate is promised. Wire field widths and export-time canonical hash checks still apply.
 
 Possible evolutions include:
 
@@ -430,6 +449,8 @@ These should preserve the codec laws and verification-before-admission contract.
 The received pending-item queue's resource policy remains a separate concern; adding envelope limits does not solve an unbounded queue.
 
 ## 10. Implementation sequence
+
+The following phases are implemented; the list records the original work breakdown. Native/Wasm golden fixtures, browser loaders, codec failure/budget cases, and real Rust/JS WebSocket synchronization are covered by tests.
 
 ### Phase 1: settle the contracts
 
@@ -446,7 +467,7 @@ The received pending-item queue's resource policy remains a separate concern; ad
 - Compare backward-distance RLE and absolute-index delta encoding on chain and branching fixtures before fixing the parent-reference representation.
 - Validate column lengths, count sums, table indices, and resource limits before expanding untrusted metadata.
 - Reconstruct metadata and route decoded items through the existing verification/admission engine.
-- Keep low-level structured items as internal building blocks initially rather than rewriting graph verification.
+- Keep low-level structured admission/export helpers private, preserving graph verification.
 
 ### Phase 3: expose the graph API
 
@@ -457,7 +478,7 @@ The received pending-item queue's resource policy remains a separate concern; ad
 - Add byte-oriented `ingest` with unchanged admission/report semantics.
 - Preserve typed materialization and existing graph queries.
 
-This may be implemented as a codec-owning facade around a reusable internal graph to avoid unnecessarily entangling graph algorithms with serialization.
+The codec and limits live directly on the existing graph alongside nodes, payloads, pending items, and history. Codec methods may be organized in a private module, but there is no inner graph or forwarding layer.
 
 ### Phase 4: migrate the Rust example
 
@@ -477,7 +498,7 @@ This may be implemented as a codec-owning facade around a reusable internal grap
 
 - Run the tests below and inspect actual encoded-size results.
 - Update the API guides, package declarations, READMEs, and the earlier default-codec proposal.
-- Decide which low-level methods remain public and which are internal/test-only.
+- Keep structured mutation/export helpers crate-private and algorithm fixtures test-only.
 - Treat the old example wire format as experimental; do not add a compatibility layer without a concrete need.
 
 ## 11. Test and acceptance criteria

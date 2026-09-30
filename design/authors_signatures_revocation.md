@@ -65,11 +65,11 @@ Signing may require IO, but local edits should show up immediately. The flow is:
 2. Add it to the local working state and ask the application's signer to sign it.
 3. When the signature arrives and verifies, allow the commit to be published.
 
-`commit_by` chooses the graph heads as parents, so normal prepared work
-meets the local ingestion precondition. `ingest_local_commit` asserts that every
-parent is already delivered before any mutation and panics on misuse; it never
-buffers causally unready work. Delivered parents may be unsigned local drafts,
-not yet admitted. Successful local ingestion delivers the commit immediately.
+`CommitGraph::commit(author, payload)` canonically encodes the payload, chooses
+the graph heads as parents, and immediately inserts a local draft. Its private
+insertion helper requires delivered parents and never buffers causally unready
+work. Delivered parents may be unsigned local drafts, not yet admitted. The
+returned draft contains the hash, signing bytes, and admission report.
 
 Incoming changes don't alter a prepared commit's hash or parents. Signing can
 cover a batch through a later frontier signature; we don't need a round trip per
@@ -86,8 +86,8 @@ gate participation in a selected history. Our own prepared commits are the
 local exception: they are delivered as `pending_local` drafts before signing.
 `pending_local` denotes only delivered but unsigned/unadmitted local work, never
 commits waiting for missing dependencies. `CommitGraph` separately owns a queue
-of verified received items awaiting admitted dependencies, with no resource limits
-currently. Queued items own their payloads but are not delivered, admitted,
+of verified received items awaiting admitted dependencies, with no aggregate queue
+limits currently (byte ingestion has per-item decode limits). Queued items own their payloads but are not delivered, admitted,
 materialized, or exportable; they affect neither heads nor viewpoints.
 Admitted commits are exactly delivered commits not marked `pending_local`;
 they are verified and parent-closed by invariant. Delivered local drafts do not
@@ -95,10 +95,10 @@ satisfy received admission dependencies.
 
 #### Pending Signatures
 
-Signatures and changes can arrive out of order. Unverified input stays outside
-`CommitGraph`. Received items must be verified before graph ingestion, which
-queues them if dependencies are not yet admitted. These queued items are not
-delivered commits awaiting a participation check.
+Signatures and changes can arrive out of order. `CommitGraph::ingest` accepts
+encoded bytes, decodes and verifies before mutating history, and queues verified
+items if dependencies are not yet admitted. These queued items are not delivered
+commits awaiting a participation check.
 
 The local `ingest_signature` API accepts signatures for known, already delivered
 pending local commits only; it cannot ingest a signature before its local
@@ -132,19 +132,21 @@ inserting commits parents-first. Every insertion remains causally ready by
 invariant. Write-frontier proofs gate participation, not forwarding of admitted
 commits.
 
-Payload callbacks run immediately even for queued items, for members not already
-delivered. The queue owns their results, not the callback; exact queued duplicates
-reuse those payloads. All callbacks run before graph or queue mutation, so a panic
-leaves both unchanged. If a member is delivered while the item waits, including
-through local insertion, that delivered payload is preserved on later admission.
-A ready invalid fragment returns `Err(IngestError::InvalidFragment)` before
-callbacks or mutation. A queued fragment found invalid later is removed without
-delivering members and reported per item, without rolling back its successful
+Codec decoding runs before mutation, even for items that will be queued. The
+queue owns decoded payloads; exact queued duplicates reuse retained payloads,
+though each encoded input still undergoes decoding and verification. Codec
+external side effects are not rolled back. If a member is delivered while an
+item waits, that delivered payload is preserved on later admission. A ready
+invalid fragment returns an admission error carrying `IngestError::InvalidFragment`
+without graph/queue mutation. A queued fragment found invalid later is removed
+without delivering members and reported per item, without rolling back successful
 dependencies or independent admissions.
 
-Received ingestion returns `Result<IngestReport, IngestError>`, local signing
-returns `Result<IngestReport, SignatureError>`, and local insertion and merge
-return `IngestReport`. Its `admitted: Vec<ItemId>` records certificates (including
+Byte ingestion returns `Result<IngestReport, Error<C::Error>>`, local signing
+returns `Result<IngestReport, SignatureError>`, and local commits include
+`Draft::report`. Native `merge` returns `Result<IngestReport, MergeError<C::Error>>`,
+preserving earlier progress in the error's report if a later item fails.
+The report's `admitted: Vec<ItemId>` records certificates (including
 duplicates and local certificates), not newly delivered commits;
 `rejected: Vec<IngestRejection>` records deferred failures as `{ item, error }`;
 and `pending` counts queued received items, not local drafts. Inspect rejections
@@ -334,15 +336,15 @@ denied, and existing viewpoints keep their old snapshots. Use `visit_changes`
 for both initial materialization and subsequent updates; delivery and revocation
 bookkeeping belong in the same callback.
 
-In this sketch, `Operation`, `log`, `load_payload`, and `handle_rejections` are
-application-specific.
-Payload decoding and validation remain the application's responsibility.
+In this sketch, `Operation`, `OperationCodec`, `log`, and `handle_rejections` are
+application-specific. The codec owns payload decoding; Stockfoil coordinates
+canonical-byte checks, signature verification, and admission.
 
 ```rust
 use std::collections::HashMap;
 use stockfoil::{CommitGraph, MaterializationChange, MaterializationCursor, Vis, WritePermission};
 
-let mut graph = CommitGraph::<Operation>::new();
+let mut graph = CommitGraph::new(OperationCodec);
 let mut permissions = HashMap::from([
     (alice, WritePermission::Unbounded),
     (bob, WritePermission::Unbounded),
@@ -363,16 +365,16 @@ let mut apply_change = |change: MaterializationChange<'_, Operation>| {
     }
 };
 
-// Verify before graph ingestion; arrival order need not be causal.
+// Byte ingestion decodes and verifies; arrival order need not be causal.
 // The graph owns queued payloads, but materialization sees only delivery.
-for item in received_items {
-    let report = graph.ingest(item.verify()?, load_payload)?;
+for bytes in received_items {
+    let report = graph.ingest(&bytes)?;
     handle_rejections(report.rejected);
 }
 cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 
 // New history may also enable previously stored writes via frontier proofs.
-let report = graph.ingest(new_item.verify()?, load_payload)?;
+let report = graph.ingest(&new_item_bytes)?;
 handle_rejections(report.rejected);
 cursor = graph.visit_changes(&cursor, &graph.view_point(), &mut apply_change)?;
 

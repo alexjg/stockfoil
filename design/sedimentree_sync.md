@@ -28,12 +28,17 @@ subduction and we need to be able to accept that same encoding from subduction.
 
 ## Dependencies and verification
 
+`CommitGraph<C: PayloadCodec>` directly owns byte decoding, authentication,
+history, and the received queue. The verification and queue rules below are
+implemented by its private structured helpers, not a separate graph API. See the
+[wire specification](codec-wire-v1.md) for framing and payload reconstruction.
+
 Boundary discovery remains a parent walk stopping at ancestors at least as deep
 as the head. Redundant ancestor boundaries are retained. Member enumeration is
 separate: ancestry clocks subtract all boundary history, using sorted per-chain
 node positions to enumerate the remaining intervals.
 
-`UnverifiedItem::Fragment` carries `range`, member metadata, and signature
+The private `UnverifiedItem::Fragment` carries `range`, member metadata, and signature
 evidence. Verification derives the exact external parents after collecting all
 member hashes, independently of input order:
 
@@ -75,8 +80,8 @@ placement checks, already establish exact normalized membership.
 
 These checks are mandatory even when a correctly constructed source tree should
 guarantee the prerequisites. A directly received, ready fragment with incorrect
-placement returns `Err(IngestError::InvalidFragment)` before payload callbacks or
-graph/queue mutation. A queued fragment is checked when its dependencies become
+placement returns an admission error carrying `IngestError::InvalidFragment`
+before graph/queue mutation (application decoding has already run). A queued fragment is checked when its dependencies become
 admitted; invalid placement removes that item and reports a deferred rejection
 without delivering any members. Successful dependencies and independent ready
 items remain admitted, rather than being rolled back. Dependents of a rejected
@@ -84,21 +89,19 @@ item remain pending unless another certificate provides the needed commits.
 
 ## Graph-owned received queue
 
-`CommitGraph::ingest` accepts a `VerifiedItem` and a payload callback and returns
-`Result<IngestReport, IngestError>`. Missing dependencies queue the item rather
-than returning an error; `IngestError::MissingDependency` has been removed.
-Unverified input stays outside the graph. The received queue currently has no
-resource limits.
+`CommitGraph::ingest(&[u8])` returns `Result<IngestReport, Error<C::Error>>`.
+Bounded decoding reconstructs owned payloads and metadata; authentication precedes
+private structured admission. Missing dependencies queue the item rather than
+returning an error. The received queue currently has no aggregate resource
+limits; per-item `DecodeLimits` are not queue quotas.
 
-The callback runs immediately for each member not already delivered, even when
-the item must wait. The graph owns the returned payloads, never the callback.
-Exact queued duplicates reuse their payloads without invoking the callback again;
-queue identity includes member hashes and signature evidence, not just `ItemId`,
-so a malformed candidate cannot suppress a distinct valid one for the same range.
-Callbacks complete before any graph or queue mutation; a panic leaves both
-unchanged, though callback side effects are not rolled back. Existing delivered
-payloads always win, including members delivered by local insertion or another
-item after queueing.
+The graph owns decoded payloads while the item waits. Exact queued duplicates
+reuse their retained payloads, though each encoded ingestion still decodes and
+verifies its input. Queue identity includes member hashes and signature evidence,
+not just `ItemId`, so a malformed candidate cannot suppress a distinct valid one
+for the same range. Decoding completes before graph/queue mutation; codec external
+side effects are not rolled back. Existing delivered payloads always win,
+including members delivered by local insertion or another item after queueing.
 
 Queued items are not delivered, admitted, materialized, or exportable. They do
 not affect heads, viewpoints, traversal, or `visit_changes`. Delivered local
@@ -110,8 +113,9 @@ work drain automatically without callers resubmitting items.
 
 Every operation that can admit history reports both its own admissions and the
 queued work it unblocks. `ingest_signature` returns
-`Result<IngestReport, SignatureError>`; `ingest_local_commit` and `merge` return
-`IngestReport` directly. The report contains:
+`Result<IngestReport, SignatureError>`; local `commit` returns a fallible draft
+including `Draft::report`. Encoded native merges are fallible and preserve any partial report in
+`MergeError::report`. The report contains:
 
 * `admitted: Vec<ItemId>`: admitted certificates, including duplicates and local
   certificates. This is not a delivery stream; materialize with `visit_changes`.
@@ -128,7 +132,9 @@ do not transfer the sender's queued items; merge can unblock the receiver's queu
 
 ## Structural summaries and certified covers
 
-Structural summaries describe indexed canonical ranges. Their checkpoints and
+Structural summaries, their minimization, certified cover selection, and their
+carrier types are internal, not public graph APIs. Structural summaries describe
+indexed canonical ranges. Their checkpoints and
 loose-commit coverage use normalized members, never excluded boundary history.
 Minimization preserves equal-depth overlaps. A deeper range can replace a
 shallower one only when it contains the entire payload and each child boundary
@@ -143,23 +149,29 @@ pruning use this certified cover. Boundary history remains independently
 obtainable. Relays may ingest items in any arrival order; graph-owned queueing
 ensures admission and delivery occur only once dependencies are admitted.
 
-`export` and `export_changes` return owned `UnverifiedItem` records. Their fragment
-variants include `checkpoints: BTreeSet<Checkpoint>`, filled from the certified
-cover's sorted, deduplicated 12-byte prefixes. Verification ignores these hints;
-`VerifiedItem` still contains the full authenticated member metadata and IDs.
-Admission and re-export derive canonical checkpoints locally. Decoders whose
-formats omit hints can supply an empty set. Checkpoints do not change item
-identity or export-cursor behavior.
+`CommitGraph::export_changes` returns owned `EncodedItem`s with transport
+metadata, for synchronization and persistence alike. An empty cursor captures the
+full current certified inventory; there is no public single-item export. Fragment metadata includes `checkpoints: BTreeSet<Checkpoint>`,
+filled from the certified cover's sorted, deduplicated 12-byte prefixes. These are
+reconciliation hints, not signature evidence, and are not transmitted in the
+Stockfoil envelope. Admission and re-export derive them locally. Checkpoints do
+not change item identity or export-cursor behavior. Structured export helpers
+remain private implementation details.
 
 ## Binary Format
 
-Subduction expects a binary format for commits and for fragments. The idea here
-is that the CRDT knows a lot about how it could be encoded efficiently and 
-how runs of commits can be encoded efficiently. For stockfoil this means that
-we need to provide an extension point for the CRDT implementation to define
-how to encode and decode commits and commit bundles. The received queue and
-operation reports do not change any binary API or wire format; they operate on
-verified metadata and application-owned decoded payloads.
+`CommitGraph<C>` exports complete encoded items and their transport metadata.
+Its required `PayloadCodec` defines both canonical commit bytes and compressed
+fragment payloads. Stockfoil owns the [v1 envelope](codec-wire-v1.md), including
+Hexane-compressed structure, hash reconstruction, and signature evidence. Adapters
+consume metadata without decoding outgoing bytes; checkpoint prefixes are derived
+locally rather than transmitted as evidence. There is no core Subduction dependency.
+
+Inbound resource limits can reject a large certified fragment. They do not block
+export of trusted retained history after older certificates have been pruned.
+Receivers can explicitly raise limits and retry, but the format supplies no
+authenticated chunking or smaller fallback certificate. Aggregate queue budgets
+and fixed-memory streaming remain separate work.
 
 ## Sync without subduction
 

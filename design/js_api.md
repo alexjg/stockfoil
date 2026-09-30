@@ -1,345 +1,166 @@
-# JavaScript API
+# JavaScript API guide
 
-Implemented in [`javascript/`](../javascript) as a handwritten TypeScript wrapper
-over thin `wasm-bindgen` bindings, packaged with
-[wasm-bodge](https://github.com/alexjg/wasm-bodge). The
-[JavaScript register](../examples/mv-register-js) interoperates with the Rust
-example through a real Subduction WebSocket server.
+The [`stockfoil` package](../javascript) exposes one typed `CommitGraph<P>` through
+Wasm. The native graph directly owns its codec, payloads, history, and received
+queue; generated Wasm handles are private implementation details, not another
+mutable graph API. Rust and Wasm share the [v1 envelope](codec-wire-v1.md), hash
+reconstruction, signature verification, and admission rules.
 
-## Design
-
-- Graph operations are synchronous after Wasm initialization. Signing and
-  networking stay in application code.
-- Bind `CommitGraph<Vec<u8>>` initially, rather than storing arbitrary JS values
-  inside Rust. Applications own payload encoding and decoding.
-- Expose ordinary JS records for metadata, viewpoints, and transport items.
-- Keep materialization and export cursors explicit and immutable.
-- Return batches rather than invoke JS callbacks while Rust borrows the graph.
-- Keep verification inside Rust; a TypeScript type must not establish trust.
-
-This does not require moving payload storage out of the Rust graph first. The
-binding adapts the existing payload callbacks internally without exposing aligned
-metadata/payload arrays to JS callers.
-
-## Values
-
-Use validated, branded hexadecimal strings for commit hashes and author IDs.
-These have value equality and work naturally as JS map keys. An author ID encodes
-an Ed25519 public key. Payloads, signatures, and signing inputs are `Uint8Array`s.
+## Codec and ownership
 
 ```ts
-export type CommitHash = string & { readonly __brand: "CommitHash" };
-export type AuthorId = string & { readonly __brand: "AuthorId" };
+import { CommitGraph, ExportCursor, MaterializationCursor } from "stockfoil";
 
-export type WritePermission =
-  | "unbounded"
-  | "denied"
-  | { readonly through: readonly CommitHash[] };
-
-export interface ViewPoint {
-  readonly heads: readonly CommitHash[];
-  readonly writePermissions: ReadonlyMap<AuthorId, WritePermission>;
-}
-
-export interface Commit {
-  readonly hash: CommitHash;
-  readonly author: AuthorId;
-  readonly parents: readonly CommitHash[];
-  readonly payloadHash: string;
-  readonly payload: Uint8Array;
-}
-
-export interface SignatureEvidence {
-  readonly author: AuthorId;
-  readonly commit: CommitHash;
-  readonly signature: Uint8Array;
-}
-
-export type ItemId =
-  | { readonly kind: "commit"; readonly hash: CommitHash }
-  | {
-      readonly kind: "fragment";
-      readonly head: CommitHash;
-      readonly boundary: readonly CommitHash[];
-    };
-
-export type TransportItem =
-  | {
-      readonly kind: "commit";
-      readonly commit: Commit;
-      readonly signatures: readonly SignatureEvidence[];
-    }
-  | {
-      readonly kind: "fragment";
-      readonly head: CommitHash;
-      readonly boundary: readonly CommitHash[];
-      readonly commits: readonly Commit[];
-      readonly signatures: readonly SignatureEvidence[];
-      readonly checkpoints: readonly Uint8Array[];
-    };
+// registerCodec is an application PayloadCodec<Assignment> implementation.
+const graph = new CommitGraph(registerCodec);
 ```
 
-`authorId(bytes)` and `commitHash(bytes)` convert raw public-key and hash bytes to
-canonical lowercase identifiers. Validate identifiers at the binding boundary;
-branding alone is not validation. `describeCommit(author, parents, payload)`
-reconstructs derived hashes for application decoders without authenticating the
-result. Preserve parent order and multiplicity because both are part of the
-authenticated commit contents.
+A `PayloadCodec<P>` supplies:
 
-Every transport commit carries its payload alongside its metadata. There are no
-public parallel arrays or payload lookup callbacks. Input bytes are copied into
-owned storage; returned byte arrays are copies, not views into growable Wasm
-memory. Captured viewpoints do not borrow mutable application permission maps.
+- `formatId`: trusted application format/version, never selected by incoming data.
+- `encodeCommit(payload)`: deterministic canonical `Uint8Array` bytes.
+- `decodeCommit(bytes, limits)`: reconstruct a payload with identical canonical bytes.
+- `encodeFragment(shape, payloads)`: compress the complete batch together.
+- `decodeFragment(shape, bytes, limits)`: return one payload per member in order.
 
-## Graph and cursors
+Shape members are ancestors-first, with an author and ordered parent references
+(`{ kind: "member", index }` or `{ kind: "external", hash }`). Parent order and
+multiplicity are authenticated. Fragment packing must preserve each member's
+canonical encoding; it need not be identical across replicas.
 
-```ts
-export declare class CommitGraph {
-  constructor();
+Callbacks are synchronous; Promise/thenable results are rejected. Payloads are
+structured-cloned at ownership boundaries, including encoder inputs and returned
+materialization batches. Shared memory and non-cloneable values are rejected;
+custom prototypes are not preserved. Bytes, shapes, limits, and snapshots are
+owned values, not views into growable Wasm memory. Codec callbacks cannot re-enter
+the same graph, including queries or disposal (`ReentrantCall`). Callback errors
+become `StockfoilError` with code `CodecError` and the original exception as cause.
 
-  // Adds a local draft using the current working heads.
-  commit(author: AuthorId, payload: Uint8Array): {
-    hash: CommitHash;
-    signingBytes: Uint8Array;
-    report: IngestReport;
-  };
-
-  addSignature(evidence: SignatureEvidence): IngestReport;
-  ingest(item: TransportItem): IngestReport;
-
-  viewPoint(): ViewPoint;
-  signedViewPoint(): ViewPoint;
-  setWritePermissions(
-    permissions: ReadonlyMap<AuthorId, WritePermission>
-  ): void;
-
-  changes(
-    since: MaterializationCursor,
-    view?: ViewPoint
-  ): {
-    changes: readonly MaterializationChange[];
-    cursor: MaterializationCursor;
-  };
-
-  exportChanges(since: ExportCursor): {
-    added: readonly TransportItem[];
-    retired: readonly ItemId[];
-    cursor: ExportCursor;
-  };
-
-  hasCommit(hash: CommitHash): boolean;
-  isAncestor(ancestor: CommitHash, descendant: CommitHash): boolean;
-  pendingItems(): number;
-  missingDependencies(): readonly CommitHash[];
-
-  dispose(): void;
-}
-
-export declare class MaterializationCursor {
-  constructor(); // Empty.
-  clone(): MaterializationCursor;
-}
-
-export declare class ExportCursor {
-  constructor(); // Empty.
-  clone(): ExportCursor;
-}
-```
-
-`hasCommit` means admitted, not merely delivered. Received items can wait in the
-pending queue, while local unsigned drafts are already delivered working history.
-Neither is exportable until admitted. Missing dependencies are not exceptions.
-
-`ingest` checks the supplied hashes against the exact payload and metadata bytes,
-verifies signatures, and then admits or queues the item. It does not accept a
-caller-asserted "verified" flag or expose an unchecked verified-item constructor.
-
-`setWritePermissions` replaces the permission map. Missing authors are denied;
-receiving or signing history never grants permissions.
-
-The wrapper hides raw Wasm handles and provides idempotent graph disposal. Later
-graph calls throw `Disposed`. Cursors retain owned Rust snapshots through private
-handles, reclaimed by wasm-bindgen finalizers. Snapshots, cursors, and batches do
-not borrow the graph. Root/slim wrappers share cursor registries through their
-common raw constructors, so library and application imports interoperate.
-
-## Editing and signing
-
-Applications choose an encoding. Stockfoil authenticates exact bytes; it does not
-interpret or canonicalize JSON.
+## Editing, permissions, and signing
 
 ```ts
-const payload = new TextEncoder().encode(
-  JSON.stringify({ key: "title", value: "Hello" })
-);
-
 graph.setWritePermissions(new Map([[alice, "unbounded"]]));
-
-const draft = graph.commit(alice, payload);
-handleRejections(draft.report.rejected);
-update(); // Show the local draft immediately.
-
+const draft = graph.commit(alice, { key: "title", value: "Hello" });
+handleReport(draft.report);
+update(); // Local drafts are already delivered working history.
 const signature = await signer.sign(draft.signingBytes);
-const report = graph.addSignature({
-  author: alice,
-  commit: draft.hash,
-  signature,
-});
-handleRejections(report.rejected);
+handleReport(graph.addSignature({ author: alice, commit: draft.hash, signature }));
 update();
 ```
 
-Here `alice` is an `AuthorId`; `signer`, `update`, and `handleRejections` are
-application code. `signingBytes` contains the raw 32-byte commit hash, not its
-hexadecimal text. No Rust borrow is held while signing awaits. This supports
-synchronous signers, WebCrypto, and remote signing without embedding key
-management in Stockfoil.
+The codec, signer, materializer, and report handler are application code.
+`AuthorId` and `CommitHash` are validated branded hexadecimal strings;
+`authorId(bytes)` and `commitHash(bytes)` convert 32-byte values. Signing input is
+the raw 32-byte commit hash, not its hexadecimal text. `describeCommit(author,
+payload)` on the graph previews metadata using current working heads without
+inserting a draft. Signing and networking remain outside Stockfoil.
+
+Permissions are `"unbounded"`, `"denied"`, or `{ through: hashes }`.
+`setWritePermissions` replaces the map; absent authors are denied. Receiving or
+signing history never grants permission. A `ViewPoint` owns `heads` and a
+`writePermissions` map. `viewPoint()` selects delivered working history;
+`signedViewPoint()` selects admitted history.
 
 ## Materialization
 
 ```ts
-export interface MaterializationChange {
-  readonly commit: Commit;
-  readonly newlyDelivered: boolean;
-  readonly visibility: "before" | "after" | "both" | "neither";
-}
-
 let cursor = new MaterializationCursor();
-
 function update() {
   const batch = graph.changes(cursor);
-  for (const change of batch.changes) {
-    materializer.apply(change);
-  }
+  for (const change of batch.changes) materializer.apply(change);
   cursor = batch.cursor;
 }
 ```
 
-`changes` defaults to the current working viewpoint. Passing `signedViewPoint()`
-restricts participation to admitted history; passing a captured viewpoint supports
-historical reads. Delivery and participation retain their Rust semantics:
+Each change has `commit` (metadata and typed `payload`), `newlyDelivered`, and
+`visibility` (`"before"`, `"after"`, `"both"`, or `"neither"`). Store newly delivered
+commits even if denied; use visibility changes to update participation. Changes
+are ancestors-before-descendants, once per commit. Keep older operations needed
+when revocation reveals overwritten values.
 
-- Changes are ancestors-before-descendants, with each commit visited at most once.
-- Newly delivered commits are included even if they cannot currently participate.
-- A historical or signed target does not rewind the delivery frontier or hide
-  newly delivered local drafts from storage.
-- Historical materialization uses a copy of the application state and its cursor,
-  rather than moving the live materializer backwards.
+`changes(cursor, view)` accepts a signed or captured historical viewpoint. This
+does not rewind the delivery frontier or hide newly delivered drafts from
+storage. For historical reads, copy both materializer state and cursor. Cursors
+are immutable snapshots with `clone()`; keeping the input cursor allows replay,
+not rollback of application side effects. Batches return before application code
+runs, so applying them holds no graph traversal borrow.
 
-Build the batch in Rust and return before application callbacks run. This avoids
-one Wasm-to-JS callback per commit and permits application code to query the graph
-while applying the batch without retaining a traversal borrow.
-
-The input cursor does not change. If application processing throws, it can replay
-from the old cursor, but partial application-side effects are not rolled back.
-Copying the cursor alone does not copy the materialized state.
-
-## Publication
+## Encoded synchronization
 
 ```ts
-let exportCursor = new ExportCursor();
-
+let published = new ExportCursor();
 async function publish() {
-  const batch = graph.exportChanges(exportCursor);
-  for (const item of batch.added) {
-    await transport.store(item);
-  }
-  exportCursor = batch.cursor;
+  const batch = graph.exportChanges(published);
+  await transport.store(batch.added);
+  published = batch.cursor; // Only after the complete batch is stored.
 }
+
+const report = graph.ingest(receivedBytes);
+handleReport(report);
+update();
 ```
 
-Keep one export cursor per destination inventory and advance it only after the
-batch is successfully stored. A partial failure may cause duplicate publication
-on retry. Calls sharing the cursor should be serialized.
+Each `exportChanges` addition is an `EncodedItem` with opaque
+`bytes: Uint8Array` and `metadata`. Commit metadata contains `kind`, `hash`, and `parents`; fragment
+metadata contains `kind`, `head`, `boundary`, and sorted unique 12-byte
+`checkpoints`. Checkpoints are reconciliation hints derived locally, not evidence
+transmitted in the envelope. Adapters do not decode outgoing bytes.
 
-The empty cursor exports the complete current certified cover. Subsequent calls
-compare that cover with the cursor, not with delivery heads or a historical event
-log. Changes to permissions or sufficient signature evidence for an unchanged
-item identity do not require republication.
+`exportChanges(cursor)` returns `added`, `retired`, and a captured `cursor`. The
+empty cursor exports the complete certified cover. Keep one cursor per destination
+and serialize publications sharing it. Partial storage failures permit duplicate
+publication on retry. `retired` denotes superseded inventory, not invalid history
+or an instruction to delete commits. Batches survive later graph edits, pruning,
+and disposal. Neither unsigned drafts nor queued received items are exported.
+Synchronization and persistence use this same byte flow; there is no single-item
+export or structured inventory API. The `*Shape` types remain public codec context.
 
-`retired` identifies superseded inventory entries, not invalid history or commits
-to delete. A simple publisher can ignore it. Applications maintaining an exact
-inventory should publish additions before retiring superseded entries.
+`ingest(bytes)` decodes and authenticates before admitting or queueing. Missing
+dependencies are not exceptions. Queued items own payloads but are not delivered,
+visible, or exportable. Admission (including local signing) wakes waiters.
+`hasCommit(hash)` tests admission; `pendingItems()` and `missingDependencies()`
+expose received queue progress. `isAncestor(ancestor, descendant)` queries history.
+There is no public structured insertion or caller-asserted verification flag.
 
-Exported fragments also carry sorted, deduplicated 12-byte checkpoint prefixes as
-owned `Uint8Array`s. These come from Stockfoil's certified cover, excluding the
-head, boundaries, and boundary ancestry. They are reconciliation metadata, not
-additional authentication evidence. `ingest` validates their 12-byte shape but
-ignores their claimed contents, deriving canonical metadata locally. A decoder
-whose wire format omits hints can supply an empty list; omitted JS fields also
-default to empty.
+## Reports, failures, and limits
 
-Exported items own their metadata, signatures, checkpoint bytes, and payload
-bytes, so a returned batch remains usable after later graph changes or certificate
-pruning. Item order is unspecified; receivers use the pending ingestion queue.
+Local commits include an `IngestReport`; `addSignature` and `ingest` return one:
 
-## Errors
+- `admitted`: processed certificates, possibly duplicates; not a delivery stream.
+- `rejected`: deferred failures with `item: ItemId` and `error: StockfoilError`.
+- `pending`: received items still waiting, excluding local drafts.
 
-```ts
-export declare class StockfoilError extends Error {
-  readonly code: string;
-}
+Always inspect rejections: a valid dependency can expose an invalid queued
+fragment without being rolled back itself. Admission is atomic per item, not per
+batch. Materialize successful progress even when a later item fails.
 
-export interface IngestRejection {
-  readonly item: ItemId;
-  readonly error: StockfoilError;
-}
+Immediate failures throw `StockfoilError` with an `ErrorCode`, rather than requiring
+message parsing. Codes cover codec/encoding failures, wrong format, canonical-byte
+mismatch, budgets, signatures, fragment placement, invalid inputs, re-entry, and
+disposal; see [`types.ts`](../javascript/src/types.ts) for the complete union.
 
-export interface IngestReport {
-  readonly admitted: readonly ItemId[];
-  readonly rejected: readonly IngestRejection[];
-  readonly pending: number;
-}
-```
+Constructor limits and `setDecodeLimits(options)` govern inbound items only:
+8 MiB envelopes, 65,536 members, 1,000,000 parent references, 65,536 signatures,
+and 8 MiB reconstructed canonical payload bytes by default. Omitted fields on
+replacement reset to defaults. Decoders must cooperate before allocating; core
+cannot sandbox codec CPU or allocations. Local commits/exports are not constrained
+by these budgets. Explicitly raise limits and retry an oversized item if trusted;
+there is no authenticated chunking or aggregate pending-queue budget.
 
-Immediate input or validation failures throw `StockfoilError`, with stable codes
-rather than requiring message parsing. The exported `ErrorCode` union lists them:
-`InvalidInput`, `PayloadHashMismatch`, `CommitHashMismatch`, `InvalidSignature`,
-`InvalidPublicKey`, `MissingSignature`, `InvalidItem`, `InvalidFragment`,
-`NotPendingLocalCommit`, `MissingCommit`, `Disposed`, and `InternalError`.
+## Packaging and lifetime
 
-Admission is atomic per item. A valid dependency can expose an invalid queued
-fragment without itself being rejected. Those deferred failures appear in the
-report of the operation that unblocked them, including signing. `admitted` lists
-processed certificates, possibly duplicates; it is not a materialization stream.
-`pending` counts received items still waiting, not local drafts.
+Import from `"stockfoil"` for automatic environment-specific initialization.
+`"stockfoil/slim"` exposes asynchronous default `init(input)` and `initSync(module)`
+for manual initialization and library integrations. Both expose the same API and
+share cursor/error identity. Generated bindings are not public exports.
 
-Binding code should translate expected Rust errors, not use panic recovery as
-normal validation or promise rollback after arbitrary panics.
+`graph.dispose()` is idempotent except during codec callbacks. Later graph calls
+throw `Disposed`; owned snapshots/batches remain usable. Cursor handles are
+reclaimed by finalizers and do not borrow the graph.
 
-## Packaging
-
-Use wasm-bodge's [TypeScript wrapper mode](https://github.com/alexjg/wasm-bodge#typescript-wrappers):
-
-```json
-{
-  "wasm-bodge": {
-    "wrapper": {
-      "entry": "./src/index.ts",
-      "slimEntry": "./src/slim.ts",
-      "tsconfig": "./tsconfig.json",
-      "exposeBindings": false
-    }
-  }
-}
-```
-
-The wrapper imports generated Rust bindings through `#wasm-bodge/bindings`.
-Consumers normally import from `"stockfoil"`; wasm-bodge handles environment-specific
-initialization. `"stockfoil/slim"` provides the same API for manual initialization
-and library integrations. Its dedicated `slimEntry` exposes `initSync(module)` and
-an asynchronous default `init(input)`, returning no raw Wasm exports. The public
-declarations use ordinary web platform types rather than private binding aliases.
-
-Keep raw generated bindings private so their handle layout and marshaling details
-are not part of the supported JS API.
-
-## Deferred work
-
-- A public binary format and `load`/`save`: structured transport items are enough
-  for the first JS bindings.
-- Moving payload storage out of the Rust graph: the byte-oriented JS surface
-  need not wait for that refactor.
-- Networking adapters, key stores, automatic JSON codecs, and lower-level graph
-  inspection APIs are outside the library surface. The separate JS register
-  example supplies its own signer, private BCS codec, and Subduction adapter.
+See the [package guide](../javascript/README.md) for build instructions and exact
+signatures, [`CODEC.md`](../CODEC.md) for codec laws, and the
+[JS register example](../examples/mv-register-js) for matching BCS codecs,
+external signing, revocation, drafts, and real Rust/JS WebSocket synchronization.
+Whole-document persistence, networking, and key management remain application
+concerns.
