@@ -1,5 +1,6 @@
 import {
   Subduction, MemorySigner, MemoryStorage, PeerId, SedimentreeId, CommitId,
+  BlobMeta, LooseCommit, Fragment, Checkpoint, CommitInput, FragmentInput,
 } from '@automerge/subduction';
 import { ExportCursor } from 'stockfoil';
 import { bytes, encode, decode } from './wire.mjs';
@@ -27,7 +28,7 @@ export class Replica {
   static async connect(config) {
     const replica = new Replica(config);
     try {
-      // This is the published Subduction Wasm WebSocket client, not a proxy.
+      // This is the sibling checkout's Subduction Wasm WebSocket client, not a proxy.
       const peer = await bounded(replica.node.connect(new URL(config.serverUrl), replica.peer));
       if (Buffer.from(peer.toBytes()).toString('hex') !== config.peerId) throw new Error('server identity mismatch');
       return replica;
@@ -36,19 +37,23 @@ export class Replica {
   async publish(doc) {
     const batch = doc.graph.exportChanges(this.published);
     const id = hash => new CommitId(bytes(hash));
+    const commits = [], fragments = [];
     for (const item of batch.added) {
-      const blob = encode(item);
+      const blob = encode(item), meta = new BlobMeta(blob);
       if (item.kind === 'commit') {
         const parents = [...new Set(item.commit.parents)];
         if (parents.length > 255) throw new Error('too many transport parents');
-        await bounded(this.node.addCommit(this.id, id(item.commit.hash), parents.map(id), blob));
+        commits.push(new CommitInput(new LooseCommit(this.id, id(item.commit.hash), parents.map(id), meta), blob));
       } else {
-        const checkpoints = item.commits
-          .filter(c => c.hash !== item.head && c.hash.startsWith('00')).map(c => id(c.hash));
-        if (item.boundary.length > 255 || checkpoints.length > 65535) throw new Error('fragment transport limit exceeded');
-        await bounded(this.node.addFragment(this.id, id(item.head), item.boundary.map(id), checkpoints, blob));
+        const fragment = Fragment.fromCheckpointPrefixes(
+          this.id, id(item.head), item.boundary.map(id),
+          item.checkpoints.map(prefix => Checkpoint.fromBytes(prefix)), meta,
+        );
+        fragments.push(new FragmentInput(fragment, blob));
       }
     }
+    // Store once, without network I/O; sync() handles propagation separately.
+    await bounded(this.node.storeBuiltBatch(this.id, commits, fragments));
     // Retired cover entries need not be deleted. Advance only after all stores.
     this.published = batch.cursor;
     return batch.added;

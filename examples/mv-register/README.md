@@ -6,6 +6,12 @@ networking dependencies are not dependencies of the Stockfoil library.
 
 ## Run
 
+The example temporarily uses Rust path dependencies from a sibling Subduction
+checkout at `../subduction` (relative to the Stockfoil repository root). All four
+Subduction/Sedimentree crates use that checkout, including their transitive links;
+Stockfoil core still has no Subduction dependency. Keep the sibling checkout
+available even when running workspace tests.
+
 From the repository root:
 
 ```sh
@@ -52,8 +58,8 @@ for local testing, not deployment on the public Internet. Stockfoil author
 verification remains enabled regardless of the server's storage policy.
 
 See the [Subduction server documentation](https://github.com/inkandswitch/subduction/blob/main/subduction_cli/README.md)
-for installation and server configuration. The adapter pins its Subduction
-crate versions in `Cargo.toml`; this is not a stable cross-version protocol.
+for installation and server configuration. Build the CLI from the same sibling
+checkout as the clients; this is not a stable cross-version protocol.
 
 ## Code
 
@@ -61,9 +67,11 @@ crate versions in `Cargo.toml`; this is not a stable cross-version protocol.
   `visit_changes` materializer for edits, signing, ingestion, historical reads,
   and permission changes.
 - [`src/sync.rs`](src/sync.rs): uses `export_changes` and an `ExportCursor` to
-  publish new certified cover items, advancing the cursor after the batch is
-  stored in Subduction. It requests sync/subscription and loads locally stored
-  blobs into Stockfoil. Stockfoil owns pending items and
+  publish new certified cover items with `store_built_batch`, advancing the cursor
+  only after successful storage. `Fragment::from_parts` accepts Stockfoil's
+  checkpoint prefixes directly. Publication is local-only; the separate sync step
+  requests sync/subscription and loads locally stored blobs into Stockfoil.
+  Stockfoil owns pending items and
   payloads, automatically admitting them when dependencies arrive or are signed
   locally.
 - [`src/wire.rs`](src/wire.rs): **example-only** versioned BCS envelopes for
@@ -117,5 +125,5 @@ For real Rust/JavaScript interoperability, see
 starts this binary with the test-only `--interop` JSON-lines control protocol
 ([`src/sync/interop.rs`](src/sync/interop.rs)). Control messages carry configuration
 and commands; all history travels through the loopback Subduction server. The
-JavaScript replica uses Stockfoil Wasm and the published Subduction Wasm
-WebSocket client directly. The default native demo is unchanged.
+JavaScript replica uses Stockfoil Wasm and the same sibling checkout's Subduction
+Wasm WebSocket client directly. The default native demo is unchanged.

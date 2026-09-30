@@ -1,0 +1,303 @@
+# Slimming the Stockfoil synchronization examples
+
+## Motivation
+
+The Rust and JavaScript multi-value-register examples demonstrate a useful idea: implement a CRDT's payload and materializer, then use Stockfoil for authenticated history and Subduction for synchronization. Unfortunately, the amount of surrounding code makes that idea look much harder than it ought to be.
+
+The examples currently implement several reusable library responsibilities: a wire protocol, conversion to Subduction records, asynchronous task ownership, connection cleanup, and replication-progress observation. They also demonstrate advanced register features and, especially in JavaScript, act as comprehensive integration tests.
+
+The goal should be that an application author writes **their payload and materializer, plus a small publication/ingestion loop**. They should not need to implement a wire protocol or supervise Subduction's runtime tasks.
+
+This document examines three ways to get there:
+
+1. Improve the Subduction API.
+2. Improve the Stockfoil API.
+3. Remove unnecessary scope and defensive complexity from the examples.
+
+API sketches below are illustrative proposals. The local-checkout follow-up below records the existing APIs now adopted by the examples.
+
+## Follow-up: using the local Subduction checkout
+
+Both examples now temporarily use `../subduction`: Rust path dependencies for all four Subduction/Sedimentree crates, and an npm `file:` dependency on `subduction_wasm`. The JS package must be built into its `dist/` directory; linking the source package does not build Wasm. See the [JS example setup](examples/mv-register-js/README.md#run).
+
+Against the inspected checkout (`0e697e07`):
+
+| Capability | Status |
+| --- | --- |
+| Mixed store-only batches | Already implemented; now used by both examples |
+| Fragment construction from 12-byte checkpoint prefixes | Already implemented; now used by both examples, replacing member scans |
+| Managed Tokio client and async JS runtime close | Still needed |
+| Real Tokio WebSocket disconnect | Still needed; JS transport disconnect already closes its socket |
+| Central expected-peer enforcement | Still needed; retain the manual identity comparisons |
+| Incremental post-storage blob delivery | Still needed; retain snapshot loading |
+| Explicit round-scoped sync completion | Still needed; retain bounded convergence checks |
+| Raw metadata-plus-blob batch convenience | Still a potential simplification; current batches require wrapper construction |
+
+No new Subduction implementation was needed for the batch/prefix switch. Publication now stores a batch locally and leaves network propagation to the explicit sync step. Rust tests and the real Rust/JS WebSocket interoperability scenario pass with that change. Batch atomicity, cursor advancement, and retry rules remain unchanged.
+
+Subduction already sends `HeadsUpdate` acknowledgements for newly inserted pushed items. The outstanding proposal is a round-correlated completion guarantee callers can await, not inventing acknowledgements from scratch. Likewise, JS already has a named sync-result wrapper; the missing piece is richer outcome/completion semantics, not merely a class name.
+
+## Where the code goes
+
+At the original review, before adopting the local checkout, excluding the register implementations and standalone test files:
+
+| Responsibility | Rust | JavaScript |
+| --- | ---: | ---: |
+| Wire encoding/decoding | 186 lines, excluding embedded tests | 123 lines |
+| Connection and task management | 187 lines | Included in transport below |
+| Publication, ingestion, and sync orchestration | 230 lines | 74 lines |
+
+Relevant files:
+
+- [`examples/mv-register/src/wire.rs`](examples/mv-register/src/wire.rs)
+- [`examples/mv-register/src/transport.rs`](examples/mv-register/src/transport.rs)
+- [`examples/mv-register/src/sync.rs`](examples/mv-register/src/sync.rs)
+- [`examples/mv-register-js/wire.mjs`](examples/mv-register-js/wire.mjs)
+- [`examples/mv-register-js/transport.mjs`](examples/mv-register-js/transport.mjs)
+
+The JS runnable scenario is also a 146-line integration test, [`interop.mjs`](examples/mv-register-js/interop.mjs), backed by a 107-line [Rust control-protocol helper](examples/mv-register/src/sync/interop.rs). Neither is representative of the code an application needs simply to synchronize.
+
+Line counts are only a rough indication. Moving the same complexity into an unexplained example helper does not solve the problem. Moving reusable responsibilities into supported library APIs does.
+
+## 1. Improve the Subduction API
+
+The Subduction-specific proposal, with more background, is in [`../subduction/IMPROVING_API.md`](../subduction/IMPROVING_API.md).
+
+### 1.1 Provide a managed Rust client
+
+Nearly all of Rust's `transport.rs` is infrastructure:
+
+- A large concrete `Subduction<…>` type and its transport/handler aliases.
+- Construction of a signer, storage, policy, timer, spawner, nonce cache, and depth metric.
+- Starting a core listener and manager.
+- Starting three WebSocket tasks.
+- Tracking spawned work.
+- Deadlines, shutdown, task draining, cancellation, and `Drop`.
+
+Subduction should provide a high-level Tokio client/session that owns these responsibilities:
+
+```rust
+// Proposed API, not current code.
+let client = TokioClient::builder()
+    .storage(MemoryStorage::default())
+    .signer(MemorySigner::generate())
+    .connect(url, expected_peer)
+    .await?;
+
+// Publish and receive history.
+
+client.close().await?;
+```
+
+Keep the existing lower-level construction API for custom runtimes and transports. The high-level layer should supply ordinary defaults without hiding application authorization policy behind an unsafe default.
+
+The managed client should own core, transport, keepalive, and dispatch tasks; surface background failures; and provide documented shutdown behavior. Drop can initiate cancellation, while explicit async close waits for completion. The server's `stop_and_drain()` is already a useful precedent.
+
+The inspected local Tokio WebSocket client's `disconnect()` is still a no-op. This needs to become actual socket shutdown that wakes blocked I/O, rather than forcing applications to abort task handles.
+
+**Expected benefit:** most of the 187-line transport module disappears from the example.
+
+### 1.2 Enforce expected-peer identity inside connection authentication
+
+Both examples compare the authenticated peer ID with the expected peer ID themselves. Passing `Audience::known` does not currently enforce that comparison on the normal initiator success path.
+
+Subduction should enforce the expectation centrally, on every successful handshake path, and return a typed identity-mismatch error before registering the connection. Discovery should remain explicitly different from connecting to a known peer.
+
+Do not remove the example checks until this is fixed. This is a correctness improvement as well as an ergonomics improvement.
+
+### 1.3 Offer incremental access to incoming stored blobs
+
+Both adapters repeatedly call `get_blobs()` and decode the entire local collection. Stockfoil can handle duplicates, but that does not make repeated reads, decoding, and verification a good default.
+
+Provide either a cursor-based API:
+
+```text
+read_blobs_since(cursor) -> blobs + next_cursor
+```
+
+or a snapshot-plus-watch API for newly available local items. Initial catch-up and live delivery need a race-free handoff. The API should distinguish storage availability from application-level admission: Stockfoil still verifies and may queue an item whose dependencies have not arrived.
+
+Existing remote-head notifications are not sufficient. They describe a peer's advertisement and can be emitted before local ingestion completes.
+
+**Expected benefit:** a natural receive loop replaces whole-store polling and repeated decoding.
+
+### 1.4 Make synchronization completion explicit
+
+The current convergence loops poll until the register values match. Those assertions belong in tests, but applications also need a usable definition of synchronization progress.
+
+An important distinction: `sync_with_peer()` already waits for local ingestion of its response. It does not establish that the other peer has ingested the return-direction data, or that all subscription pushes have finished.
+
+Expose clearly scoped milestones, such as:
+
+- The response for this round has been stored locally.
+- The remote peer has acknowledged storing this round's advertised state.
+
+Use a named report rather than a tuple/boolean combination, and distinguish missing connections, authorization outcomes, storage failures, and return-direction transfer failures. A remote acknowledgement may require protocol work; it is not just a renamed method.
+
+Do not promise global convergence while arbitrary writers continue making edits. A completion guarantee should refer to a specific round or captured state.
+
+### 1.5 Adopt existing batching and improve its input types
+
+Batch storage existed even in the original pinned dependencies and is now used by both examples:
+
+- Rust: `store_built_batch`.
+- JavaScript: `storeBuiltBatch`.
+
+Publication is store-only, followed by explicit sync rather than add-and-sync combinators. The remaining API opportunity is accepting mixed metadata-plus-blob records without requiring callers to construct multiple wrapper objects and corresponding blob metadata.
+
+Both examples also now consume Stockfoil's canonical 12-byte checkpoint prefixes directly:
+
+- Rust uses `Fragment::from_parts`, which was already available in the previously pinned crate.
+- JavaScript uses `Checkpoint.fromBytes` and `Fragment.fromCheckpointPrefixes` from the local checkout; these were not exposed by the previously pinned JS 0.21.2 package.
+
+The fragment-member scans are removed. All four Rust dependencies now resolve to sibling source, not registry copies. The JS dependency points to the same checkout's built Wasm package; rebuild that package after upstream source changes.
+
+Batch storage is not universally transactional. Preserve the rule that the publication cursor advances only after the batch has been stored successfully; retries must tolerate partial prior writes. Retired Stockfoil cover entries are not automatically requests to delete transport history.
+
+## 2. Improve the Stockfoil API
+
+### 2.1 Provide a default versioned wire codec
+
+This is the largest cross-language opportunity.
+
+The examples' wire modules implement:
+
+- Commit and fragment envelopes.
+- Author-signature evidence.
+- Metadata reconstruction from exact payload bytes.
+- Versioning and structural validation.
+- Conversion between serialized records and graph ingestion.
+
+Those are mostly Stockfoil concerns. The application-specific part is encoding and decoding a register assignment.
+
+Provide a default codec, implemented once in Rust and exposed through Wasm, along these lines:
+
+```text
+graph.export_encoded(cursor, codec) -> encoded_items + next_cursor
+graph.ingest_encoded(bytes, codec) -> ingest_report
+```
+
+Each exported item should include its opaque blob and the metadata needed to advertise it: commit ID and parents, or fragment head, boundary, and checkpoints. Consumers should not have to parse their own outgoing blob to discover that information.
+
+This is especially straightforward for the JS graph, which already owns byte payloads. Rust's `CommitGraph<P>` cannot serialize an arbitrary `P`: it needs an explicit payload codec or a byte-oriented convenience layer. A borrowed export view exposing metadata and payloads together would also remove repeated `publishable_commit()` lookups.
+
+The codec must preserve the current trust boundaries:
+
+- Hash and authenticate exact payload bytes, not a decoded-and-reencoded approximation.
+- Preserve parent order and multiplicity in signed metadata, even if transport parents are sets.
+- Retain original-author evidence; transport authentication cannot replace it.
+- Verify input and perform graph-dependent admission checks.
+- Keep author permissions local rather than importing them from network payloads.
+- Keep parser validation and resource limits in the codec rather than deleting them to make examples shorter.
+
+This would eliminate almost all envelope code from both examples, including the handwritten JS BCS reader/writer.
+
+#### Preserve custom compression
+
+A default codec should not foreclose Stockfoil's purpose: allowing a CRDT to encode runs and bundles efficiently. Keep extension points for application-specific fragment/bundle compression. Do not require every CRDT to serialize each commit independently through a generic serialization trait.
+
+Nor does adopting a default transport codec necessarily settle the entire persistence API. Versioning, compatibility commitments, and a general binary `load`/`save` design need explicit decisions. An initially experimental, versioned codec is preferable to an accidentally permanent example format.
+
+### 2.2 Provide a thin optional Stockfoil–Subduction adapter
+
+Even with encoded exports, applications would repeatedly write the same integration:
+
+1. Convert identifiers.
+2. Distinguish loose commits from fragments.
+3. Construct Subduction records.
+4. Store a batch.
+5. Advance the export cursor.
+6. Feed received blobs into Stockfoil.
+
+Put that in an optional crate/package, rather than making networking dependencies part of Stockfoil core.
+
+The adapter should:
+
+- Own an export cursor per publication destination.
+- Serialize calls sharing that cursor.
+- Advance it only after successful local storage.
+- Retain safe retry behavior after partial failures.
+- Not turn cover retirement into indiscriminate history deletion.
+- Expose admission reports rather than silently swallowing deferred rejections.
+- Leave permissions, signing policy, and materialization under application control.
+
+Start with small publisher/receiver helpers, not a large `SyncedDocument` abstraction. The adapter should compose the two libraries, not own all application state.
+
+### 2.3 Add small conveniences selectively
+
+Secondary improvements include:
+
+- An export view containing payloads alongside metadata.
+- A convenience for checking deferred rejections in `IngestReport`.
+- An immediate-signing convenience for simple applications, while retaining external/asynchronous signing and the draft workflow.
+
+A rejection-checking convenience must not imply transactionality. A valid dependency may have been admitted even if it exposes an invalid queued item.
+
+Do not redesign materialization just to reduce this example's line count. Its retained assignments and participation tracking are necessary to support revocation correctly. A revoked write can reveal an older value that was not revisited in the latest change batch.
+
+## 3. Simplify the examples themselves
+
+### 3.1 Separate the JS demo from the interoperability test
+
+`interop.mjs` builds Rust, launches a native helper, implements a control protocol, checks wrong identities, manufactures fragments, corrupts signatures, creates fresh replicas, and manages watchdogs.
+
+That is useful integration coverage, not a minimal getting-started example.
+
+Create a separate demo that only:
+
+1. Connects two replicas to a server.
+2. Configures author permissions.
+3. Shares initial history.
+4. Makes concurrent assignments.
+5. Synchronizes and prints the result.
+
+Keep the existing interoperability scenario and native control protocol under tests. Keep server startup support clearly separate from the application sync path. Requiring an existing local server can shorten the visible example, but has a setup-cost trade-off; an optional launcher can preserve the one-command experience.
+
+### 3.2 Narrow the basic register's scope
+
+The register wrapper supports unsigned drafts, delayed publication, historical reads, forks, merges, and revocation. A basic sync demo need not present all of these at once.
+
+Possible reductions:
+
+- Sign immediately in `set` and omit the pending-signature collection.
+- Move delayed signing and historical reads to advanced examples or test fixtures.
+- Use a single register rather than a map if map behavior is not the lesson.
+
+Keep permission configuration explicit. Receiving an author's history must never implicitly authorize that author.
+
+Do not silently simplify away the materializer's revocation semantics while continuing to claim revocation support. Narrow the advertised scope or retain the correct implementation.
+
+### 3.3 Fail fast rather than recover
+
+For a short-lived demonstration, propagating errors with `?` or uncaught exceptions is generally sufficient.
+
+In particular, the Rust ingestion helper and JS `finally` block materialize valid earlier admissions even when a later item fails. A demo that immediately exits on that failure can omit this recovery path. A reusable document that continues operating cannot simply leave its materialized state stale.
+
+The Rust client's cancellation-safe detached cleanup is disproportionate for a tiny executable but appropriate for a reusable client. Move it into Subduction rather than deleting it from shared infrastructure also exercised by tests.
+
+Use a single bounded convergence helper where possible instead of layering application-level timeout wrappers around every operation. However, `Promise.race` only bounds waiting; it does not cancel the underlying operation. Real operation cancellation belongs in the transport API, and automated tests still need an outer deadline.
+
+### 3.4 Keep correctness checks, but put them at the right layer
+
+Do not remove:
+
+- Original-author signature and payload verification.
+- Expected server identity verification before upstream enforcement exists.
+- Deferred admission rejection reporting.
+- Export-cursor advancement after successful publication.
+- Parser validation and relevant size/count limits.
+- Bounded waits in automated tests.
+
+Likewise, do not replace convergence polling with a fixed sleep. It makes the example shorter by making it unreliable.
+
+Using a maintained codec dependency could remove the handwritten JS BCS machinery before a Stockfoil codec exists, but it would not remove the duplicated envelope schema and verification glue. It is a smaller interim improvement, not the final boundary.
+
+## Recommended implementation order
+
+1. **Separate the JS demo from the integration test.** Immediate readability improvement without API changes or lost coverage.
+2. **Add Stockfoil's default wire codec.** The largest reduction shared by Rust and JS.
+3. **Add Subduction's managed Rust client, expected-peer enforcement, and proper close semantics.** The largest Rust-specific reduction; identity enforcement is independently worth fixing promptly.
+4. **Extract a thin integration adapter.** Both examples now use existing batch storage and checkpoint-prefix constructors; the remaining conversion and cursor management can be shared.
+5. **Add incremental receive notifications and explicit sync-completion semantics.** Replace repeated whole-store scans and application-specific progress polling.
+
+Success means the example visibly explains the CRDT and how authenticated history flows between replicas. Robust parsing, lifecycle management, and retry invariants should still exist—but once, in the libraries responsible for them.

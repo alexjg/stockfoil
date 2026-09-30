@@ -910,8 +910,6 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73c3c782fec9d970a29c0825e4c669b2cb4d81615e11d3f2d3b5502289192c35"
 dependencies = [
  "async-lock",
  "bijoux",
@@ -1116,8 +1114,6 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37268f17f1363f48b8e18850f2cf070f83477312549c8e9cbcaee761cfaa5563"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -1138,8 +1134,6 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0418ac6e97c9670a98508095674586cf1b87873e6ebfc4eb6c32ad3c6fca9932"
 dependencies = [
  "ed25519-dalek",
  "future_form",
@@ -1153,8 +1147,6 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a48ccf16f99751a092684468eaecf923804fcf38c639ceb2c0f06a8b272c8a89"
 dependencies = [
  "async-channel",
  "async-lock",

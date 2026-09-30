@@ -8,7 +8,7 @@
     "test:interop": "node interop.mjs"
   },
   "dependencies": {
-    "@automerge/subduction": "0.21.2",
+    "@automerge/subduction": "file:../../../subduction/subduction_wasm",
     "stockfoil": "file:../../javascript"
   }
 }

@@ -1,23 +1,40 @@
 # JavaScript multi-value register ↔ Rust
 
 A small JavaScript materializer using **Stockfoil Wasm** for the authenticated
-history graph, Node's Ed25519 signer, and the published
-[`@automerge/subduction`](https://www.npmjs.com/package/@automerge/subduction)
-**Wasm WebSocket client** for transport. No native transport proxy runs for JS.
+history graph, Node's Ed25519 signer, and the sibling Subduction checkout's
+`@automerge/subduction` **Wasm WebSocket client** for transport. No native transport
+proxy runs for JS.
 
 ## Run
 
-Requires Node 22+, Rust, and the built local `stockfoil` JavaScript package:
+Requires Node 22+, Rust, and sibling checkouts of `stockfoil` and `subduction`.
+Both JavaScript packages must be built locally. From the Stockfoil root:
 
 ```sh
-# From the repository root (see javascript/ for Wasm build prerequisites):
+# See javascript/ for Stockfoil's Wasm build prerequisites.
 npm --prefix javascript install
 npm --prefix javascript run build
-cd examples/mv-register-js
-npm install
-npm test
-npm run test:interop
+
+# Build Subduction's actual package exports (dist/), not the older pkg*/ outputs.
+# Requires wasm-bodge and the Subduction checkout's Wasm build prerequisites.
+(
+  cd ../subduction
+  wasm-bodge build \
+    --crate-path "$PWD/subduction_wasm" \
+    --package-json "$PWD/subduction_wasm/package.json" \
+    --out-dir "$PWD/subduction_wasm/dist"
+)
+
+npm --prefix examples/mv-register-js ci
+npm --prefix examples/mv-register-js test
+npm --prefix examples/mv-register-js run test:interop
 ```
+
+The npm `file:` dependency links `../subduction/subduction_wasm`; it does **not**
+build Wasm automatically. Rebuild `dist/` after changing Subduction's Rust source
+and restart the Node process to load it. No reinstall is needed for changes to
+that linked build output. In Subduction's development shell, `bodge subduction_wasm`
+also builds this layout, including its optional debug variant.
 
 The interop command builds the Rust example, starts its real in-memory OpenPolicy
 Subduction server on `127.0.0.1:0`, and connects independent Rust and JS replicas.
@@ -44,8 +61,10 @@ commands and trusted author/server configuration, **not history blobs**.
   ancestry-based maximal values, external signing, and copied historical state
   **and cursor**. Write permissions come from application configuration only.
 - `transport.mjs`: Subduction publication, sync, and verified graph ingestion.
-  Its export cursor advances only after a complete batch is stored; retired
-  cover entries can remain in storage. Calls sharing this cursor are serialized.
+  It uses `storeBuiltBatch` for local-only publication and
+  `Fragment.fromCheckpointPrefixes` with Stockfoil's exported prefixes. Its export
+  cursor advances only after a complete batch is stored; retired cover entries
+  can remain in storage. Callers must serialize calls sharing this cursor.
 - `wire.mjs`: the exact private BCS version-1 envelope from
   [`../mv-register/src/wire.rs`](../mv-register/src/wire.rs), implemented without
   another codec dependency. Assignments are two length-prefixed UTF-8 strings.
@@ -54,15 +73,17 @@ commands and trusted author/server configuration, **not history blobs**.
   does not verify an item**. `CommitGraph.ingest` verifies and admits it.
 - `interop.mjs`: automated native/Wasm integration scenario.
 
-The npm transport is pinned to `@automerge/subduction` **0.21.2**, matching Rust
-`sedimentree_core` **0.14.2**, `subduction_core` **0.18.2**,
-`subduction_crypto` **0.9.2**, and `subduction_websocket` **0.12.2**.
-Its API and this private example envelope are not stable cross-version formats.
-Stockfoil now exports 12-byte checkpoint prefixes, but this pinned Subduction
-release still requires full checkpoint IDs in `addFragment`. The adapter retains
-its member scan until it can use
-[Subduction #310](https://github.com/inkandswitch/subduction/pull/310)'s prefix
-constructor and batch insertion API. The private BCS envelope remains unchanged.
+Both examples temporarily depend on the sibling Subduction checkout rather than
+registry releases, so native and Wasm clients can exercise the same unreleased
+APIs. Checkpoint-prefix construction and mixed batch storage are now used directly;
+no full checkpoint IDs are reconstructed from fragment members. The private BCS
+envelope remains unchanged and is not a stable cross-version format.
+
+These APIs remove the compatibility workaround, not all integration boilerplate.
+Managed client lifecycle, central expected-peer enforcement, incremental stored-blob
+delivery, and round-scoped sync completion remain upstream work. The adapters keep
+their manual identity checks, cleanup, and bounded convergence polling. See
+[`SLIM_THE_API.md`](../../SLIM_THE_API.md) for the current API review.
 
 This demo trusts peers to advertise correct Subduction transport metadata (as the
 native example does); Stockfoil still independently authenticates the original

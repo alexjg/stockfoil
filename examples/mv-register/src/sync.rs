@@ -5,8 +5,13 @@ use std::{
 };
 
 use eyre::{Result, ensure};
-use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
-use stockfoil::{CommitHash, CommitMeta, ExportCursor, UnverifiedItem, WritePermission};
+use sedimentree_core::{
+    blob::Blob,
+    fragment::{Fragment, checkpoint::Checkpoint},
+    id::SedimentreeId,
+    loose_commit::{LooseCommit, id::CommitId},
+};
+use stockfoil::{CommitHash, ExportCursor, UnverifiedItem, WritePermission};
 use subduction_core::timeout::call::CallTimeout;
 
 pub use crate::transport::RemoteServer;
@@ -31,35 +36,36 @@ impl Replica {
 
     async fn publish(&mut self, id: SedimentreeId, doc: &MvRegisterMap) -> Result<()> {
         let (changes, next) = doc.graph.export_changes(&self.published);
+        let (mut commits, mut fragments) = (Vec::new(), Vec::new());
         for item in changes.added {
             let blob = Blob::new(wire::encode(doc, &item)?);
             match &item {
                 UnverifiedItem::Commit { meta, .. } => {
                     let parents: BTreeSet<_> = meta.parents().iter().map(commit_id).collect();
                     ensure!(parents.len() <= 255, "too many transport parents");
-                    self.client
-                        .node
-                        .add_commit(id, commit_id(meta.hash()), parents, blob)
-                        .await?;
+                    commits.push((
+                        LooseCommit::new(id, commit_id(meta.hash()), parents, blob.meta()),
+                        blob,
+                    ));
                 }
-                UnverifiedItem::Fragment { range, commits, .. } => {
-                    // The pinned Subduction API still takes full checkpoint IDs.
-                    let checkpoints = checkpoint_ids(range.head, commits.iter());
+                UnverifiedItem::Fragment { range, checkpoints, .. } => {
                     ensure!(range.boundary.len() <= 255, "too many fragment boundaries");
                     ensure!(checkpoints.len() <= 65535, "too many fragment checkpoints");
-                    self.client
-                        .node
-                        .add_fragment(
+                    fragments.push((
+                        Fragment::from_parts(
                             id,
                             commit_id(&range.head),
                             range.boundary.iter().map(commit_id).collect(),
-                            &checkpoints,
-                            blob,
-                        )
-                        .await?;
+                            checkpoints.iter().map(|c| Checkpoint::from_bytes(c.0)).collect(),
+                            blob.meta(),
+                        ),
+                        blob,
+                    ));
                 }
             }
         }
+        // Store once, without network I/O; sync() handles propagation separately.
+        self.client.node.store_built_batch(id, commits, fragments).await?;
         // Advance only after the whole batch is stored. Superseded items can
         // remain in Subduction; retirement is not a request to delete history.
         self.published = next;
@@ -102,16 +108,6 @@ impl Replica {
 
 fn commit_id(hash: &CommitHash) -> CommitId {
     CommitId::new(*hash.as_bytes())
-}
-
-fn checkpoint_ids<'a>(
-    head: CommitHash,
-    commits: impl Iterator<Item = &'a CommitMeta>,
-) -> Vec<CommitId> {
-    commits
-        .filter(|m| *m.hash() != head && m.hash().as_bytes()[0] == 0)
-        .map(|m| commit_id(m.hash()))
-        .collect()
 }
 
 fn admit(doc: &mut MvRegisterMap, incoming: Vec<Decoded>) -> Result<usize> {

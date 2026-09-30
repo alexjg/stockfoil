@@ -21,7 +21,11 @@ fn set_loose(doc: &mut MvRegisterMap, label: &str) -> CommitHash {
 
 // Force fragment coverage rather than relying on a randomly occurring checkpoint.
 fn add_checkpoint(doc: &mut MvRegisterMap) {
-    for nonce in 0..100_000u64 {
+    add_checkpoint_at_depth(doc, 1);
+}
+
+fn add_checkpoint_at_depth(doc: &mut MvRegisterMap, depth: usize) {
+    for nonce in 0..10_000_000u64 {
         let value = nonce.to_string();
         let assignment = Assignment {
             key: "checkpoint".into(),
@@ -30,7 +34,9 @@ fn add_checkpoint(doc: &mut MvRegisterMap) {
         let meta = doc
             .graph
             .commit_by(doc.author(), &bcs::to_bytes(&assignment).unwrap());
-        if meta.hash().as_bytes()[0] == 0 {
+        if meta.hash().as_bytes()[..depth].iter().all(|byte| *byte == 0)
+            && meta.hash().as_bytes()[depth] != 0
+        {
             doc.set("checkpoint", &value);
             return;
         }
@@ -158,6 +164,47 @@ fn deferred_rejection_still_materializes_the_valid_dependency() {
     assert!(!peer.graph.has_commit(&range.head));
     assert_eq!(peer.materialized.assignments.len(), 1);
     assert_eq!(peer.get("title"), source.get("title"));
+}
+
+#[tokio::test]
+async fn batch_publication_preserves_checkpoint_prefixes_and_advances_cursor() {
+    let mut server = transport::start_server().await.unwrap();
+    let remote = RemoteServer {
+        url: format!("ws://{}", server.address()),
+        peer_id: server.peer_id(),
+    };
+    let mut replica = Replica::new(Client::connect(&remote).await.unwrap());
+    let result: Result<()> = async {
+        let id = SedimentreeId::new(rand::random());
+        let mut doc = MvRegisterMap::new();
+        add_checkpoint(&mut doc);
+        add_checkpoint_at_depth(&mut doc, 2);
+        set_loose(&mut doc, "tip");
+        let (cover, _) = doc.graph.export_changes(&ExportCursor::default());
+        let expected = cover.added.iter().find_map(|item| match item {
+            UnverifiedItem::Fragment { checkpoints, .. } => Some(checkpoints),
+            _ => None,
+        }).unwrap();
+        assert!(!expected.is_empty(), "exercise nonempty interior prefixes");
+
+        // Publish uses local batch storage; no sync call is needed to read it.
+        replica.publish(id, &doc).await?;
+        let fragments = replica.client.node.get_fragments(id).await.unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(
+            fragments[0].checkpoints(),
+            &expected.iter().map(|c| Checkpoint::from_bytes(c.0)).collect(),
+        );
+        let before = replica.client.node.get_blobs(id).await?.unwrap();
+        assert_eq!(before.len(), 2, "one fragment and one loose tip");
+        assert!(doc.graph.export_changes(&replica.published).0.added.is_empty());
+        replica.publish(id, &doc).await?;
+        assert_eq!(replica.client.node.get_blobs(id).await?.unwrap().len(), before.len());
+        Ok(())
+    }.await;
+    replica.client.close().await;
+    server.stop_and_drain().await;
+    result.unwrap();
 }
 
 #[tokio::test]

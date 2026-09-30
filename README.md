@@ -46,6 +46,9 @@ for the full contract. `diff`, `traverse`, and `traverse_since` are lower-level
 options for graph inspection and specialized consumers, not prerequisites for
 materialization.
 
+The register examples temporarily depend on a sibling Subduction checkout at
+`../subduction`. See their READMEs for local Rust/Wasm setup.
+
 Run the register demo (starts a local Subduction server automatically):
 
 ```sh
