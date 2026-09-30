@@ -5,21 +5,43 @@ use std::{
 };
 
 use crate::{
-    Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
-    FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId,
-    MaterializationChange, MaterializationCursor, SedimentreeView, Signature, SignatureError,
+    Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DecodeLimits, DiffError,
+    FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId, MaterializationChange,
+    MaterializationCursor, PayloadCodec, Signature, SignatureError,
     SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
     pending_ingest::{PendingIngest, PreparedItem},
     sedimentree::MinimalCover,
 };
 
-/// A single commit graph
+#[cfg(test)]
+use crate::{ExportError, sedimentree::SedimentreeView};
+
+/// An authenticated commit graph owning its payload codec and admission limits.
+///
+/// Transfer signed history through [`Self::export_changes`] and [`Self::ingest`].
+/// Cover selection and structural inspection remain internal:
+///
+/// ```compile_fail
+/// use stockfoil::{CommitGraph, PayloadCodec};
+/// fn inspect<C: PayloadCodec>(graph: &CommitGraph<C>) {
+///     graph.minimal_cover();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use stockfoil::{CommitGraph, ItemId, PayloadCodec};
+/// fn export_one<C: PayloadCodec>(graph: &CommitGraph<C>, id: &ItemId) {
+///     graph.export(id);
+/// }
+/// ```
 #[derive(Clone)]
-pub struct CommitGraph<P> {
+pub struct CommitGraph<C: PayloadCodec> {
+    codec: C,
+    limits: DecodeLimits,
     nodes: NodeStore,
     fragments: FragmentStore,
-    store: HashMap<NodeIdx, P>,
+    store: HashMap<NodeIdx, C::Payload>,
     by_hash: HashMap<CommitHash, NodeIdx>,
     heads: BTreeSet<CommitHash>,
     permissions: HashMap<Author, WritePermission>,
@@ -27,7 +49,7 @@ pub struct CommitGraph<P> {
     // over
     pending_local: HashSet<CommitHash>,
     // Verified received items and owned payloads, not yet delivered history.
-    pending_ingest: PendingIngest<P>,
+    pending_ingest: PendingIngest<C::Payload>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,15 +90,17 @@ impl Node {
     }
 }
 
-impl<P: Clone> Default for CommitGraph<P> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+mod codec;
 
-impl<P: Clone> CommitGraph<P> {
-    pub fn new() -> Self {
+impl<C: PayloadCodec> CommitGraph<C> {
+    pub fn new(codec: C) -> Self {
+        Self::with_limits(codec, DecodeLimits::default())
+    }
+
+    pub fn with_limits(codec: C, limits: DecodeLimits) -> Self {
         Self {
+            codec,
+            limits,
             nodes: NodeStore::default(),
             fragments: FragmentStore::default(),
             store: HashMap::new(),
@@ -88,7 +112,7 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    pub fn parents(&self, commit: &CommitHash) -> impl Iterator<Item = &'_ CommitHash> + use<'_, P> {
+    pub fn parents(&self, commit: &CommitHash) -> impl Iterator<Item = &'_ CommitHash> + use<'_, C> {
         self.by_hash.get(commit)
             .into_iter()
             .map(|idx| self.parents_by_node_idx(*idx))
@@ -96,7 +120,7 @@ impl<P: Clone> CommitGraph<P> {
             .map(|idx| self.nodes[idx].meta.hash())
     }
 
-    pub(crate) fn parents_by_node_idx(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> + use<'_, P> {
+    pub(crate) fn parents_by_node_idx(&self, node_idx: NodeIdx) -> impl Iterator<Item = NodeIdx> + use<'_, C> {
         self.nodes.parents(node_idx).iter().copied()
     }
 
@@ -166,10 +190,10 @@ impl<P: Clone> CommitGraph<P> {
     /// valid dependencies and other ready items are not rolled back.
     ///
     /// The queue currently has no resource limits.
-    pub fn ingest(
+    pub(crate) fn ingest_verified(
         &mut self,
         item: crate::VerifiedItem,
-        mut payload: impl FnMut(&CommitMeta) -> P,
+        mut payload: impl FnMut(&CommitMeta) -> C::Payload,
     ) -> Result<IngestReport, crate::IngestError> {
         let missing: Vec<_> = item
             .dependencies()
@@ -215,7 +239,7 @@ impl<P: Clone> CommitGraph<P> {
         }
     }
 
-    fn admit_prepared(&mut self, prepared: PreparedItem<P>, report: &mut IngestReport) {
+    fn admit_prepared(&mut self, prepared: PreparedItem<C::Payload>, report: &mut IngestReport) {
         // Verified members are parents-first. Another item or a local edit may
         // have delivered a member since this item's payloads were prepared.
         for (meta, data) in prepared.item.commits.iter().zip(prepared.payloads) {
@@ -279,7 +303,7 @@ impl<P: Clone> CommitGraph<P> {
 
     // Only called for a new commit once all parents are present. Received
     // members are verified and topologically sorted; local callers check first.
-    fn insert_commit(&mut self, meta: CommitMeta, data: P) {
+    fn insert_commit(&mut self, meta: CommitMeta, data: C::Payload) {
         debug_assert!(!self.by_hash.contains_key(meta.hash()));
         debug_assert!(
             meta.parents()
@@ -352,7 +376,8 @@ impl<P: Clone> CommitGraph<P> {
     }
 
     // Return a view of this commit graph as a sedimentree
-    pub fn as_sedimentree(&self) -> SedimentreeView<'_> {
+    #[cfg(test)]
+    pub(crate) fn as_sedimentree(&self) -> SedimentreeView<'_> {
         SedimentreeView {
             nodes: &self.nodes,
             fragments: &self.fragments,
@@ -364,10 +389,10 @@ impl<P: Clone> CommitGraph<P> {
     /// head, but exclude boundaries and all their ancestors. Parents within the fragment precede their children; among
     /// currently eligible commits, the smallest full commit hash is visited first.
     /// This order is independent of ingestion order and local node indices.
-    pub fn traverse_fragment<'graph>(
+    pub(crate) fn traverse_fragment<'graph>(
         &'graph self,
         range: &FragmentRange,
-        mut visit: impl FnMut(&'graph CommitMeta, &'graph P) -> ControlFlow<()>,
+        mut visit: impl FnMut(&'graph CommitMeta, &'graph C::Payload) -> ControlFlow<()>,
     ) -> Result<(), FragmentReadError> {
         let head = *self
             .by_hash
@@ -441,8 +466,8 @@ impl<P: Clone> CommitGraph<P> {
     /// Returns `None` for unknown or withheld commits. The commit need
     /// not still be loose: a previously advertised entry remains readable after
     /// a fragment covers it. Does not clone payloads or supply signature evidence.
-    /// Readability does not guarantee standalone exportability; see [`Self::export`].
-    pub fn publishable_commit(&self, hash: &CommitHash) -> Option<(&CommitMeta, &P)> {
+    /// Readability does not imply selection in the current export inventory.
+    pub(crate) fn publishable_commit(&self, hash: &CommitHash) -> Option<(&CommitMeta, &C::Payload)> {
         let idx = *self.by_hash.get(hash)?;
         (!self.pending_local.contains(hash)).then(|| (&self.nodes[idx].meta, &self.store[&idx]))
     }
@@ -452,7 +477,8 @@ impl<P: Clone> CommitGraph<P> {
     /// for author coverage. A head announcement is not a fragment certificate.
     /// Returned contents are owned; checkpoint hints come from the local cover,
     /// never from received metadata.
-    pub fn export(&self, id: &ItemId) -> Result<UnverifiedItem, ExportError> {
+    #[cfg(test)]
+    pub(crate) fn export_item(&self, id: &ItemId) -> Result<UnverifiedItem, ExportError> {
         let cover = self.minimal_cover();
         match id {
             ItemId::Commit(hash)
@@ -517,10 +543,10 @@ impl<P: Clone> CommitGraph<P> {
 
     /// Export the changes in the sedimentree encoding of this graph since
     /// `since`.
-    pub fn export_changes(
+    pub(crate) fn export_items_since(
         &self,
         since: &crate::ExportCursor,
-    ) -> (crate::ExportChanges, crate::ExportCursor) {
+    ) -> (crate::export::ExportChanges, crate::ExportCursor) {
         let cover = self.minimal_cover();
         let inventory: BTreeSet<_> = cover
             .loose_commits
@@ -545,14 +571,14 @@ impl<P: Clone> CommitGraph<P> {
             .collect();
         let retired = since.inventory.difference(&inventory).cloned().collect();
         (
-            crate::ExportChanges { added, retired },
+            crate::export::ExportChanges { added, retired },
             crate::ExportCursor { inventory },
         )
     }
 
     /// Compute a complete export cover from retained fragment certificates and
     /// signed standalone commits. Structural subfragments alone do not suffice.
-    pub fn minimal_cover(&self) -> MinimalCover {
+    pub(crate) fn minimal_cover(&self) -> MinimalCover {
         let summary = self
             .fragments
             .summary(&self.nodes, &self.publishable_nodes(), true, true);
@@ -567,38 +593,12 @@ impl<P: Clone> CommitGraph<P> {
         self.by_hash.contains_key(hash) && !self.pending_local.contains(hash)
     }
 
-    /// Merge only the other graph's admitted history, not its queue, drafts, or
-    /// permissions. Also reports queued items unblocked at this destination.
-    pub fn merge(&mut self, other: &Self) -> IngestReport {
-        let cover = other.minimal_cover();
-        let items = cover
-            .loose_commits
-            .into_iter()
-            .map(|commit| ItemId::Commit(commit.commit))
-            .chain(cover.fragments.into_iter().map(|fragment| ItemId::Fragment(fragment.range)));
-        let mut report = self.ingest_report();
-        for id in items {
-            let item = other
-                .export(&id)
-                .expect("current cover entry")
-                .verify()
-                .expect("certified cover entry");
-            let result = self
-                .ingest(item, |meta| other.store[&other.by_hash[meta.hash()]].clone())
-                .expect("certified cover entry");
-            report.admitted.extend(result.admitted);
-            report.rejected.extend(result.rejected);
-            report.pending = result.pending;
-        }
-        report
-    }
-
     /// Visit each delivered commit once, parents before children, including local drafts.
     /// Returning `ControlFlow::Break(())` stops the entire traversal.
     ///
     /// This is a raw delivery traversal. For CRDT materialization, prefer
     /// [`Self::visit_changes`] to also handle changes in participation.
-    pub fn traverse<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(&self, mut traversal: F) {
+    pub fn traverse<F: FnMut(&CommitMeta, &C::Payload) -> ControlFlow<()>>(&self, mut traversal: F) {
         // Only ready commits are inserted, so node order is already topological.
         for (idx, node) in &self.nodes {
             if traversal(&node.meta, &self.store[&idx]).is_break() {
@@ -613,7 +613,7 @@ impl<P: Clone> CommitGraph<P> {
     ///
     /// This lower-level API does not report permission changes. Prefer
     /// [`Self::visit_changes`] for incremental materialization.
-    pub fn traverse_since<F: FnMut(&CommitMeta, &P) -> ControlFlow<()>>(
+    pub fn traverse_since<F: FnMut(&CommitMeta, &C::Payload) -> ControlFlow<()>>(
         &self,
         since: &[CommitHash],
         mut traversal: F,
@@ -643,7 +643,7 @@ impl<P: Clone> CommitGraph<P> {
 
     /// Prepare an authored commit without signing or ingesting it.
     /// Sign the raw 32 bytes of its hash with Ed25519.
-    pub fn commit_by(&self, author: Author, contents: &[u8]) -> CommitMeta {
+    pub(crate) fn commit_by(&self, author: Author, contents: &[u8]) -> CommitMeta {
         CommitMeta::new(CommitContents {
             parents: self.heads().collect(),
             author,
@@ -659,7 +659,7 @@ impl<P: Clone> CommitGraph<P> {
     /// # Panics
     /// Panics before mutation if any parent is missing. Commits prepared with
     /// [`Self::commit_by`] on this graph already satisfy this precondition.
-    pub fn ingest_local_commit(&mut self, meta: CommitMeta, data: P) -> IngestReport {
+    pub(crate) fn insert_local_commit(&mut self, meta: CommitMeta, data: C::Payload) -> IngestReport {
         if self.by_hash.contains_key(meta.hash()) {
             return self.ingest_report();
         }
@@ -751,7 +751,7 @@ impl<P: Clone> CommitGraph<P> {
         &self,
         before: &ViewPoint,
         after: &ViewPoint,
-    ) -> Result<ViewPointDiff<'_, P>, DiffError> {
+    ) -> Result<ViewPointDiff<'_, C>, DiffError> {
         Ok(ViewPointDiff {
             graph: self,
             before: self.participation(before)?,
@@ -788,31 +788,32 @@ impl<P: Clone> CommitGraph<P> {
     ///
     /// ```
     /// use std::collections::{HashMap, HashSet};
-    /// use stockfoil::{CommitGraph, MaterializationCursor, Vis};
+    /// use stockfoil::{CommitGraph, PayloadCodec, MaterializationCursor, Vis};
     ///
-    /// let graph = CommitGraph::<String>::new();
-    /// let mut cursor = MaterializationCursor::new();
-    /// let mut stored = HashMap::new();
-    /// let mut participating = HashSet::new();
-    /// let after = graph.view_point();
-    /// cursor = graph.visit_changes(&cursor, &after, |change| {
-    ///     let hash = *change.meta.hash();
-    ///     if change.newly_delivered {
-    ///         stored.insert(hash, change.payload.clone());
-    ///     }
-    ///     match change.visibility {
-    ///         Vis::After => { participating.insert(hash); }
-    ///         Vis::Before => { participating.remove(&hash); }
-    ///         Vis::Both | Vis::Neither => {}
-    ///     }
-    /// })?;
-    /// # Ok::<(), stockfoil::DiffError>(())
+    /// fn materialize<C: PayloadCodec>(graph: &CommitGraph<C>) -> Result<(), stockfoil::DiffError> {
+    ///     let mut cursor = MaterializationCursor::new();
+    ///     let mut stored = HashMap::new();
+    ///     let mut participating = HashSet::new();
+    ///     let after = graph.view_point();
+    ///     cursor = graph.visit_changes(&cursor, &after, |change| {
+    ///         let hash = *change.meta.hash();
+    ///         if change.newly_delivered {
+    ///             stored.insert(hash, change.payload.clone());
+    ///         }
+    ///         match change.visibility {
+    ///             Vis::After => { participating.insert(hash); }
+    ///             Vis::Before => { participating.remove(&hash); }
+    ///             Vis::Both | Vis::Neither => {}
+    ///         }
+    ///     })?;
+    /// #     Ok(())
+    /// }
     /// ```
     pub fn visit_changes<'graph>(
         &'graph self,
         cursor: &MaterializationCursor,
         after: &ViewPoint,
-        mut visit: impl FnMut(MaterializationChange<'graph, P>),
+        mut visit: impl FnMut(MaterializationChange<'graph, C::Payload>),
     ) -> Result<MaterializationCursor, DiffError> {
         let delivered = self.history_clock(&cursor.delivery_heads)?;
         let diff = self.diff(&cursor.view_point, after)?;
@@ -1397,221 +1398,4 @@ fn sedimentree_depth(hash: &CommitHash) -> usize {
 mod ancestry_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
-
-    fn author(key: &SigningKey) -> Author {
-        Author::try_from(key.verifying_key().as_bytes().as_slice()).unwrap()
-    }
-
-    fn mined(author: Author, parents: Vec<CommitHash>, depth: usize) -> CommitMeta {
-        (0u64..)
-            .map(|nonce| {
-                CommitMeta::new(CommitContents {
-                    author,
-                    parents: parents.clone(),
-                    payload: BlobHash::of_contents(&nonce.to_le_bytes()),
-                })
-            })
-            .find(|meta| sedimentree_depth(meta.hash()) == depth)
-            .unwrap()
-    }
-
-    fn sign(graph: &mut CommitGraph<u8>, key: &SigningKey, meta: &CommitMeta) {
-        graph
-            .ingest_signature(
-                author(key),
-                *meta.hash(),
-                Signature::from(key.sign(meta.hash().as_bytes()).to_bytes()),
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn replacement_prunes_certificates_but_preserves_authentication_and_viewpoints() {
-        let key = SigningKey::from_bytes(&[1; 32]);
-        let alice = author(&key);
-        let mut graph = CommitGraph::new();
-        graph.set_write_permissions(&HashMap::from([(alice, WritePermission::Unbounded)]));
-        let root = mined(alice, vec![], 0);
-        graph.ingest_local_commit(root.clone(), 1);
-        sign(&mut graph, &key, &root);
-        let old_view = graph.signed_view_point();
-        let stale = ItemId::Commit(*root.hash());
-        assert!(graph.export(&stale).unwrap().verify().is_ok());
-
-        let head = mined(alice, vec![*root.hash()], 1);
-        graph.ingest_local_commit(head.clone(), 2);
-        sign(&mut graph, &key, &head);
-        let cover = graph.minimal_cover();
-        assert!(cover.loose_commits.is_empty());
-        assert_eq!(cover.fragments.len(), 1);
-        assert!(
-            matches!(graph.export(&stale), Err(ExportError::NotInMinimalCover(id)) if id == stale)
-        );
-        assert!(
-            graph.nodes[graph.by_hash[root.hash()]]
-                .signatures
-                .is_empty()
-        );
-        let fragment = graph.nodes[graph.by_hash[head.hash()]]
-            .canonical_fragment()
-            .unwrap();
-        assert_eq!(
-            graph.fragments[fragment].signature_boundary[&alice],
-            vec![graph.by_hash[head.hash()]]
-        );
-        assert_eq!(graph.signed_view_point().heads(), &[*head.hash()]);
-        assert!(graph.has_commit(root.hash()));
-        let mut peer = CommitGraph::new();
-        peer.merge(&graph);
-        assert_eq!(peer.minimal_cover(), cover);
-        let mut relay = CommitGraph::new();
-        relay.merge(&peer);
-        assert_eq!(relay.minimal_cover(), cover);
-
-        // Pruning export certificates must not change captured membership,
-        // including on replicas that only received the replacement fragment.
-        for graph in [&graph, &peer, &relay] {
-            let membership = graph.diff(&old_view, &old_view).unwrap();
-            assert_eq!(membership.visibility(root.hash()), Ok(crate::Vis::Both));
-            assert_eq!(membership.visibility(head.hash()), Ok(crate::Vis::Neither));
-        }
-    }
-
-    #[test]
-    fn pending_local_checkpoint_does_not_enter_the_index_before_admission() {
-        let key = SigningKey::from_bytes(&[1; 32]);
-        let alice = author(&key);
-        let mut graph = CommitGraph::new();
-        let root = mined(alice, vec![], 0);
-        graph.ingest_local_commit(root.clone(), 1);
-        sign(&mut graph, &key, &root);
-        let old_cover = graph.minimal_cover();
-        let head = mined(alice, vec![*root.hash()], 1);
-        let tip = mined(alice, vec![*head.hash()], 0);
-        // Local work is delivered parents-first, but signatures can arrive in
-        // the opposite order without publishing unsigned dependencies.
-        graph.ingest_local_commit(head.clone(), 2);
-        graph.ingest_local_commit(tip.clone(), 3);
-        sign(&mut graph, &key, &tip);
-        assert!(!graph.has_commit(head.hash()));
-        assert!(!graph.has_commit(tip.hash()));
-        assert!(
-            graph.nodes[graph.by_hash[head.hash()]]
-                .headed_fragments
-                .is_empty()
-        );
-        // Neither pending item has entered the authenticated index.
-        assert_eq!(graph.minimal_cover(), old_cover);
-        assert!(graph.export(&ItemId::Commit(*root.hash())).is_ok());
-        assert!(graph.export(&ItemId::Commit(*tip.hash())).is_err());
-        assert_eq!(graph.nodes[graph.by_hash[tip.hash()]].signatures.len(), 1);
-
-        sign(&mut graph, &key, &head);
-        assert_ne!(graph.minimal_cover(), old_cover);
-        assert!(graph.has_commit(tip.hash()));
-        assert!(graph.export(&ItemId::Commit(*root.hash())).is_err());
-        let mut peer = CommitGraph::new();
-        peer.merge(&graph);
-        assert!(peer.has_commit(tip.hash()));
-        assert_eq!(peer.minimal_cover(), graph.minimal_cover());
-    }
-
-    #[test]
-    fn pending_local_siblings_share_evidence_before_constituents_are_discarded() {
-        let alice_key = SigningKey::from_bytes(&[1; 32]);
-        let bob_key = SigningKey::from_bytes(&[2; 32]);
-        let root = mined(author(&alice_key), vec![], 0);
-        let left = mined(author(&bob_key), vec![*root.hash()], 1);
-        let right = mined(author(&bob_key), vec![*root.hash(), *root.hash()], 1);
-        let mut graph = CommitGraph::new();
-        for meta in [&root, &left, &right] {
-            graph.ingest_local_commit(meta.clone(), 1);
-        }
-        sign(&mut graph, &bob_key, &left);
-        sign(&mut graph, &bob_key, &right);
-        assert!(graph.minimal_cover().fragments.is_empty());
-        sign(&mut graph, &alice_key, &root);
-        assert_eq!(graph.minimal_cover().fragments.len(), 2);
-        assert!(graph.pending_local.is_empty());
-        assert!(
-            graph.nodes[graph.by_hash[root.hash()]]
-                .signatures
-                .contains_key(&author(&alice_key))
-        );
-        let mut peer = CommitGraph::new();
-        peer.merge(&graph);
-        assert_eq!(peer.minimal_cover(), graph.minimal_cover());
-    }
-
-    #[test]
-    fn shared_signature_survives_on_its_target_for_each_current_entry() {
-        let key = SigningKey::from_bytes(&[1; 32]);
-        let bob_key = SigningKey::from_bytes(&[2; 32]);
-        let alice = author(&key);
-        let mut graph = CommitGraph::new();
-        let root = mined(author(&bob_key), vec![], 0);
-        graph.ingest_local_commit(root.clone(), 1);
-        sign(&mut graph, &bob_key, &root);
-        let left = mined(alice, vec![*root.hash()], 1);
-        // Change the ancestry so mining cannot return the same head.
-        let middle = mined(alice, vec![*root.hash()], 0);
-        let right = mined(alice, vec![*middle.hash()], 1);
-        graph.ingest_local_commit(left.clone(), 2);
-        graph.ingest_local_commit(middle.clone(), 3);
-        graph.ingest_local_commit(right.clone(), 4);
-        sign(&mut graph, &key, &left);
-        // The second received fragment carries its own certificate, including
-        // evidence shared with the first. No historical signature insertion.
-        let incoming = UnverifiedItem::Fragment {
-            checkpoints: BTreeSet::new(),
-            range: FragmentRange {
-                head: *right.hash(),
-                boundary: BTreeSet::new(),
-            },
-            commits: vec![root.clone(), middle.clone(), right.clone()],
-            signatures: vec![
-                SignatureEvidence {
-                    author: author(&bob_key),
-                    commit: *root.hash(),
-                    signature: Signature::from(bob_key.sign(root.hash().as_bytes()).to_bytes()),
-                },
-                SignatureEvidence {
-                    author: alice,
-                    commit: *right.hash(),
-                    signature: Signature::from(key.sign(right.hash().as_bytes()).to_bytes()),
-                },
-            ],
-        }
-        .verify()
-        .unwrap();
-        graph.ingest(incoming, |_| 0).unwrap();
-        assert_eq!(graph.minimal_cover().fragments.len(), 2);
-        for fragment in graph.minimal_cover().fragments {
-            let idx = graph.nodes[graph.by_hash[&fragment.range.head]]
-                .canonical_fragment()
-                .unwrap();
-            assert!(
-                graph.fragments[idx].signature_boundary[&author(&bob_key)]
-                    .contains(&graph.by_hash[root.hash()])
-            );
-            assert!(
-                graph.nodes[graph.by_hash[root.hash()]]
-                    .signatures
-                    .contains_key(&author(&bob_key))
-            );
-            assert!(
-                graph
-                    .export(&ItemId::Fragment(fragment.range))
-                    .unwrap()
-                    .verify()
-                    .is_ok()
-            );
-        }
-        let mut peer = CommitGraph::new();
-        peer.merge(&graph);
-        assert!(peer.has_commit(root.hash()));
-    }
-}
+mod tests;

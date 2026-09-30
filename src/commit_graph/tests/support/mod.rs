@@ -1,6 +1,6 @@
-//! Signing and verified-receipt fixtures shared by the integration tests.
+//! Signing and verified-receipt fixtures shared by internal graph regressions.
 
-// Each integration test compiles its own copy and uses a different subset.
+// Some helpers are also useful to individual regression suites in isolation.
 #![allow(dead_code)]
 
 use std::{
@@ -9,8 +9,9 @@ use std::{
 };
 
 use ed25519_dalek::{Signer, SigningKey};
-use stockfoil::{
-    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, FragmentRange,
+use super::CommitGraph;
+use crate::{
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, FragmentRange,
     Signature, SignatureEvidence, UnverifiedItem,
 };
 
@@ -23,7 +24,7 @@ pub fn receive_commit<P: Clone>(graph: &mut CommitGraph<P>, meta: CommitMeta, pa
         .expect("received fixture must verify");
     let mut payload = Some(payload);
     graph
-        .ingest(item, |meta| {
+        .ingest_verified(item, |meta| {
             assert_eq!(
                 *meta.hash(),
                 hash,
@@ -38,7 +39,7 @@ pub fn receive_commit<P: Clone>(graph: &mut CommitGraph<P>, meta: CommitMeta, pa
 
 /// Build the canonical transport envelope, including checkpoint ancestors when
 /// needed. This only reads destination metadata: receipt still verifies and
-/// admits the signed envelope through the public trust boundary.
+/// admits the signed envelope through private structured admission.
 pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> UnverifiedItem {
     let depth = |hash: &CommitHash| hash.as_bytes().iter().take_while(|b| **b == 0).count();
     let head = *meta.hash();

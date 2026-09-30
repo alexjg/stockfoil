@@ -1,4 +1,5 @@
 use super::*;
+use super::tests::CommitGraph;
 
 // These fixtures exercise the ancestry index without signature or fragment
 // maintenance. They are still parent-closed local drafts, never admitted data.
@@ -50,7 +51,7 @@ fn walk(nodes: &NodeStore, head: NodeIdx) -> HashSet<NodeIdx> {
 
 #[test]
 fn repeated_diamonds_reuse_ancestral_not_just_parent_chain_tips() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = append(&mut graph, &[]);
     let mut head = root;
     let mut old = None;
@@ -88,7 +89,7 @@ fn repeated_diamonds_reuse_ancestral_not_just_parent_chain_tips() {
 
 #[test]
 fn alternating_authors_reuse_only_their_own_ancestral_chain_tips() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = append_by(&mut graph, author(1), &[]);
     let mut tip = root;
     for i in 1..65 {
@@ -116,7 +117,7 @@ fn same_author_forks_have_independent_permission_coordinates() {
 
     let alice = author(1);
     let bob = author(2);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = append_by(&mut graph, alice, &[]);
     let middle = append_by(&mut graph, bob, &[root]);
     let left = append_by(&mut graph, alice, &[middle]);
@@ -226,7 +227,7 @@ fn masks_cap_or_remove_coordinates_without_mutating_history() {
 
 #[test]
 fn cached_clocks_are_exact_downsets_not_topological_prefixes() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = append(&mut graph, &[]);
     assert_eq!(root, NodeIdx(0));
     let left = append(&mut graph, &[root]);
@@ -272,7 +273,7 @@ fn cached_clocks_are_exact_downsets_not_topological_prefixes() {
 
 #[test]
 fn long_checkpoint_free_runs_have_bounded_walks_and_shared_query_caches() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = append(&mut graph, &[]);
     let mut tip = root;
     for _ in 1..1023 {
@@ -308,7 +309,7 @@ fn long_checkpoint_free_runs_have_bounded_walks_and_shared_query_caches() {
 
 #[test]
 fn current_history_clock_handles_duplicate_and_nonmaximal_heads() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let a = append(&mut graph, &[]);
     let b = append(&mut graph, &[]);
     let a_hash = *graph.nodes[a].meta.hash();
@@ -334,7 +335,7 @@ fn current_history_clock_handles_duplicate_and_nonmaximal_heads() {
 #[ignore]
 fn benchmark_ancestry() {
     use std::{hint::black_box, time::Instant};
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let mut head = append(&mut graph, &[]);
     let mut targets = Vec::new();
     for _ in 0..3000 {

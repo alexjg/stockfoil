@@ -5,7 +5,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
-use stockfoil::{Author, CommitGraph, CommitHash, MaterializationCursor, Signature};
+use super::CommitGraph;
+use crate::{Author, CommitHash, MaterializationCursor, Signature};
 
 pub struct OrSet {
     graph: CommitGraph<Op>,
@@ -26,7 +27,7 @@ enum Op {
 impl OrSet {
     pub fn new() -> Self {
         Self {
-            graph: CommitGraph::new(),
+            graph: CommitGraph::new(Default::default()),
             adds: HashMap::new(),
             cursor: MaterializationCursor::new(),
             signing_key: SigningKey::from_bytes(&rand::random()),
@@ -60,7 +61,7 @@ impl OrSet {
             .commit_by(self.author(), &bcs::to_bytes(&op).unwrap());
         let hash = *meta.hash();
         let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
-        self.graph.ingest_local_commit(meta, op);
+        self.graph.insert_local_commit(meta, op);
         self.graph
             .ingest_signature(self.author(), hash, signature)
             .unwrap();
@@ -74,7 +75,7 @@ impl OrSet {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        self.graph.merge(&other.graph);
+        self.graph.merge_fixture(&other.graph);
         self.materialize();
     }
 

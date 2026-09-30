@@ -15,6 +15,7 @@ bijoux = "0.3.2"
 blake3 = "1.8.7"
 ed25519-dalek = "2"
 eyre = "0.6.14"
+hexane = "=1.0.0-alpha.5"
 
 [dev-dependencies]
 bcs = "0.2.1"

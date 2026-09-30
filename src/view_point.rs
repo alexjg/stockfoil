@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    Author, CommitGraph, CommitHash, QueryError, WritePermission,
+    Author, CommitGraph, CommitHash, PayloadCodec, QueryError, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime},
 };
 
@@ -44,14 +44,14 @@ impl ViewPoint {
 
 /// A comparison of commit participation, not a document patch stream.
 /// Does not require either viewpoint's history to have been admitted.
-pub struct ViewPointDiff<'graph, P: Clone> {
-    pub(crate) graph: &'graph CommitGraph<P>,
+pub struct ViewPointDiff<'graph, C: PayloadCodec> {
+    pub(crate) graph: &'graph CommitGraph<C>,
     // Permission-masked chain prefixes, not parent-closed ancestry summaries.
     pub(crate) before: AncestorClock,
     pub(crate) after: AncestorClock,
 }
 
-impl<'a, P: Clone> ViewPointDiff<'a, P> {
+impl<'a, C: PayloadCodec> ViewPointDiff<'a, C> {
     /// Classify a known commit under the source and destination viewpoints.
     pub fn visibility(&self, commit: &CommitHash) -> Result<Vis, QueryError> {
         let time = self
@@ -84,7 +84,7 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
     }
 }
 
-impl<'a, P: Clone> std::fmt::Debug for ViewPointDiff<'a, P> {
+impl<'a, C: PayloadCodec> std::fmt::Debug for ViewPointDiff<'a, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ViewPointDiff")
             .field("before", &self.before)

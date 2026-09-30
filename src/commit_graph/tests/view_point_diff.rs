@@ -1,19 +1,20 @@
 //! Graph participation and evidence contracts, independent of any CRDT.
 
-mod support;
+use super::support;
 
 use std::{collections::HashMap, ops::ControlFlow};
 use support::{author, key, sign, signature};
 
 use ed25519_dalek::SigningKey;
-use stockfoil::{
-    CommitGraph, CommitHash, DiffError, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
+use super::CommitGraph;
+use crate::{
+    CommitHash, DiffError, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
 };
 
 fn prepare(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHash {
     let meta = graph.commit_by(author(key), &[value]);
     let hash = *meta.hash();
-    graph.ingest_local_commit(meta, value);
+    graph.insert_local_commit(meta, value);
     hash
 }
 
@@ -23,7 +24,7 @@ fn append(graph: &mut CommitGraph<u8>, key: &SigningKey, value: u8) -> CommitHas
     hash
 }
 
-fn assert_changes<P: Clone>(diff: &ViewPointDiff<'_, P>, removed: &[CommitHash], added: &[CommitHash]) {
+fn assert_changes<P: Clone>(diff: &ViewPointDiff<'_, super::FixtureCodec<P>>, removed: &[CommitHash], added: &[CommitHash]) {
     let changes = diff.changed_commits().collect::<Vec<_>>();
     assert_eq!(changes.len(), removed.len() + added.len());
     let actual = changes
@@ -48,12 +49,12 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
         (alice_id, WritePermission::Unbounded),
         (bob_id, WritePermission::Unbounded),
     ]);
-    let mut alice = CommitGraph::new();
+    let mut alice = CommitGraph::new(Default::default());
     alice.set_write_permissions(&allowed);
     let original = append(&mut alice, &alice_key, 0);
-    let mut bob = CommitGraph::new();
+    let mut bob = CommitGraph::new(Default::default());
     bob.set_write_permissions(&allowed);
-    bob.merge(&alice);
+    bob.merge_fixture(&alice);
 
     let bound = append(&mut alice, &alice_key, 1);
     let alice_branch = alice.view_point();
@@ -61,9 +62,9 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
     let bob_branch = bob.view_point();
     let revoked_title = append(&mut alice, &alice_key, 3);
     let revoked_key = append(&mut alice, &alice_key, 4);
-    bob.merge(&alice);
+    bob.merge_fixture(&alice);
     let descendant = append(&mut bob, &bob_key, 5);
-    alice.merge(&bob);
+    alice.merge_fixture(&bob);
     assert!(alice.is_ancestor(&revoked_key, &descendant));
 
     let branches = alice.diff(&alice_branch, &bob_branch).unwrap();
@@ -121,7 +122,7 @@ fn revocation_diffs_are_bidirectional_and_do_not_retract_delivery() {
 #[test]
 fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     let alice = key(1);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     graph.set_write_permissions(&HashMap::from([(
         author(&alice),
         WritePermission::Unbounded,
@@ -132,7 +133,7 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     let left = append(&mut graph, &alice, 1);
     let draft = prepare(&mut graph, &alice, 2);
     let right = append(&mut fork, &alice, 3);
-    graph.merge(&fork);
+    graph.merge_fixture(&fork);
     let joined = prepare(&mut graph, &alice, 4);
     let working = graph.view_point();
     let signed = graph.signed_view_point();
@@ -146,8 +147,8 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
         &[draft, joined],
     );
 
-    let mut peer = CommitGraph::new();
-    peer.merge(&graph);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&graph);
     assert_eq!(peer.heads().collect::<Vec<_>>(), expected);
     assert_eq!(
         peer.diff(&signed, &working).unwrap_err(),
@@ -161,7 +162,7 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
     assert_eq!(graph.view_point(), working);
     sign(&mut graph, &alice, joined);
     assert_eq!(graph.signed_view_point(), working);
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     for graph in [&graph, &peer] {
         let old = graph.diff(&signed, &signed).unwrap();
         for hash in [left, right] {
@@ -182,7 +183,7 @@ fn signed_heads_preserve_admitted_branches_beneath_drafts() {
 fn pending_write_bounds_apply_only_to_working_history() {
     let alice = key(1);
     let bob = key(2);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = append(&mut graph, &alice, 0);
     let bound = prepare(&mut graph, &bob, 1);
     // Bob is denied, but his commit can bound Alice's permission in histories
@@ -199,8 +200,8 @@ fn pending_write_bounds_apply_only_to_working_history() {
     let signed = graph.signed_view_point();
     assert_eq!(signed.heads(), &[root]);
     assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
-    let mut peer = CommitGraph::new();
-    peer.merge(&graph);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&graph);
     assert_eq!(
         peer.diff(&signed, &working).unwrap_err(),
         DiffError::MissingCommit(bound)
@@ -213,7 +214,7 @@ fn pending_write_bounds_apply_only_to_working_history() {
     sign(&mut graph, &bob, bound);
     assert_eq!(graph.view_point(), working);
     assert_eq!(graph.signed_view_point(), working);
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     for graph in [&graph, &peer] {
         assert_changes(&graph.diff(&signed, &working).unwrap(), &[], &[root]);
     }
@@ -222,7 +223,7 @@ fn pending_write_bounds_apply_only_to_working_history() {
 #[test]
 fn signing_a_frontier_changes_signed_participation_not_captured_working_view_points() {
     let key = key(42);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     graph.set_write_permissions(&HashMap::from([(author(&key), WritePermission::Unbounded)]));
     let base = prepare(&mut graph, &key, 0);
     sign(&mut graph, &key, base);
@@ -259,8 +260,8 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         &[],
         &[first, tip],
     );
-    let mut peer = CommitGraph::new();
-    peer.merge(&graph);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&graph);
     assert_eq!(peer.heads().collect::<Vec<_>>(), vec![base]);
 
     sign(&mut graph, &key, tip);
@@ -278,7 +279,7 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
         &[],
     );
     assert_eq!(batch_working.heads(), graph.view_point().heads());
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     for graph in [&graph, &peer] {
         for snapshot in [&initial, &batch_signed] {
             let old = graph.diff(snapshot, snapshot).unwrap();
@@ -294,9 +295,9 @@ fn signing_a_frontier_changes_signed_participation_not_captured_working_view_poi
 
     assert_eq!(
         graph.ingest_signature(author(&key), tip, signature(&key, tip)),
-        Err(stockfoil::SignatureError::NotPendingLocalCommit(tip))
+        Err(crate::SignatureError::NotPendingLocalCommit(tip))
     );
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     assert_changes(
         &graph
             .diff(&published_signed, &graph.signed_view_point())

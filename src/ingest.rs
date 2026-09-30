@@ -15,7 +15,7 @@ use crate::{
 /// Constructing this value establishes neither validity nor author coverage.
 /// Internally the graph stores signatures on the commit they sign.
 #[derive(Debug, Clone)]
-pub struct SignatureEvidence {
+pub(crate) struct SignatureEvidence {
     pub author: Author,
     pub commit: CommitHash,
     pub signature: Signature,
@@ -56,10 +56,10 @@ pub struct IngestRejection {
 }
 
 /// Owned, decoded transport contents, convenient for in-memory exchange.
-/// This is not a wire format. Streaming/application-specific decoders can use
-/// [`Self::verify_fragment`] without first constructing a vector of commits.
+/// This is not a wire format or public decoding API. Stockfoil's wire decoder
+/// uses [`Self::verify_fragment`] to verify reconstructed member metadata.
 #[derive(Debug, Clone)]
-pub enum UnverifiedItem {
+pub(crate) enum UnverifiedItem {
     Commit {
         meta: CommitMeta,
         signatures: Vec<SignatureEvidence>,
@@ -81,6 +81,7 @@ pub enum UnverifiedItem {
 
 impl UnverifiedItem {
     /// The claimed identity, not yet checked against the supplied metadata.
+    #[cfg(test)]
     pub fn id(&self) -> ItemId {
         match self {
             Self::Commit { meta, .. } => ItemId::Commit(*meta.hash()),
@@ -89,6 +90,7 @@ impl UnverifiedItem {
     }
 
     /// All the causal dependencies of this item
+    #[cfg(test)]
     pub fn dependencies(&self) -> impl Iterator<Item = CommitHash> + '_ {
         let hashes: BTreeSet<_> = match self {
             Self::Commit { meta, .. } => meta.parents().iter().copied().collect(),
@@ -332,14 +334,9 @@ fn topological_order(
 /// A conditional authentication and closure certificate, not proof that
 /// dependencies or payloads are available. Canonical fragment placement cannot
 /// be proven statelessly; admission checks it against authenticated dependency
-/// history before mutation. There is deliberately no unchecked public constructor.
-///
-/// ```compile_fail
-/// use stockfoil::VerifiedItem;
-/// let item = VerifiedItem {};
-/// ```
+/// history before mutation. This certificate is an internal verification result.
 #[derive(Debug, Clone)]
-pub struct VerifiedItem {
+pub(crate) struct VerifiedItem {
     pub(crate) id: ItemId,
     pub(crate) commits: Vec<CommitMeta>,
     // Exact parent references leaving the supplied members. Admission follows
@@ -374,6 +371,7 @@ impl VerifiedItem {
     }
     /// Signed member targets whose per-author frontiers dominate the author's
     /// latest supplied commits. Boundaries are dependencies, never members.
+    #[cfg(test)]
     pub fn signature_boundary(&self) -> &BTreeMap<Author, BTreeSet<CommitHash>> {
         &self.signature_boundary
     }

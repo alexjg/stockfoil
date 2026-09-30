@@ -24,13 +24,13 @@ pub struct Checkpoint(pub [u8; 12]);
 /// An authenticated commit not introduced by an indexed fragment. It can have
 /// any depth; a signed checkpoint announcement does not certify its fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LooseCommit {
+pub(crate) struct LooseCommit {
     pub commit: CommitHash,
     pub parents: BTreeSet<CommitHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fragment {
+pub(crate) struct Fragment {
     pub range: FragmentRange,
     /// Nonzero-depth interior commits, excluding the head and boundaries.
     pub checkpoints: BTreeSet<Checkpoint>,
@@ -38,18 +38,18 @@ pub struct Fragment {
 
 /// A deterministic structural summary for one graph.
 ///
-/// [`SedimentreeView::summary`] includes every canonical fragment, whereas
-/// [`SedimentreeView::minimized_summary`] omits structurally contained fragments.
+/// An unminimized summary includes every canonical fragment; minimization omits
+/// structurally contained fragments.
 /// Loose commits are exactly the publishable delivered commits covered by no
 /// fragment, and are the same in both representations.
 ///
 /// Independent of write permissions and viewpoints. Uses the graph's existing
 /// publication rules, not item-local signature availability. Use
-/// [`crate::CommitGraph::minimal_cover`] for the maintained transport inventory.
+/// the internal `CommitGraph::minimal_cover` for the maintained transport inventory.
 /// Entries are sorted by full commit hash
 /// / fragment range; checkpoint identifiers are truncated only in metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SedimentreeSummary {
+pub(crate) struct SedimentreeSummary {
     pub loose_commits: Vec<LooseCommit>,
     pub fragments: Vec<Fragment>,
 }
@@ -59,19 +59,21 @@ pub struct SedimentreeSummary {
 /// Every entry is exportable while it remains in the graph's current cover.
 /// This snapshot does not retain replaced entries or their certificates.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MinimalCover {
+pub(crate) struct MinimalCover {
     pub loose_commits: Vec<LooseCommit>,
     pub fragments: Vec<Fragment>,
 }
 
 /// Borrows maintained topology metadata, never commit payloads.
 /// Creating a view computes publication eligibility without rebuilding fragments.
-pub struct SedimentreeView<'graph> {
+#[cfg(test)]
+pub(crate) struct SedimentreeView<'graph> {
     pub(crate) nodes: &'graph crate::commit_graph::NodeStore,
     pub(crate) fragments: &'graph crate::commit_graph::FragmentStore,
     pub(crate) publishable: Vec<bool>,
 }
 
+#[cfg(test)]
 impl SedimentreeView<'_> {
     /// Return an owned, non-minimal snapshot of publishable history.
     /// Includes every indexed canonical, maximum-level fragment, even if

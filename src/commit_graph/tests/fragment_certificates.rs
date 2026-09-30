@@ -1,10 +1,11 @@
 //! Decoder streams, per-author signature boundaries, and signed head announcements.
 use std::collections::BTreeSet;
 
-mod support;
+use super::support;
 
-use stockfoil::{
-    Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
+use super::CommitGraph;
+use crate::{
+    Author, BlobHash, Checkpoint, CommitContents, CommitHash, CommitMeta, ExportError,
     FragmentRange, FragmentReadError, ItemId, UnverifiedItem, VerificationError,
 };
 use support::{
@@ -64,10 +65,10 @@ fn a_decoder_reconstructs_omitted_hashes_and_parent_references_as_verification_p
         verified.commits().map(|m| *m.hash()).collect::<Vec<_>>(),
         decoded_hashes
     );
-    let mut graph = CommitGraph::new();
-    graph.ingest(verified, |meta| *meta.payload_hash()).unwrap();
+    let mut graph = CommitGraph::new(Default::default());
+    graph.ingest_verified(verified, |meta| *meta.payload_hash()).unwrap();
     graph
-        .export(&ItemId::Fragment(root_range(&head)))
+        .export_item(&ItemId::Fragment(root_range(&head)))
         .unwrap()
         .verify()
         .unwrap();
@@ -139,10 +140,10 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
         verified.signature_boundary()[&author(2)],
         BTreeSet::from([*head.hash()])
     );
-    let mut graph = CommitGraph::new();
-    graph.ingest(verified, |_| ()).unwrap();
+    let mut graph = CommitGraph::new(Default::default());
+    graph.ingest_verified(verified, |_| ()).unwrap();
     let UnverifiedItem::Fragment { signatures, .. } =
-        graph.export(&ItemId::Fragment(range.clone())).unwrap()
+        graph.export_item(&ItemId::Fragment(range.clone())).unwrap()
     else {
         panic!("expected a fragment");
     };
@@ -168,18 +169,18 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
     let boundary = meta(2, vec![*root.hash()], 1);
     let middle = meta(2, vec![*boundary.hash()], 1);
     let head = meta(3, vec![*middle.hash()], 2);
-    let mut source = CommitGraph::new();
+    let mut source = CommitGraph::new(Default::default());
     source
-        .ingest(commit_item(&root, 1).verify().unwrap(), |_| 1)
+        .ingest_verified(commit_item(&root, 1).verify().unwrap(), |_| 1)
         .unwrap();
     source
-        .ingest(commit_item(&boundary, 2).verify().unwrap(), |_| 2)
+        .ingest_verified(commit_item(&boundary, 2).verify().unwrap(), |_| 2)
         .unwrap();
     assert_eq!(source.minimal_cover().loose_commits.len(), 2);
     assert!(source.minimal_cover().fragments.is_empty());
     assert_eq!(
         source
-            .export(&ItemId::Fragment(root_range(&boundary)))
+            .export_item(&ItemId::Fragment(root_range(&boundary)))
             .unwrap_err(),
         ExportError::NotInMinimalCover(ItemId::Fragment(root_range(&boundary)))
     );
@@ -196,7 +197,7 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         boundary: BTreeSet::from([*boundary.hash()]),
     };
     source
-        .ingest(
+        .ingest_verified(
             signed_fragment(&middle_range, vec![middle.clone()], 2)
                 .verify()
                 .unwrap(),
@@ -204,15 +205,15 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         )
         .unwrap();
     assert_eq!(source.minimal_cover().fragments[0].range, middle_range);
-    let mut receiver = CommitGraph::new();
-    receiver.merge(&source);
+    let mut receiver = CommitGraph::new(Default::default());
+    receiver.merge_fixture(&source);
     assert_eq!(receiver.minimal_cover(), source.minimal_cover());
 
     // A larger certified range indexes the previously bare checkpoint as an
     // interior constituent. Its signature boundary refers to the real targets.
     let range = root_range(&head);
     source
-        .ingest(
+        .ingest_verified(
             UnverifiedItem::Fragment {
                 range: range.clone(),
                 checkpoints: BTreeSet::new(),
@@ -249,10 +250,10 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
             .map(|m| Checkpoint(m.hash().as_bytes()[..12].try_into().unwrap()))
             .into()
     );
-    assert!(source.export(&ItemId::Commit(*boundary.hash())).is_err());
+    assert!(source.export_item(&ItemId::Commit(*boundary.hash())).is_err());
 
     let announcement = source
-        .export(&ItemId::Commit(*head.hash()))
+        .export_item(&ItemId::Commit(*head.hash()))
         .unwrap()
         .verify()
         .unwrap();
@@ -261,7 +262,7 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         announcement.dependencies().copied().collect::<Vec<_>>(),
         vec![*middle.hash()]
     );
-    receiver.ingest(announcement, |_| 40).unwrap();
+    receiver.ingest_verified(announcement, |_| 40).unwrap();
     // Learning the signed head reveals its link to the previous chain, but does
     // not claim to have the larger fragment's per-author certificate yet.
     let announced = receiver.minimal_cover();
@@ -275,11 +276,11 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([*root.hash(), *boundary.hash(), *head.hash()])
     );
-    assert!(receiver.export(&ItemId::Fragment(range.clone())).is_err());
+    assert!(receiver.export_item(&ItemId::Fragment(range.clone())).is_err());
     receiver
-        .ingest(
+        .ingest_verified(
             source
-                .export(&ItemId::Fragment(range.clone()))
+                .export_item(&ItemId::Fragment(range.clone()))
                 .unwrap()
                 .verify()
                 .unwrap(),
@@ -288,11 +289,11 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
         .unwrap();
     assert_eq!(*receiver.publishable_commit(head.hash()).unwrap().1, 40);
     assert_eq!(receiver.minimal_cover(), source.minimal_cover());
-    let mut relay = CommitGraph::new();
-    relay.merge(&receiver);
+    let mut relay = CommitGraph::new(Default::default());
+    relay.merge_fixture(&receiver);
     assert_eq!(relay.minimal_cover(), source.minimal_cover());
     relay
-        .export(&ItemId::Fragment(range))
+        .export_item(&ItemId::Fragment(range))
         .unwrap()
         .verify()
         .unwrap();
@@ -401,10 +402,10 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
             "seed={SEED:#x} case={case}"
         );
 
-        let mut graph = CommitGraph::new();
-        graph.ingest(verified, |_| ()).unwrap();
+        let mut graph = CommitGraph::new(Default::default());
+        graph.ingest_verified(verified, |_| ()).unwrap();
         let relayed = graph
-            .export(&ItemId::Fragment(range))
+            .export_item(&ItemId::Fragment(range))
             .unwrap()
             .verify()
             .unwrap();

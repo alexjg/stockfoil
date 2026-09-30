@@ -1,5 +1,5 @@
 //! Delivery and participation updates through one materialization callback.
-mod support;
+use super::support;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -7,8 +7,9 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use stockfoil::{
-    BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError,
+use super::CommitGraph;
+use crate::{
+    BlobHash, CommitContents, CommitHash, CommitMeta, DiffError,
     MaterializationCursor, ViewPoint, Vis, WritePermission,
 };
 use support::{author, key, sign};
@@ -24,7 +25,7 @@ fn meta(seed: u8, value: u8, parents: &[CommitHash]) -> CommitMeta {
 fn append(graph: &mut CommitGraph<u8>, seed: u8, value: u8) -> CommitHash {
     let meta = meta(seed, value, &graph.heads().collect::<Vec<_>>());
     let hash = *meta.hash();
-    graph.ingest_local_commit(meta, value);
+    graph.insert_local_commit(meta, value);
     hash
 }
 
@@ -63,7 +64,7 @@ fn visit(
 
 #[test]
 fn initial_delivery_includes_denied_commits_and_noop_calls_advance_the_viewpoint() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1]);
     let initial = MaterializationCursor::new();
     assert_eq!(initial, MaterializationCursor::default());
@@ -98,7 +99,7 @@ fn initial_delivery_includes_denied_commits_and_noop_calls_advance_the_viewpoint
 
 #[test]
 fn permission_only_changes_do_not_redeliver_and_preserve_topological_order() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1, 2]);
     append(&mut graph, 1, 1);
     append(&mut graph, 2, 2);
@@ -126,7 +127,7 @@ fn permission_only_changes_do_not_redeliver_and_preserve_topological_order() {
 
 #[test]
 fn historical_views_do_not_rewind_delivery_or_redeliver_stored_commits() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1]);
     append(&mut graph, 1, 1);
     let old = graph.view_point();
@@ -148,7 +149,7 @@ fn historical_views_do_not_rewind_delivery_or_redeliver_stored_commits() {
 
 #[test]
 fn delivery_and_permission_changes_share_one_deduplicated_stream() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1]);
     let root = append(&mut graph, 1, 1);
     let frontier = meta(2, 2, &[root]);
@@ -158,7 +159,7 @@ fn delivery_and_permission_changes_share_one_deduplicated_stream() {
     )]));
     let (cursor, events) = visit(&graph, &MaterializationCursor::new(), &graph.view_point());
     assert_eq!(events, vec![(1, true, Vis::Neither)]);
-    graph.ingest_local_commit(frontier, 2);
+    graph.insert_local_commit(frontier, 2);
     let (cursor, events) = visit(&graph, &cursor, &graph.view_point());
     assert_eq!(
         events,
@@ -181,7 +182,7 @@ fn delivery_and_permission_changes_share_one_deduplicated_stream() {
 
 #[test]
 fn signed_and_working_views_track_delivery_independently_of_admission() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1]);
     let root = append(&mut graph, 1, 1);
     sign(&mut graph, &key(1), root);
@@ -205,7 +206,7 @@ fn signed_and_working_views_track_delivery_independently_of_admission() {
 
 #[test]
 fn missing_target_heads_fail_before_callbacks_and_leave_the_cursor_reusable() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1]);
     append(&mut graph, 1, 1);
     let before = graph.view_point();
@@ -219,7 +220,7 @@ fn missing_target_heads_fail_before_callbacks_and_leave_the_cursor_reusable() {
         );
     }
     assert!(visit(&graph, &cursor, &before).1.is_empty());
-    graph.ingest_local_commit(missing, 2);
+    graph.insert_local_commit(missing, 2);
     assert_eq!(
         visit(&graph, &cursor, &graph.view_point()).1,
         vec![(2, true, Vis::After)]
@@ -228,18 +229,18 @@ fn missing_target_heads_fail_before_callbacks_and_leave_the_cursor_reusable() {
 
 #[test]
 fn cursors_require_their_delivery_history_even_when_the_materialized_view_is_empty() {
-    let mut source = CommitGraph::new();
+    let mut source = CommitGraph::new(Default::default());
     let root = append(&mut source, 1, 1);
     let mut destination = source.clone();
     let later = meta(1, 2, &[root]);
-    source.ingest_local_commit(later.clone(), 2);
+    source.insert_local_commit(later.clone(), 2);
     let empty = ViewPoint::from_parts(vec![], HashMap::new());
     let (cursor, _) = visit(&source, &MaterializationCursor::new(), &empty);
     assert_eq!(
         destination.visit_changes(&cursor, &empty, |_| panic!("validate delivery heads too")),
         Err(DiffError::MissingCommit(*later.hash()))
     );
-    destination.ingest_local_commit(later, 2);
+    destination.insert_local_commit(later, 2);
     assert!(visit(&destination, &cursor, &empty).1.is_empty());
 }
 
@@ -248,16 +249,16 @@ fn cursors_are_portable_across_different_graph_local_chain_assignments() {
     let a = meta(1, 1, &[]);
     let b = meta(2, 2, &[]);
     let join = meta(1, 3, &[*a.hash(), *b.hash()]);
-    let mut left = CommitGraph::new();
+    let mut left = CommitGraph::new(Default::default());
     grant(&mut left, &[1, 2]);
-    left.ingest_local_commit(a.clone(), 1);
-    left.ingest_local_commit(b.clone(), 2);
+    left.insert_local_commit(a.clone(), 1);
+    left.insert_local_commit(b.clone(), 2);
     let (cursor, _) = visit(&left, &MaterializationCursor::new(), &left.view_point());
-    left.ingest_local_commit(join.clone(), 3);
-    let mut right = CommitGraph::new();
-    right.ingest_local_commit(b, 2);
-    right.ingest_local_commit(a, 1);
-    right.ingest_local_commit(join, 3);
+    left.insert_local_commit(join.clone(), 3);
+    let mut right = CommitGraph::new(Default::default());
+    right.insert_local_commit(b, 2);
+    right.insert_local_commit(a, 1);
+    right.insert_local_commit(join, 3);
     let after = left.view_point();
     let expected = visit(&left, &cursor, &after);
     assert_eq!(expected.1, vec![(3, true, Vis::After)]);
@@ -274,8 +275,8 @@ fn visits_borrow_payloads_and_panics_do_not_advance_the_input_cursor() {
             panic!("traversal must not clone payloads")
         }
     }
-    let mut graph = CommitGraph::new();
-    graph.ingest_local_commit(meta(1, 1, &[]), Payload(1));
+    let mut graph = CommitGraph::new(Default::default());
+    graph.insert_local_commit(meta(1, 1, &[]), Payload(1));
     let cursor = MaterializationCursor::new();
     let after = graph.view_point();
     assert!(
@@ -345,7 +346,7 @@ fn one_callback_can_restore_an_older_register_value_without_redelivery() {
                 .collect()
         }
     }
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[1]);
     let root = append(&mut graph, 1, 1);
     append(&mut graph, 1, 2);

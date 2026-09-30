@@ -11,9 +11,9 @@ pub struct ExportCursor {
     pub(crate) inventory: BTreeSet<ItemId>,
 }
 
-/// Changes from a previous call to [`crate::CommitGraph::export_changes`]
+/// Structured inventory changes, encoded before crossing the public API.
 #[derive(Debug)]
-pub struct ExportChanges {
+pub(crate) struct ExportChanges {
     pub added: Vec<UnverifiedItem>,
     pub retired: Vec<ItemId>,
 }

@@ -1,6 +1,8 @@
 use std::{error::Error, fmt};
 
-use crate::{Author, CommitHash, ItemId};
+use crate::{Author, CommitHash};
+#[cfg(test)]
+use crate::ItemId;
 
 /// Signature verification failed. Rejected signatures do not change the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +66,7 @@ impl Error for QueryError {}
 /// A canonical fragment could not be read. No traversal callbacks are invoked
 /// when validation fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FragmentReadError {
+pub(crate) enum FragmentReadError {
     /// The head is not present in the graph.
     MissingCommit(CommitHash),
     /// No canonical fragment is indexed here (including standalone checkpoints).
@@ -142,11 +144,13 @@ impl fmt::Display for IngestError {
 impl Error for IngestError {}
 
 /// The requested item is neither a current cover entry nor its signed head.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExportError {
+pub(crate) enum ExportError {
     NotInMinimalCover(ItemId),
 }
 
+#[cfg(test)]
 impl fmt::Display for ExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -155,4 +159,5 @@ impl fmt::Display for ExportError {
     }
 }
 
+#[cfg(test)]
 impl Error for ExportError {}

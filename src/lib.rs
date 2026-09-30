@@ -5,11 +5,12 @@
 //!
 //! # Received history
 //!
-//! [`CommitGraph::ingest`] owns verified items and their payloads immediately,
-//! queuing them when admitted dependencies are missing. Queued items are not
-//! delivered graph history. Admission, including local signing, automatically
+//! [`CommitGraph::ingest`] decodes and authenticates encoded items with the graph's
+//! payload codec, owning their payloads and queuing them when dependencies are
+//! missing. Queued items are not delivered graph history. Admission, including
+//! local signing, automatically
 //! wakes their dependents. Check [`IngestReport::rejected`] after ingestion,
-//! signing, local insertion, and merge for deferred graph-dependent failures;
+//! signing, local commits, and merge for deferred graph-dependent failures;
 //! valid dependencies are not rolled back. The queue currently has no limits.
 //!
 //! # Materialization
@@ -32,23 +33,25 @@ mod ancestor_clock;
 mod author;
 pub use author::Author;
 mod errors;
-pub use errors::{
-    DiffError, ExportError, FragmentReadError, IngestError, QueryError,
-    SignatureError, VerificationError,
-};
+pub use errors::{DiffError, IngestError, QueryError, SignatureError, VerificationError};
+pub(crate) use errors::FragmentReadError;
+#[cfg(test)]
+pub(crate) use errors::ExportError;
 mod export;
-pub use export::{ExportChanges, ExportCursor};
+pub use export::ExportCursor;
 mod ingest;
-pub use ingest::{
-    IngestRejection, IngestReport, ItemId, SignatureEvidence, UnverifiedItem, VerifiedItem,
-};
+pub use ingest::{IngestRejection, IngestReport, ItemId};
+pub(crate) use ingest::{SignatureEvidence, UnverifiedItem, VerifiedItem};
 mod pending_ingest;
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;
 pub use commit_hash::{CommitHash, InvalidCommitHash};
 mod commit_graph;
-pub use commit_graph::{CommitGraph};
+pub use commit_graph::CommitGraph;
+mod codec;
+mod wire;
+pub use codec::*;
 pub(crate) use commit_graph::NodeIdx;
 mod commit_meta;
 pub use commit_meta::{CommitContents, CommitMeta};
@@ -60,9 +63,7 @@ pub use materialization::{MaterializationChange, MaterializationCursor};
 mod signature;
 pub use signature::Signature;
 mod sedimentree;
-pub use sedimentree::{
-    Checkpoint, Fragment, FragmentRange, LooseCommit, MinimalCover, SedimentreeSummary,
-    SedimentreeView,
-};
+pub use sedimentree::{Checkpoint, FragmentRange};
+pub(crate) use sedimentree::{Fragment, LooseCommit, SedimentreeSummary};
 mod write_permission;
 pub use write_permission::WritePermission;

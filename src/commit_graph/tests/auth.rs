@@ -1,7 +1,7 @@
 //! Authentication, permission snapshots, and verified receipt boundaries.
 //! Received history is authenticated before buffering and waits for admitted
 //! dependencies; local work must arrive in causal order and can wait for authentication.
-mod support;
+use super::support;
 
 use support::{author, key, sign, signature};
 
@@ -12,8 +12,9 @@ use std::{
 };
 
 use ed25519_dalek::SigningKey;
-use stockfoil::{
-    BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, ItemId, QueryError,
+use super::CommitGraph;
+use crate::{
+    BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, ItemId, QueryError,
     Signature, SignatureError, SignatureEvidence, UnverifiedItem, VerificationError, ViewPoint,
     Vis, WritePermission,
 };
@@ -53,9 +54,9 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
     let root = commit(&alice, 1, &[]);
     let missing = commit(&alice, 2, &[]);
     let child = commit(&alice, 3, &[*root.hash(), *missing.hash()]);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[&alice]);
-    graph.ingest_local_commit(root.clone(), 1);
+    graph.insert_local_commit(root.clone(), 1);
     let before = graph.view_point();
     let signed_before = graph.signed_view_point();
 
@@ -63,7 +64,7 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
     // insertion mutates topology, payload storage, or pending-local tracking.
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
-            graph.ingest_local_commit(child.clone(), 3);
+            graph.insert_local_commit(child.clone(), 3);
         }))
         .is_err()
     );
@@ -71,7 +72,7 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
     assert_eq!(graph.signed_view_point(), signed_before);
     assert!(!graph.has_commit(child.hash()));
     assert!(graph.publishable_commit(child.hash()).is_none());
-    assert!(graph.export(&ItemId::Commit(*child.hash())).is_err());
+    assert!(graph.export_item(&ItemId::Commit(*child.hash())).is_err());
     assert!(graph.minimal_cover().loose_commits.is_empty());
     assert!(graph.minimal_cover().fragments.is_empty());
     let rejected = ViewPoint::from_parts(vec![*child.hash()], HashMap::new());
@@ -94,7 +95,7 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
     });
     assert_eq!(values, vec![1]);
 
-    graph.ingest_local_commit(missing.clone(), 2);
+    graph.insert_local_commit(missing.clone(), 2);
     sign(&mut graph, &alice, *root.hash());
     sign(&mut graph, &alice, *missing.hash());
     // Filling the gap never releases rejected local work or its signature.
@@ -110,12 +111,12 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
         ),
         Err(SignatureError::NotPendingLocalCommit(*child.hash()))
     );
-    let mut peer = CommitGraph::new();
-    peer.merge(&graph);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&graph);
     assert_eq!(peer.heads().count(), 2);
 
     // The caller must retry, and the retry supplies the payload actually kept.
-    graph.ingest_local_commit(child.clone(), 99);
+    graph.insert_local_commit(child.clone(), 99);
     assert!(!graph.has_commit(child.hash()));
     sign(&mut graph, &alice, *child.hash());
     values.clear();
@@ -124,7 +125,7 @@ fn missing_local_parents_panic_without_retaining_work_and_allow_caller_retry() {
         ControlFlow::Continue(())
     });
     assert_eq!(values, vec![1, 2, 99]);
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     assert!(peer.has_commit(child.hash()));
     assert_eq!(peer.heads().collect::<Vec<_>>(), vec![*child.hash()]);
 }
@@ -134,15 +135,15 @@ fn signatures_require_delivered_local_work_but_can_precede_parent_admission() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
     let tip = commit(&alice, 2, &[*root.hash()]);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[&alice]);
     let empty = graph.signed_view_point();
     assert_eq!(
         graph.ingest_signature(author(&alice), *tip.hash(), signature(&alice, *tip.hash())),
         Err(SignatureError::NotPendingLocalCommit(*tip.hash()))
     );
-    graph.ingest_local_commit(root.clone(), 1);
-    graph.ingest_local_commit(tip.clone(), 2);
+    graph.insert_local_commit(root.clone(), 1);
+    graph.insert_local_commit(tip.clone(), 2);
     let working = graph.view_point();
     assert_eq!(working.heads(), &[*tip.hash()]);
     sign(&mut graph, &alice, *tip.hash());
@@ -151,17 +152,17 @@ fn signatures_require_delivered_local_work_but_can_precede_parent_admission() {
     for meta in [&root, &tip] {
         assert!(!graph.has_commit(meta.hash()));
         assert!(graph.publishable_commit(meta.hash()).is_none());
-        assert!(graph.export(&ItemId::Commit(*meta.hash())).is_err());
+        assert!(graph.export_item(&ItemId::Commit(*meta.hash())).is_err());
     }
 
-    let mut peer = CommitGraph::new();
+    let mut peer = CommitGraph::new(Default::default());
     grant(&mut peer, &[&alice]);
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     assert!(peer.heads().next().is_none());
     // Signing the delivered tip cannot synthesize an unsigned root receipt.
     sign(&mut graph, &alice, *root.hash());
     assert_eq!(graph.view_point(), working);
-    peer.merge(&graph);
+    peer.merge_fixture(&graph);
     for doc in [&graph, &peer] {
         assert_eq!(doc.signed_view_point(), working);
     }
@@ -176,12 +177,12 @@ fn admission_excludes_unknown_and_pending_local_commits() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
     let child = commit(&alice, 2, &[*root.hash()]);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     assert!(!graph.has_commit(root.hash()));
 
     // Local drafts require delivered, not necessarily admitted, parents.
-    graph.ingest_local_commit(root.clone(), 1);
-    graph.ingest_local_commit(child.clone(), 2);
+    graph.insert_local_commit(root.clone(), 1);
+    graph.insert_local_commit(child.clone(), 2);
     let child_receipt = receipt(child.clone(), &alice).verify().unwrap();
     assert!(!graph.has_commit(child.hash()));
     assert_eq!(graph.heads().collect::<Vec<_>>(), vec![*child.hash()]);
@@ -191,7 +192,7 @@ fn admission_excludes_unknown_and_pending_local_commits() {
     assert!(!graph.has_commit(root.hash()));
     assert!(!graph.has_commit(child.hash()));
     let report = graph
-        .ingest(child_receipt, |_| {
+        .ingest_verified(child_receipt, |_| {
             panic!("preserve delivered local payload")
         })
         .unwrap();
@@ -211,7 +212,7 @@ fn admission_excludes_unknown_and_pending_local_commits() {
 
     // Received evidence promotes local copies without replacing their payloads.
     let report = graph
-        .ingest(receipt(root.clone(), &alice).verify().unwrap(), |_| {
+        .ingest_verified(receipt(root.clone(), &alice).verify().unwrap(), |_| {
             panic!("preserve local payload")
         })
         .unwrap();
@@ -227,7 +228,7 @@ fn admission_excludes_unknown_and_pending_local_commits() {
     assert!(graph.has_commit(child.hash()));
 
     let duplicate = graph
-        .ingest(receipt(child.clone(), &alice).verify().unwrap(), |_| {
+        .ingest_verified(receipt(child.clone(), &alice).verify().unwrap(), |_| {
             panic!("duplicate receipt must preserve its payload")
         })
         .unwrap();
@@ -236,7 +237,7 @@ fn admission_excludes_unknown_and_pending_local_commits() {
     assert_eq!(duplicate.pending, 0);
 
     // Duplicate local insertion must not demote admitted history.
-    graph.ingest_local_commit(root.clone(), 99);
+    graph.insert_local_commit(root.clone(), 99);
     assert!(graph.has_commit(root.hash()));
     let mut values = Vec::new();
     graph.traverse(|_, value| {
@@ -244,8 +245,8 @@ fn admission_excludes_unknown_and_pending_local_commits() {
         ControlFlow::Continue(())
     });
     assert_eq!(values, vec![1, 2]);
-    let mut peer = CommitGraph::new();
-    peer.merge(&graph);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&graph);
     assert!(peer.has_commit(root.hash()));
     assert!(peer.has_commit(child.hash()));
 }
@@ -257,9 +258,9 @@ fn signing_or_merging_a_local_parent_drains_received_descendants() {
     let child = commit(&alice, 2, &[*root.hash()]);
     let tip = commit(&alice, 3, &[*child.hash()]);
     for via_merge in [false, true] {
-        let mut graph = CommitGraph::new();
+        let mut graph = CommitGraph::new(Default::default());
         grant(&mut graph, &[&alice]);
-        let report = graph.ingest_local_commit(root.clone(), 1);
+        let report = graph.insert_local_commit(root.clone(), 1);
         assert!(report.admitted.is_empty());
         assert!(report.rejected.is_empty());
         assert_eq!(report.pending, 0);
@@ -267,7 +268,7 @@ fn signing_or_merging_a_local_parent_drains_received_descendants() {
         for (meta, value, pending) in [(&tip, 3, 1), (&child, 2, 2)] {
             let mut callbacks = 0;
             let report = graph
-                .ingest(receipt(meta.clone(), &alice).verify().unwrap(), |_| {
+                .ingest_verified(receipt(meta.clone(), &alice).verify().unwrap(), |_| {
                     callbacks += 1;
                     value
                 })
@@ -287,11 +288,11 @@ fn signing_or_merging_a_local_parent_drains_received_descendants() {
             BTreeSet::from([*root.hash(), *child.hash()])
         );
         let report = if via_merge {
-            let mut source = CommitGraph::new();
+            let mut source = CommitGraph::new(Default::default());
             source
-                .ingest(receipt(root.clone(), &alice).verify().unwrap(), |_| 99)
+                .ingest_verified(receipt(root.clone(), &alice).verify().unwrap(), |_| 99)
                 .unwrap();
-            graph.merge(&source)
+            graph.merge_fixture(&source)
         } else {
             graph
                 .ingest_signature(
@@ -328,7 +329,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
     let c = commit(&alice, 1, &[]);
     let missing = commit(&bob, 2, &[]);
     let frontier = commit(&bob, 3, &[*c.hash(), *missing.hash()]);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     graph.set_write_permissions(&HashMap::from([(
         author(&alice),
         WritePermission::Bounded(vec![*frontier.hash()]),
@@ -345,7 +346,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
     let pending = receipt(frontier.clone(), &bob).verify().unwrap();
     let mut callbacks = 0;
     let report = graph
-        .ingest(pending, |_| {
+        .ingest_verified(pending, |_| {
             callbacks += 1;
             3
         })
@@ -368,7 +369,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
     );
     assert!(!graph.has_commit(frontier.hash()));
     assert!(graph.publishable_commit(frontier.hash()).is_none());
-    assert!(graph.export(&ItemId::Commit(*frontier.hash())).is_err());
+    assert!(graph.export_item(&ItemId::Commit(*frontier.hash())).is_err());
     let mut delivered = Vec::new();
     graph.traverse(|meta, _| {
         delivered.push(*meta.hash());
@@ -395,7 +396,7 @@ fn a_write_frontier_supplies_no_proof_until_fully_delivered() {
     let changes = diff.changed_commits().collect::<Vec<_>>();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].commit_id, *c.hash());
-    assert_eq!(changes[0].visibility_delta, stockfoil::VisDiff::After);
+    assert_eq!(changes[0].visibility_delta, crate::VisDiff::After);
     let mut newly_delivered = Vec::new();
     graph.traverse_since(before.heads(), |_, value| {
         newly_delivered.push(*value);
@@ -409,20 +410,20 @@ fn historical_views_use_delivered_history_independently_of_admission() {
     let alice = key(1);
     let root = commit(&alice, 1, &[]);
     let tip = commit(&alice, 2, &[*root.hash()]);
-    let mut source = CommitGraph::new();
+    let mut source = CommitGraph::new(Default::default());
     grant(&mut source, &[&alice]);
-    source.ingest_local_commit(root.clone(), 1);
+    source.insert_local_commit(root.clone(), 1);
     sign(&mut source, &alice, *root.hash());
     let captured = source.signed_view_point();
     let old = ViewPoint::from_parts(
         captured.heads().to_vec(),
         captured.write_permissions().clone(),
     );
-    source.ingest_local_commit(tip.clone(), 2);
+    source.insert_local_commit(tip.clone(), 2);
     sign(&mut source, &alice, *tip.hash());
 
     // A fresh process cannot compare a snapshot whose head is missing.
-    let mut peer = CommitGraph::new();
+    let mut peer = CommitGraph::new(Default::default());
     assert!(matches!(
         peer.diff(&old, &old),
         Err(DiffError::MissingCommit(_))
@@ -431,8 +432,8 @@ fn historical_views_use_delivered_history_independently_of_admission() {
     // Neither node is a fragment checkpoint, so there is no batch envelope.
     assert_ne!(root.hash().as_bytes()[0], 0);
     assert_ne!(tip.hash().as_bytes()[0], 0);
-    peer.ingest_local_commit(root.clone(), 1);
-    peer.ingest_local_commit(tip.clone(), 2);
+    peer.insert_local_commit(root.clone(), 1);
+    peer.insert_local_commit(tip.clone(), 2);
     sign(&mut peer, &alice, *tip.hash());
     let membership = peer.diff(&old, &old).unwrap();
     assert_eq!(membership.visibility(root.hash()), Ok(Vis::Both));
@@ -441,14 +442,14 @@ fn historical_views_use_delivered_history_independently_of_admission() {
     assert!(peer.minimal_cover().loose_commits.is_empty());
     sign(&mut peer, &alice, *root.hash());
     assert!(peer.publishable_commit(root.hash()).is_some());
-    assert!(peer.export(&ItemId::Commit(*root.hash())).is_ok());
-    assert!(peer.export(&ItemId::Commit(*tip.hash())).is_ok());
+    assert!(peer.export_item(&ItemId::Commit(*root.hash())).is_ok());
+    assert!(peer.export_item(&ItemId::Commit(*tip.hash())).is_ok());
     let inventory = peer.minimal_cover();
     assert!(inventory.fragments.is_empty());
     assert_eq!(inventory.loose_commits.len(), 2);
     assert_eq!(peer.as_sedimentree().summary().loose_commits.len(), 2);
     // A directly signed root remains exportable after a newer signature arrives.
-    assert!(source.export(&ItemId::Commit(*root.hash())).is_ok());
+    assert!(source.export_item(&ItemId::Commit(*root.hash())).is_ok());
     assert_eq!(
         peer.diff(&old, &old)
             .unwrap()
@@ -456,8 +457,8 @@ fn historical_views_use_delivered_history_independently_of_admission() {
             .unwrap(),
         Vis::Both
     );
-    let mut forwarded = CommitGraph::new();
-    forwarded.merge(&peer);
+    let mut forwarded = CommitGraph::new(Default::default());
+    forwarded.merge_fixture(&peer);
     for graph in [&peer, &forwarded] {
         let membership = graph.diff(&old, &old).unwrap();
         assert_eq!(membership.visibility(root.hash()), Ok(Vis::Both));
@@ -486,11 +487,11 @@ fn invalid_or_other_authors_signatures_cannot_authenticate_local_work() {
     let bob = key(2);
     let root = commit(&alice, 1, &[]);
     let child = commit(&bob, 2, &[*root.hash()]);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[&alice, &bob]);
     // Independently authored local work can exist while its signature is pending.
-    graph.ingest_local_commit(root.clone(), 1);
-    graph.ingest_local_commit(child.clone(), 2);
+    graph.insert_local_commit(root.clone(), 1);
+    graph.insert_local_commit(child.clone(), 2);
     let before = graph.view_point();
     let wrong_signer = signature(&bob, *root.hash());
     assert!(matches!(
@@ -532,14 +533,14 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
     let bob = key(2);
     let root = commit(&alice, 1, &[]);
     let child = commit(&bob, 2, &[*root.hash()]);
-    let mut source = CommitGraph::new();
+    let mut source = CommitGraph::new(Default::default());
     grant(&mut source, &[&alice, &bob]);
-    source.ingest_local_commit(root.clone(), 1);
-    source.ingest_local_commit(child.clone(), 2);
+    source.insert_local_commit(root.clone(), 1);
+    source.insert_local_commit(child.clone(), 2);
     sign(&mut source, &bob, *child.hash());
     let working = source.view_point();
-    let mut peer = CommitGraph::new();
-    peer.merge(&source);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&source);
     assert_eq!(peer.heads().count(), 0);
     assert!(peer.view_point().heads().is_empty());
 
@@ -551,7 +552,7 @@ fn signed_descendants_do_not_export_unsigned_local_ancestors() {
     let diff = source.diff(&working, &current).unwrap();
     assert_eq!(diff.visibility(root.hash()), Ok(Vis::Before));
     assert_eq!(diff.visibility(child.hash()), Ok(Vis::Both));
-    peer.merge(&source);
+    peer.merge_fixture(&source);
     assert_eq!(peer.heads().collect::<Vec<_>>(), vec![*child.hash()]);
     assert!(peer.view_point().write_permissions().is_empty());
 }
@@ -563,7 +564,7 @@ fn history_and_write_frontiers_can_have_multiple_heads() {
     let left = commit(&alice, 1, &[*root.hash()]);
     let right = commit(&alice, 2, &[*root.hash()]);
     let extra = commit(&alice, 3, &[]);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     for (value, meta) in [root.clone(), left.clone(), right.clone(), extra.clone()]
         .into_iter()
         .enumerate()
@@ -580,8 +581,8 @@ fn history_and_write_frontiers_can_have_multiple_heads() {
     assert_eq!(bounded.heads().len(), 3);
     graph.set_write_permissions(&permissions);
 
-    let mut peer = CommitGraph::new();
-    peer.merge(&graph);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&graph);
     let added = peer
         .diff(&peer.view_point(), &bounded)
         .unwrap()
@@ -602,15 +603,15 @@ fn merge_withholds_delivered_descendants_of_unsigned_local_work() {
     let other_root = commit(&bob, 2, &[]);
     let middle = commit(&bob, 3, &[*root.hash(), *other_root.hash()]);
     let tip = commit(&bob, 4, &[*middle.hash()]);
-    let mut source = CommitGraph::new();
-    source.ingest_local_commit(root.clone(), 1);
-    source.ingest_local_commit(other_root.clone(), 2);
-    source.ingest_local_commit(middle.clone(), 3);
-    source.ingest_local_commit(tip.clone(), 4);
+    let mut source = CommitGraph::new(Default::default());
+    source.insert_local_commit(root.clone(), 1);
+    source.insert_local_commit(other_root.clone(), 2);
+    source.insert_local_commit(middle.clone(), 3);
+    source.insert_local_commit(tip.clone(), 4);
     assert_eq!(source.heads().collect::<Vec<_>>(), vec![*tip.hash()]);
     sign(&mut source, &bob, *tip.hash());
-    let mut peer = CommitGraph::new();
-    peer.merge(&source);
+    let mut peer = CommitGraph::new(Default::default());
+    peer.merge_fixture(&source);
     assert_eq!(peer.heads().count(), 0);
     for meta in [&root, &other_root, &middle, &tip] {
         assert!(!source.has_commit(meta.hash()));
@@ -622,16 +623,16 @@ fn merge_withholds_delivered_descendants_of_unsigned_local_work() {
     assert_eq!(peer.heads().count(), 2);
 
     sign(&mut source, &alice, *root.hash());
-    peer.merge(&source);
+    peer.merge_fixture(&source);
     assert_eq!(peer.heads().count(), 2);
     sign(&mut source, &bob, *other_root.hash());
-    peer.merge(&source);
+    peer.merge_fixture(&source);
     // Delivered topology and a signed tip do not authenticate the middle item.
     assert_eq!(peer.heads().count(), 2);
     assert!(!source.has_commit(middle.hash()));
     assert!(!source.has_commit(tip.hash()));
     sign(&mut source, &bob, *middle.hash());
-    peer.merge(&source);
+    peer.merge_fixture(&source);
     assert_eq!(peer.heads().collect::<Vec<_>>(), vec![*tip.hash()]);
     assert!(peer.is_ancestor(root.hash(), tip.hash()));
 }
@@ -640,7 +641,7 @@ fn merge_withholds_delivered_descendants_of_unsigned_local_work() {
 fn received_commits_need_their_own_authors_signature_coverage() {
     let alice = key(1);
     let bob = key(2);
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     grant(&mut graph, &[&alice, &bob]);
     let root = commit(&bob, 1, &[]);
     let child = commit(&alice, 2, &[*root.hash()]);
@@ -660,7 +661,7 @@ fn received_commits_need_their_own_authors_signature_coverage() {
     ));
     // Even a directly signed child cannot enter before its verified parent.
     let pending = receipt(child.clone(), &alice).verify().unwrap();
-    let report = graph.ingest(pending, |_| 2).unwrap();
+    let report = graph.ingest_verified(pending, |_| 2).unwrap();
     assert!(report.admitted.is_empty());
     assert!(report.rejected.is_empty());
     assert_eq!(report.pending, 1);
@@ -679,7 +680,7 @@ fn received_commits_need_their_own_authors_signature_coverage() {
 
     // Neither a duplicate local insertion nor signatures can undo revocation.
     grant(&mut graph, &[&alice]);
-    graph.ingest_local_commit(root.clone(), 42);
+    graph.insert_local_commit(root.clone(), 42);
     assert_eq!(
         graph.ingest_signature(author(&bob), *root.hash(), signature(&bob, *root.hash())),
         Err(SignatureError::NotPendingLocalCommit(*root.hash()))

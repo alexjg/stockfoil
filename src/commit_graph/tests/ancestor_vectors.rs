@@ -1,11 +1,12 @@
 //! Public-API regression tests for graph-local ancestry and captured membership.
 //! The oracle follows fixture parent edges only; it never asks a graph for reachability.
-mod support;
+use super::support;
 
 use std::collections::{HashMap, HashSet};
 
-use stockfoil::{
-    Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, QueryError,
+use super::CommitGraph;
+use crate::{
+    Author, BlobHash, CommitContents, CommitHash, CommitMeta, DiffError, QueryError,
     SignatureEvidence, UnverifiedItem, ViewPoint, Vis, VisDiff, WritePermission,
 };
 use support::{author, key, signature};
@@ -143,7 +144,7 @@ fn receive(graph: &mut CommitGraph<usize>, meta: &CommitMeta, id: usize) {
     .verify()
     .unwrap();
     graph
-        .ingest(item, |received| {
+        .ingest_verified(item, |received| {
             assert_eq!(received.hash(), meta.hash());
             id
         })
@@ -281,7 +282,7 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
         hashes.push(unknown);
         let oracle = Oracle::new(nodes.clone());
 
-        let mut left = CommitGraph::new();
+        let mut left = CommitGraph::new(Default::default());
         left.set_write_permissions(&allowed());
         for (i, meta) in nodes[..40].iter().enumerate() {
             receive(&mut left, meta, i);
@@ -308,8 +309,8 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
         // Clones assign their new local labels independently. Merge in both
         // directions, then append a real merge commit spanning both branches.
         let left_branch = left.clone();
-        left.merge(&right);
-        right.merge(&left_branch);
+        left.merge_fixture(&right);
+        right.merge_fixture(&left_branch);
         for i in 100..102 {
             receive(&mut left, &nodes[i], i);
             receive(&mut right, &nodes[i], i);
@@ -322,7 +323,7 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
 
         // Choose the highest numbered ready node, rather than insertion order.
         // This changes which siblings extend a graph-local chain.
-        let mut reordered = CommitGraph::new();
+        let mut reordered = CommitGraph::new(Default::default());
         let mut inserted = HashSet::new();
         let mut order = Vec::new();
         while inserted.len() < nodes.len() {
@@ -343,11 +344,11 @@ fn seeded_parent_walk_matches_local_received_reordered_and_merged_graphs() {
 
         // Diff includes delivered drafts without requiring admission.
         // Every local insertion below has all parents present.
-        let mut drafts = CommitGraph::new();
+        let mut drafts = CommitGraph::new(Default::default());
         drafts.set_write_permissions(&allowed());
         let mut draft_snapshots = Vec::new();
         for (i, meta) in nodes.iter().enumerate() {
-            drafts.ingest_local_commit(meta.clone(), i);
+            drafts.insert_local_commit(meta.clone(), i);
             if i == 39 {
                 draft_snapshots.push(drafts.view_point());
                 draft_snapshots.push(drafts.signed_view_point());

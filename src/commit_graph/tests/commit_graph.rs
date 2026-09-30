@@ -3,14 +3,15 @@
 //! Local insertion requires delivered parents; callers retry rejected children.
 //! Draft parents need not be signed, while verified receipt requires admitted
 //! dependencies. Signed fixtures can be exchanged by graph merges.
-mod support;
+use super::support;
 
 use std::{
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use stockfoil::{BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, SignatureError};
+use super::CommitGraph;
+use crate::{BlobHash, CommitContents, CommitHash, CommitMeta, SignatureError};
 use support::{key, sign};
 
 fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
@@ -24,7 +25,7 @@ fn meta(value: u8, parents: &[CommitHash]) -> CommitMeta {
 /// Sign local work after all of its parents have been delivered.
 fn ingest_local_signed(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) {
     let hash = *meta.hash();
-    graph.ingest_local_commit(meta, value);
+    graph.insert_local_commit(meta, value);
     if !graph.has_commit(&hash) {
         sign(graph, &key(1), hash);
     }
@@ -41,7 +42,7 @@ fn insert(graph: &mut CommitGraph<u8>, value: u8, parents: &[CommitHash]) -> Com
 /// A missing parent is a caller error, not a request to retain local work.
 fn reject_local(graph: &mut CommitGraph<u8>, meta: CommitMeta, value: u8) -> CommitHash {
     let hash = *meta.hash();
-    assert!(catch_unwind(AssertUnwindSafe(|| graph.ingest_local_commit(meta, value))).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| graph.insert_local_commit(meta, value))).is_err());
     assert!(!graph.has_commit(&hash));
     assert_eq!(
         graph.ingest_signature(
@@ -87,7 +88,7 @@ fn assert_heads(graph: &CommitGraph<u8>, expected: &[CommitHash]) {
 
 #[test]
 fn heads_follow_chains_forks_merges_and_disconnected_roots() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     assert_heads(&graph, &[]);
     assert_eq!(graph.roots().count(), 0);
     assert!(visited(&graph).is_empty());
@@ -114,7 +115,7 @@ fn heads_follow_chains_forks_merges_and_disconnected_roots() {
 
 #[test]
 fn rejected_children_change_heads_only_after_explicit_parents_first_retry() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let first = *meta(1, &[]).hash();
     let second = *meta(2, &[]).hash();
     let merge = *meta(3, &[first, second]).hash();
@@ -144,7 +145,7 @@ fn rejected_children_change_heads_only_after_explicit_parents_first_retry() {
 
 #[test]
 fn chain_preserves_metadata_payloads_and_edges() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let first = insert(&mut graph, 1, &[]);
     let second = insert(&mut graph, 2, &[first]);
     let third = insert(&mut graph, 3, &[second]);
@@ -174,7 +175,7 @@ fn chain_preserves_metadata_payloads_and_edges() {
 
 #[test]
 fn merge_is_child_of_every_parent_and_visited_once() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root_hash = insert(&mut graph, 1, &[]);
     let left_hash = insert(&mut graph, 2, &[root_hash]);
     let right_hash = insert(&mut graph, 3, &[root_hash]);
@@ -193,7 +194,7 @@ fn merge_is_child_of_every_parent_and_visited_once() {
 
 #[test]
 fn roots_keep_their_indices_when_interspersed_with_children() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let first = insert(&mut graph, 1, &[]);
     insert(&mut graph, 2, &[first]);
     let second = insert(&mut graph, 3, &[]);
@@ -213,7 +214,7 @@ fn roots_keep_their_indices_when_interspersed_with_children() {
 
 #[test]
 fn duplicate_ingestion_preserves_original_payload_and_edges() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);
     ingest_local_signed(&mut graph, meta(1, &[]), 99);
@@ -227,7 +228,7 @@ fn duplicate_ingestion_preserves_original_payload_and_edges() {
 
 #[test]
 fn repeated_parent_does_not_duplicate_children_or_visits() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let first = insert(&mut graph, 1, &[]);
     let second = insert(&mut graph, 2, &[]);
     insert(&mut graph, 3, &[second, first, second]);
@@ -246,7 +247,7 @@ fn repeated_parent_does_not_duplicate_children_or_visits() {
 
 #[test]
 fn children_index_grows_in_insertion_order_and_clones_independently() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root_hash = insert(&mut graph, 1, &[]);
     let root = graph.roots().next().unwrap().clone();
     assert_eq!(graph.children(&root).count(), 0);
@@ -271,7 +272,7 @@ fn children_index_grows_in_insertion_order_and_clones_independently() {
 
 #[test]
 fn missing_later_parent_rejects_before_any_graph_mutation() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 0, &[]);
     let first = insert(&mut graph, 1, &[root]);
     let second = *meta(2, &[]).hash();
@@ -343,15 +344,15 @@ fn missing_later_parent_rejects_before_any_graph_mutation() {
 
 #[test]
 fn local_draft_parents_are_sufficient_and_pending_duplicates_preserve_first_payload() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root_meta = meta(1, &[]);
     let root = *root_meta.hash();
-    graph.ingest_local_commit(root_meta.clone(), 1);
-    graph.ingest_local_commit(root_meta, 99);
+    graph.insert_local_commit(root_meta.clone(), 1);
+    graph.insert_local_commit(root_meta, 99);
     let child_meta = meta(2, &[root, root]);
     let child = *child_meta.hash();
-    graph.ingest_local_commit(child_meta.clone(), 2);
-    graph.ingest_local_commit(child_meta.clone(), 99);
+    graph.insert_local_commit(child_meta.clone(), 2);
+    graph.insert_local_commit(child_meta.clone(), 99);
     assert_eq!(visited(&graph), vec![1, 2]);
     assert_heads(&graph, &[child]);
     assert!(!graph.has_commit(&root));
@@ -361,7 +362,7 @@ fn local_draft_parents_are_sufficient_and_pending_duplicates_preserve_first_payl
     // Signing a child before its delivered draft parent is allowed, but does
     // not admit it. Duplicates must preserve both payload and signature.
     sign(&mut graph, &key(1), child);
-    graph.ingest_local_commit(child_meta, 100);
+    graph.insert_local_commit(child_meta, 100);
     assert!(!graph.has_commit(&child));
     sign(&mut graph, &key(1), root);
     assert!(graph.has_commit(&root));
@@ -372,7 +373,7 @@ fn local_draft_parents_are_sufficient_and_pending_duplicates_preserve_first_payl
 
 #[test]
 fn signature_before_local_insertion_is_rejected_not_retained() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root_meta = meta(1, &[]);
     let root = *root_meta.hash();
     assert_eq!(
@@ -384,7 +385,7 @@ fn signature_before_local_insertion_is_rejected_not_retained() {
         Err(SignatureError::NotPendingLocalCommit(root))
     );
     assert!(visited(&graph).is_empty());
-    graph.ingest_local_commit(root_meta, 1);
+    graph.insert_local_commit(root_meta, 1);
     assert!(!graph.has_commit(&root));
     assert!(graph.signed_view_point().heads().is_empty());
     sign(&mut graph, &key(1), root);
@@ -393,7 +394,7 @@ fn signature_before_local_insertion_is_rejected_not_retained() {
 
 #[test]
 fn ancestry_is_strict_and_transitive() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);
     let tip = insert(&mut graph, 3, &[child]);
@@ -410,7 +411,7 @@ fn ancestry_is_strict_and_transitive() {
 
 #[test]
 fn ancestry_follows_all_merge_parents_but_not_concurrent_branches() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let unrelated = insert(&mut graph, 0, &[]);
     let root = insert(&mut graph, 1, &[]);
     let left = insert(&mut graph, 2, &[root]);
@@ -429,7 +430,7 @@ fn ancestry_follows_all_merge_parents_but_not_concurrent_branches() {
 
 #[test]
 fn ancestry_ignores_rejected_commits_until_explicit_retry() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let missing = *meta(1, &[]).hash();
     assert!(!graph.is_ancestor(&missing, &missing));
     let root = insert(&mut graph, 0, &[]);
@@ -456,7 +457,7 @@ fn ancestry_ignores_rejected_commits_until_explicit_retry() {
 
 #[test]
 fn traverse_since_excludes_heads_and_all_their_ancestors() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 1, &[]);
     let left = insert(&mut graph, 2, &[root]);
     let right = insert(&mut graph, 3, &[root]);
@@ -476,7 +477,7 @@ fn traverse_since_excludes_heads_and_all_their_ancestors() {
 
 #[test]
 fn traverse_since_delivers_only_new_history_after_merge() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 1, &[]);
     let mut other = graph.clone();
     insert(&mut graph, 2, &[root]);
@@ -485,7 +486,7 @@ fn traverse_since_delivers_only_new_history_after_merge() {
     insert(&mut other, 4, &[branch]);
     insert(&mut other, 5, &[]);
 
-    graph.merge(&other);
+    graph.merge_fixture(&other);
     let visited = visited_since(&graph, &before);
     // Transport order may differ from the sender's insertion order for
     // concurrent branches, but parents still precede their children.
@@ -498,7 +499,7 @@ fn traverse_since_delivers_only_new_history_after_merge() {
 
 #[test]
 fn traverse_since_handles_empty_unknown_and_rejected_heads() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let unknown = *meta(99, &[]).hash();
     assert!(visited_since(&graph, &[]).is_empty());
     assert!(visited_since(&graph, &[unknown]).is_empty());
@@ -513,7 +514,7 @@ fn traverse_since_handles_empty_unknown_and_rejected_heads() {
 
 #[test]
 fn traverse_since_honors_break() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 1, &[]);
     let child = insert(&mut graph, 2, &[root]);
     insert(&mut graph, 3, &[child]);
@@ -530,7 +531,7 @@ fn traverse_since_honors_break() {
 
 #[test]
 fn break_stops_the_entire_traversal() {
-    let mut graph = CommitGraph::new();
+    let mut graph = CommitGraph::new(Default::default());
     let root = insert(&mut graph, 1, &[]);
     insert(&mut graph, 2, &[root]);
     insert(&mut graph, 3, &[]);

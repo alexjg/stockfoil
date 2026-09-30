@@ -1,13 +1,11 @@
 //! Adversarial contracts for stateless, item-local metadata authentication.
 use std::collections::BTreeSet;
 
-mod support;
-
-use stockfoil::{
+use crate::{
     BlobHash, CommitContents, CommitHash, CommitMeta, FragmentRange, ItemId, Signature,
     SignatureEvidence, UnverifiedItem, VerificationError,
 };
-use support::{
+use super::support::{
     at_depth, proof as evidence, seeded_author as author, signed_commit as signed,
     signed_fragment as fragment,
 };
