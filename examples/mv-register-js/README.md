@@ -59,25 +59,44 @@ commands and trusted author/server configuration, **not history blobs**.
 
 - `register.mjs`: retained topologically ordered assignments, participation set,
   ancestry-based maximal values, external signing, and copied historical state
-  **and cursor**. Write permissions come from application configuration only.
+  **and cursor**. `new CommitGraph(registerCodec)` commits typed `{ key, value }`
+  payloads; materialization receives typed assignments, not manually decoded bytes.
+  Write permissions come from application configuration only.
 - `transport.mjs`: Subduction publication, sync, and verified graph ingestion.
   It uses `storeBuiltBatch` for local-only publication and
   `Fragment.fromCheckpointPrefixes` with Stockfoil's exported prefixes. Its export
   cursor advances only after a complete batch is stored; retired cover entries
   can remain in storage. Callers must serialize calls sharing this cursor.
-- `wire.mjs`: the exact private BCS version-1 envelope from
-  [`../mv-register/src/wire.rs`](../mv-register/src/wire.rs), implemented without
-  another codec dependency. Assignments are two length-prefixed UTF-8 strings.
-  Commit metadata hashes are reconstructed by Stockfoil's `describeCommit`,
-  preserving parent order/multiplicity and exact payload bytes; **decoding alone
-  does not verify an item**. `CommitGraph.ingest` verifies and admits it.
+- `codec.mjs`: application payload encoding matching native
+  [`RegisterCodec`](../mv-register/src/codec.rs), format ID
+  `stockfoil/mv-register/v1`. Canonical assignments are BCS pairs of UTF-8 strings.
+  Fragment payloads are BCS `{ keys, key_runs, values }`: first-occurrence key
+  dictionary, `Vec<(u32, u32)>` runs with fixed little-endian index/count pairs,
+  and values in member order. Counts and canonical byte budgets are checked
+  before expansion. Encoders impose no fixed 8 MiB cap; configurable decode
+  budgets apply to inbound items, not local commits or exports. Receivers can
+  raise budgets with `graph.setDecodeLimits(...)` before retrying a larger item.
+  Successful encoding does not guarantee transport or default-budget admission.
+  No application-owned Stockfoil envelope parser is needed;
+  the Wasm core owns encoding, hashes, signatures, and atomic admission.
 - `interop.mjs`: automated native/Wasm integration scenario.
+- `test/codec.test.mjs` and `test/fixtures/codec-boundaries.json`: pure payload
+  boundary tests using the same golden vectors as native Rust, including canonical
+  assignments just below, exactly at, and above 8 MiB, and larger fragment payloads.
+  They verify raised/exact budgets and rejection one byte below the required
+  budget without transferring large samples over the network. Run them without
+  building Wasm or connecting a server:
+
+  ```sh
+  node --test examples/mv-register-js/test/codec.test.mjs
+  ```
 
 Both examples temporarily depend on the sibling Subduction checkout rather than
 registry releases, so native and Wasm clients can exercise the same unreleased
 APIs. Checkpoint-prefix construction and mixed batch storage are now used directly;
-no full checkpoint IDs are reconstructed from fragment members. The private BCS
-envelope remains unchanged and is not a stable cross-version format.
+no full checkpoint IDs are reconstructed from fragment members. Transports forward
+exported `metadata` and opaque `bytes`; received blobs go directly to
+`graph.ingest(bytes)`. Both languages use the same core Stockfoil envelope.
 
 These APIs remove the compatibility workaround, not all integration boilerplate.
 Managed client lifecycle, central expected-peer enforcement, incremental stored-blob
@@ -89,5 +108,6 @@ This demo trusts peers to advertise correct Subduction transport metadata (as th
 native example does); Stockfoil still independently authenticates the original
 history and payloads. OpenPolicy is for local testing, not public deployment.
 There is no persistence, encryption, or production pending-queue/resource policy.
+Codec budgets are cooperative; the codec is trusted application configuration.
 See the [native example](../mv-register/README.md) for these limitations and the
 [JS API design](../../design/js_api.md) for graph/cursor semantics.

@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { ExportCursor } from 'stockfoil';
 import { Replica } from '../transport.mjs';
 import { MvRegisterMap } from '../register.mjs';
-import { encode } from '../wire.mjs';
-import { alice, atDepth, fragment, signedCommit, graph } from '../../../javascript/test/support.mjs';
+import { checkpoint } from './support.mjs';
 
 const hex = bytes => Buffer.from(bytes).toString('hex');
 function replica(t) {
@@ -15,15 +14,13 @@ function replica(t) {
 }
 
 test('one local batch stores loose commits and nonempty checkpoint prefixes', async t => {
-  const doc = { graph: graph(t) };
-  const interior = atDepth(alice, [], 1);
-  const head = atDepth(alice, [interior.hash], 2);
-  const tip = atDepth(alice, [head.hash]);
-  doc.graph.ingest(fragment(head, [interior, head]));
-  doc.graph.ingest(signedCommit(tip));
+  const doc = new MvRegisterMap(); t.after(() => doc.dispose());
+  const interior = checkpoint(doc, 1);
+  checkpoint(doc, 2);
+  checkpoint(doc, 0, 'tip');
   const expected = doc.graph.exportChanges(new ExportCursor()).added;
-  const exported = expected.find(item => item.kind === 'fragment');
-  assert.deepEqual(exported.checkpoints.map(hex), [interior.hash.slice(0, 24)]);
+  const exported = expected.find(item => item.metadata.kind === 'fragment').metadata;
+  assert.deepEqual(exported.checkpoints.map(hex), [interior.slice(0, 24)]);
 
   const client = replica(t);
   const store = client.node.storeBuiltBatch.bind(client.node);
@@ -34,7 +31,7 @@ test('one local batch stores loose commits and nonempty checkpoint prefixes', as
   });
   assert.deepEqual(await client.publish(doc), expected);
   assert.deepEqual(calls, [[1, 1]]);
-  assert.deepEqual((await client.blobs()).map(hex).sort(), expected.map(item => hex(encode(item))).sort());
+  assert.deepEqual((await client.blobs()).map(hex).sort(), expected.map(item => hex(item.bytes)).sort());
 
   const stored = await client.node.getFragments(client.id);
   assert.equal(stored.length, 1);

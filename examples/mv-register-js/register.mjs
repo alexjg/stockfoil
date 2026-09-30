@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { CommitGraph, MaterializationCursor, authorId } from 'stockfoil';
-import { encodeAssignment, decodeAssignment } from './wire.mjs';
+import { registerCodec } from './codec.mjs';
 
 export function checkReport(report) {
   if (report.rejected.length) throw new AggregateError(report.rejected.map(r => r.error), 'queued history rejected');
@@ -24,7 +24,7 @@ class Materialized {
     const affected = new Set();
     for (const change of batch.changes) {
       const { hash, payload } = change.commit;
-      const assignment = decodeAssignment(payload);
+      const assignment = payload;
       if (change.newlyDelivered) this.assignments.push([hash, assignment]);
       if (change.visibility === 'after') {
         this.participating.add(hash); affected.add(assignment.key);
@@ -51,7 +51,7 @@ class Materialized {
 }
 
 export class MvRegisterMap {
-  graph = new CommitGraph();
+  graph = new CommitGraph(registerCodec);
   materialized = new Materialized();
   pending = new Map();
   constructor() {
@@ -70,32 +70,34 @@ export class MvRegisterMap {
     return historical.get(key);
   }
   prepareSet(key, value) {
-    const draft = this.graph.commit(this.author, encodeAssignment({ key, value }));
-    checkReport(draft.report);
+    const draft = this.graph.commit(this.author, { key, value });
     this.pending.set(draft.hash, draft.signingBytes);
     this.update();
+    checkReport(draft.report);
     return draft.hash;
   }
   publish() {
-    for (const [hash, signingBytes] of this.pending) {
-      if (!this.graph.hasCommit(hash)) {
-        // Node owns the key and signs externally; Wasm verifies every signature.
-        checkReport(this.graph.addSignature({
-          author: this.author, commit: hash,
-          signature: new Uint8Array(sign(null, signingBytes, this.privateKey)),
-        }));
+    try {
+      for (const [hash, signingBytes] of this.pending) {
+        let report;
+        if (!this.graph.hasCommit(hash)) {
+          // Node owns the key and signs externally; Wasm verifies every signature.
+          report = this.graph.addSignature({
+            author: this.author, commit: hash,
+            signature: new Uint8Array(sign(null, signingBytes, this.privateKey)),
+          });
+        }
+        // A successful signature stays published even if queued history fails.
+        // A failed signature leaves this draft and the rest available to retry.
+        this.pending.delete(hash);
+        if (report) checkReport(report);
       }
-      this.pending.delete(hash);
-    }
-    this.update();
+    } finally { this.update(); }
   }
   set(key, value) { const hash = this.prepareSet(key, value); this.publish(); return hash; }
   ingest(items) {
     try {
       for (const item of items) {
-        // Check application syntax before mutating the graph. This establishes
-        // no trust: only ingest can authenticate the bytes and admit history.
-        for (const commit of item.kind === 'commit' ? [item.commit] : item.commits) decodeAssignment(commit.payload);
         checkReport(this.graph.ingest(item));
       }
     } finally { this.update(); }

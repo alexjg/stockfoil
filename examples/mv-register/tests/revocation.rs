@@ -10,21 +10,21 @@ fn values(values: &[&str]) -> BTreeSet<String> {
 #[test]
 fn revocation_restores_values_without_losing_history() {
     let mut alice = MvRegisterMap::new();
-    alice.set("title", "original");
-    let mut bob = alice.fork();
+    alice.set("title", "original").unwrap();
+    let mut bob = alice.fork().unwrap();
     let allowed = HashMap::from([
         (alice.author(), WritePermission::Unbounded),
         (bob.author(), WritePermission::Unbounded),
     ]);
     alice.set_write_permissions(&allowed);
     bob.set_write_permissions(&allowed);
-    let bound = alice.set("title", "allowed");
-    bob.set("title", "concurrent");
-    alice.set("title", "revoked");
-    alice.set("private", "secret");
-    bob.merge(&alice);
-    bob.set("description", "still here");
-    alice.merge(&bob);
+    let bound = alice.set("title", "allowed").unwrap();
+    bob.set("title", "concurrent").unwrap();
+    alice.set("title", "revoked").unwrap();
+    alice.set("private", "secret").unwrap();
+    bob.merge(&alice).unwrap();
+    bob.set("description", "still here").unwrap();
+    alice.merge(&bob).unwrap();
     let before = alice.view_point();
     assert_eq!(alice.get("title"), values(&["revoked", "concurrent"]));
 
@@ -47,7 +47,7 @@ fn revocation_restores_values_without_losing_history() {
         values(&["allowed", "concurrent"])
     );
     assert_eq!(bob.get("title"), values(&["revoked", "concurrent"]));
-    alice.merge(&bob);
+    alice.merge(&bob).unwrap();
     assert_eq!(alice.get("title"), values(&["allowed", "concurrent"]));
 
     // Restoring permission needs no replay or new signatures.
@@ -58,7 +58,7 @@ fn revocation_restores_values_without_losing_history() {
 
     // Supersession still follows ancestry through revoked writes.
     bob.set_write_permissions(&restricted);
-    bob.set("title", "descendant wins");
+    bob.set("title", "descendant wins").unwrap();
     assert_eq!(bob.get("title"), values(&["descendant wins"]));
     bob.set_write_permissions(&allowed);
     assert_eq!(bob.get("title"), values(&["descendant wins"]));

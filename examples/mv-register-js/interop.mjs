@@ -8,7 +8,7 @@ import { ExportCursor } from 'stockfoil';
 import { setSubductionLogLevel } from '@automerge/subduction';
 import { MvRegisterMap } from './register.mjs';
 import { Replica, bounded } from './transport.mjs';
-import { decode, encode } from './wire.mjs';
+import { forgeries } from './test/support.mjs';
 
 // Normal disconnects and the wrong-peer test need not print transport warnings.
 setSubductionLogLevel('error');
@@ -79,16 +79,17 @@ try {
   for (let n = 0; n < 8192; n++) {
     const hash = doc.set('js-chain', String(n));
     const cover = doc.graph.exportChanges(new ExportCursor());
-    if (cover.added.some(item => item.kind === 'fragment' && item.head === hash)) { jsLast = String(n); break; }
+    if (cover.added.some(item => item.metadata.kind === 'fragment' && item.metadata.head === hash)) { jsLast = String(n); break; }
   }
   assert.notEqual(jsLast, undefined, 'no JS fragment within bounded chain');
   const published = await replica.publish(doc);
-  assert.ok(published.some(item => item.kind === 'fragment'));
+  assert.ok(published.some(item => item.metadata.kind === 'fragment'));
   await converge('js-chain', [jsLast]);
   const rustFragment = await command('makeFragment');
   await converge('rust-chain', [rustFragment.last]);
-  const blobs = await replica.blobs();
-  assert.ok(blobs.map(decode).some(item => item.kind === 'fragment' && item.commits.some(c => c.author === config.author)));
+  // Inspect the authenticated graph's exported metadata, never parse its wire.
+  assert.ok(doc.graph.exportChanges(new ExportCursor()).added.some(item =>
+    item.metadata.kind === 'fragment' && item.metadata.head === rustFragment.head));
 
   // Fresh JS graph AND Subduction store download from the server, then ingest
   // in reverse blob order. The pending queue handles arbitrary arrival order.
@@ -107,19 +108,14 @@ try {
 
   // Wire payload/signature forgery must be rejected by Stockfoil, even though
   // Subduction would happily store blobs signed by its own transport identity.
-  const authentic = published.find(item => item.signatures.length);
-  assert.ok(authentic);
-  for (const corrupt of [
-    item => { item.signatures[0].signature[0] ^= 1; },
-    item => {
-      const payload = (item.kind === 'commit' ? item.commit : item.commits[0]).payload;
-      payload[payload.length - 1] ^= 1; // Still valid BCS/UTF-8, but no longer authentic.
-    },
-  ]) {
-    const forged = structuredClone(authentic); corrupt(forged);
-    const victim = new MvRegisterMap(); docs.push(victim); victim.setWritePermissions(permissions);
-    assert.throws(() => victim.ingest([decode(encode(forged))]));
+  const forger = new MvRegisterMap(); docs.push(forger);
+  const hash = forger.set('title', 'authentic');
+  for (const forged of forgeries(forger, hash, { key: 'title', value: 'authentic' })) {
+    const victim = new MvRegisterMap(); docs.push(victim);
+    victim.setWritePermissions(new Map([[forger.author, 'unbounded']]));
+    assert.throws(() => victim.ingest([forged]));
     assert.deepEqual(victim.get('title'), []);
+    assert.equal(victim.graph.hasCommit(hash), false);
   }
 
   // A fresh Rust graph/store must also recover JS-authored fragment contents.

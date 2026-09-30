@@ -1,0 +1,6 @@
+[
+  { "valueBytes": 8388601, "commitPrefix": "016bf9ffff03", "fragmentPrefix": "01016b01000000000100000001f9ffff03" },
+  { "valueBytes": 8388602, "commitPrefix": "016bfaffff03", "fragmentPrefix": "01016b01000000000100000001faffff03" },
+  { "valueBytes": 8388603, "commitPrefix": "016bfbffff03", "fragmentPrefix": "01016b01000000000100000001fbffff03" },
+  { "valueBytes": 8388609, "commitPrefix": "016b81808004", "fragmentPrefix": "01016b0100000000010000000181808004" }
+]

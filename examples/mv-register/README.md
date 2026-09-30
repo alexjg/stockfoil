@@ -70,16 +70,21 @@ checkout as the clients; this is not a stable cross-version protocol.
   publish new certified cover items with `store_built_batch`, advancing the cursor
   only after successful storage. `Fragment::from_parts` accepts Stockfoil's
   checkpoint prefixes directly. Publication is local-only; the separate sync step
-  requests sync/subscription and loads locally stored blobs into Stockfoil.
+  requests sync/subscription and loads locally stored blobs with `graph.ingest`.
+  Publication forwards each `ExportedItem`'s `metadata` and opaque `bytes`.
   Stockfoil owns pending items and
   payloads, automatically admitting them when dependencies arrive or are signed
   locally.
-- [`src/wire.rs`](src/wire.rs): **example-only** versioned BCS envelopes for
-  individual commits and fragments. Original author signatures are retained;
-  the transport peer cannot replace them with its own signatures. Commit hashes
-  are reconstructed from exact payload bytes before signature verification and
-  payload decoding. Parent order and multiplicity are preserved in the envelope,
-  even though Subduction's transport parents are sets.
+- [`src/codec.rs`](src/codec.rs): `RegisterCodec`, selected by
+  `CommitGraph::new(RegisterCodec)`. Assignments remain canonical BCS pairs of
+  UTF-8 strings. Fragment payloads use a first-occurrence key dictionary,
+  `Vec<(u32, u32)>` key runs (fixed little-endian index/count pairs), and values
+  in member order. Decoders check counts and canonical byte budgets before
+  expansion. Encoders have no fixed 8 MiB cap: `DecodeLimits` applies only to
+  inbound items, not local edits or exports. Receivers can raise their graph's
+  limits before retrying larger items. The format ID is `stockfoil/mv-register/v1`.
+  Stockfoil owns its binary envelope, hashes, original signatures, and admission;
+  the example never parses graph metadata from bytes.
 - [`src/transport.rs`](src/transport.rs): authenticated WebSocket connections and
   background-task ownership/shutdown.
 
@@ -94,18 +99,35 @@ provides blobs to Stockfoil without cross-checking their transport heads, parent
 or fragment metadata. Incorrect advertisements can prevent convergence, but do
 not bypass Stockfoil's payload, signature, or graph-admission checks.
 
+`prepare_set`, `set`, `publish`, `fork`, and `merge` return `eyre::Result`; callers
+must propagate or handle codec, signing, and inbound admission failures. For example:
+
+```rust
+let mut alice = MvRegisterMap::new();
+alice.set("title", "Hello")?;
+let mut bob = alice.fork()?;
+bob.merge(&alice)?;
+```
+
 Admission is atomic per item, not per batch. Network `load()` reports immediate
 and deferred admission errors and still materializes valid items admitted before
-the error. The register wrapper ignores deferred rejection reports from local
+the error. `merge()` likewise materializes earlier admissions on failure and keeps
+Stockfoil's `MergeError<std::io::Error>` (including its partial `IngestReport`) in
+the `eyre` error chain, available via `downcast_ref`. The register wrapper ignores
+deferred rejection reports from successful local
 operations rather than logging them; applications can inspect `IngestReport` for
 diagnostics. Queued received items are invisible to materialization until admitted,
 unlike local unsigned drafts.
 
 This deliberately small adapter polls rather than exposing a production event
-loop. It caps blobs at 8 MiB and WebSocket messages at 16 MiB, but the graph's
-pending-item queue currently has no limits. It has no encryption/compression or
-client-side persistence and does not provide a general resource-budget policy.
-It is not Stockfoil's proposed public binary `load`/`save` API.
+loop. The default inbound graph budget is 8 MiB per item/canonical payload, and
+WebSocket messages are capped at 16 MiB, but the graph's pending-item queue
+currently has no limits. Successful local encoding does not imply that a receiver
+with default budgets or a transport with smaller limits can accept the item. It has no encryption or client-side
+persistence and does not provide a general resource-budget policy.
+It uses Stockfoil's public codec-owned encoded API. Codec limits are cooperative;
+applications must choose a trusted codec rather than selecting executable code
+from untrusted incoming data.
 
 ## Test
 
@@ -117,7 +139,10 @@ cargo test -p stockfoil-mv-register # just this example
 The WebSocket tests bind only `127.0.0.1:0` and need no external service. Other
 checks cover malformed envelopes, payload/signature tampering, wrong server
 identity, deferred dependencies, fragment relay, historical views, revocation,
-and draft publication. Network tests and fixtures live in
+and draft publication. Shared Rust/JS golden payload vectors test canonical
+encoding below, at, and above 8 MiB, with exact and raised decode budgets; these
+tests use no network. Failed-merge tests check retained partial reports and live
+materialization. Network tests and fixtures live in
 [`src/sync/tests.rs`](src/sync/tests.rs).
 
 For real Rust/JavaScript interoperability, see

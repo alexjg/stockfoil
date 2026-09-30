@@ -57,7 +57,7 @@ pub async fn run() -> Result<()> {
                     json!({"ok": true})
                 }
                 Command::Set { key, value } => {
-                    let hash = doc.set(&key, &value);
+                    let hash = doc.set(&key, &value)?;
                     json!({"hash": hex::encode(hash.as_bytes())})
                 }
                 Command::Exchange => {
@@ -71,21 +71,22 @@ pub async fn run() -> Result<()> {
                     // Stop only once the certified cover really contains a fragment.
                     let mut found = None;
                     for n in 0..8192 {
-                        let hash = doc.set("rust-chain", &n.to_string());
-                        let (cover, _) = doc.graph.export_changes(&ExportCursor::default());
-                        if cover.added.iter().any(|item| matches!(item, UnverifiedItem::Fragment { range, .. } if range.head == hash)) {
-                            found = Some(n);
+                        let hash = doc.set("rust-chain", &n.to_string())?;
+                        let (cover, _) = doc.graph.export_changes(&ExportCursor::default())?;
+                        if cover.added.iter().any(|item| matches!(&item.metadata, TransportMetadata::Fragment { range, .. } if range.head == hash)) {
+                            found = Some((n, hash));
                             break;
                         }
                     }
                     ensure!(found.is_some(), "no fragment within bounded test chain");
-                    json!({"fragment": true, "last": found.unwrap().to_string()})
+                    let (last, head) = found.unwrap();
+                    json!({"fragment": true, "last": last.to_string(), "head": hex::encode(head.as_bytes())})
                 }
                 Command::Fresh => {
                     // New graph, signer, transport store, and export cursor.
                     let next = Replica::new(Client::connect(&remote).await?);
                     let old = std::mem::replace(replica, next);
-                    old.client.close().await;
+                    old.client.close().await?;
                     doc = MvRegisterMap::new();
                     doc.set_write_permissions(&permissions);
                     json!({"ok": true})
@@ -99,9 +100,12 @@ pub async fn run() -> Result<()> {
         }
         Ok(())
     }).await;
+    let mut result = result.map_err(eyre::Report::from).and_then(|result| result);
     if let Some(replica) = replica {
-        replica.client.close().await;
+        result = transport::with_cleanup(result, replica.client.close().await);
     }
-    let _ = tokio::time::timeout(Duration::from_secs(5), server.stop_and_drain()).await;
-    result?
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), server.stop_and_drain())
+        .await
+        .map_err(eyre::Report::from);
+    transport::with_cleanup(result, cleanup)
 }

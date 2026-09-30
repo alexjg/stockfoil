@@ -3,7 +3,10 @@ import {
   BlobMeta, LooseCommit, Fragment, Checkpoint, CommitInput, FragmentInput,
 } from '@automerge/subduction';
 import { ExportCursor } from 'stockfoil';
-import { bytes, encode, decode } from './wire.mjs';
+const bytes = hex => {
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error('expected 32-byte lowercase hex');
+  return Uint8Array.from(Buffer.from(hex, 'hex'));
+};
 
 export async function bounded(promise, ms = 10_000) {
   let timer;
@@ -38,12 +41,12 @@ export class Replica {
     const batch = doc.graph.exportChanges(this.published);
     const id = hash => new CommitId(bytes(hash));
     const commits = [], fragments = [];
-    for (const item of batch.added) {
-      const blob = encode(item), meta = new BlobMeta(blob);
+    for (const exported of batch.added) {
+      const item = exported.metadata, blob = exported.bytes, meta = new BlobMeta(blob);
       if (item.kind === 'commit') {
-        const parents = [...new Set(item.commit.parents)];
+        const parents = [...new Set(item.parents)];
         if (parents.length > 255) throw new Error('too many transport parents');
-        commits.push(new CommitInput(new LooseCommit(this.id, id(item.commit.hash), parents.map(id), meta), blob));
+        commits.push(new CommitInput(new LooseCommit(this.id, id(item.hash), parents.map(id), meta), blob));
       } else {
         const fragment = Fragment.fromCheckpointPrefixes(
           this.id, id(item.head), item.boundary.map(id),
@@ -69,7 +72,7 @@ export class Replica {
   async load(doc, reverse = false) {
     const blobs = await this.blobs();
     if (reverse) blobs.reverse();
-    return doc.ingest(blobs.map(decode));
+    return doc.ingest(blobs);
   }
   async close() {
     if (!this.node) return;

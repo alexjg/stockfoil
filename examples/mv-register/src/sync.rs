@@ -11,14 +11,13 @@ use sedimentree_core::{
     id::SedimentreeId,
     loose_commit::{LooseCommit, id::CommitId},
 };
-use stockfoil::{CommitHash, ExportCursor, UnverifiedItem, WritePermission};
-use subduction_core::timeout::call::CallTimeout;
+use stockfoil::{CommitHash, ExportCursor, TransportMetadata, WritePermission};
+use subduction_tokio::CallTimeout;
 
 pub use crate::transport::RemoteServer;
 use crate::{
-    MvRegisterMap,
+    MvRegisterMap, check_report,
     transport::{self, Client},
-    wire::{self, Decoded},
 };
 
 struct Replica {
@@ -35,37 +34,40 @@ impl Replica {
     }
 
     async fn publish(&mut self, id: SedimentreeId, doc: &MvRegisterMap) -> Result<()> {
-        let (changes, next) = doc.graph.export_changes(&self.published);
+        let (changes, next) = doc.graph.export_changes(&self.published)?;
         let (mut commits, mut fragments) = (Vec::new(), Vec::new());
         for item in changes.added {
-            let blob = Blob::new(wire::encode(doc, &item)?);
-            match &item {
-                UnverifiedItem::Commit { meta, .. } => {
-                    let parents: BTreeSet<_> = meta.parents().iter().map(commit_id).collect();
-                    ensure!(parents.len() <= 255, "too many transport parents");
+            let blob = Blob::new(item.bytes);
+            match &item.metadata {
+                TransportMetadata::Commit { hash, parents } => {
+                    let parents: BTreeSet<_> = parents.iter().map(commit_id).collect();
                     commits.push((
-                        LooseCommit::new(id, commit_id(meta.hash()), parents, blob.meta()),
+                        LooseCommit::new(id, commit_id(hash), parents, blob.meta())?,
                         blob,
                     ));
                 }
-                UnverifiedItem::Fragment { range, checkpoints, .. } => {
-                    ensure!(range.boundary.len() <= 255, "too many fragment boundaries");
-                    ensure!(checkpoints.len() <= 65535, "too many fragment checkpoints");
+                TransportMetadata::Fragment { range, checkpoints } => {
                     fragments.push((
                         Fragment::from_parts(
                             id,
                             commit_id(&range.head),
                             range.boundary.iter().map(commit_id).collect(),
-                            checkpoints.iter().map(|c| Checkpoint::from_bytes(c.0)).collect(),
+                            checkpoints
+                                .iter()
+                                .map(|c| Checkpoint::from_bytes(c.0))
+                                .collect(),
                             blob.meta(),
-                        ),
+                        )?,
                         blob,
                     ));
                 }
             }
         }
         // Store once, without network I/O; sync() handles propagation separately.
-        self.client.node.store_built_batch(id, commits, fragments).await?;
+        self.client
+            .node
+            .store_built_batch(id, commits, fragments)
+            .await?;
         // Advance only after the whole batch is stored. Superseded items can
         // remain in Subduction; retirement is not a request to delete history.
         self.published = next;
@@ -73,19 +75,20 @@ impl Replica {
     }
 
     async fn sync(&self, id: SedimentreeId) -> Result<()> {
-        let (success, _, errors) = self
+        let report = self
             .client
             .node
             .sync_with_peer(
-                &self.client.server,
+                self.client.server,
                 id,
                 true,
                 CallTimeout::TimeoutMillis(5_000),
             )
             .await?;
         ensure!(
-            success && errors.is_empty(),
-            "sync failed (requires an open-policy server): {errors:?}"
+            report.success && report.transport_errors.is_empty(),
+            "sync failed (requires an open-policy server): {:?}",
+            report.transport_errors
         );
         Ok(())
     }
@@ -99,9 +102,8 @@ impl Replica {
             .get_blobs(id)
             .await?
             .into_iter()
-            .flatten()
-            .map(|blob| wire::decode(blob.as_slice()))
-            .collect::<Result<_>>()?;
+            .map(|blob| blob.as_slice().to_vec())
+            .collect();
         admit(doc, incoming)
     }
 }
@@ -110,17 +112,11 @@ fn commit_id(hash: &CommitHash) -> CommitId {
     CommitId::new(*hash.as_bytes())
 }
 
-fn admit(doc: &mut MvRegisterMap, incoming: Vec<Decoded>) -> Result<usize> {
+fn admit(doc: &mut MvRegisterMap, incoming: Vec<Vec<u8>>) -> Result<usize> {
     let result = (|| {
-        for decoded in incoming {
-            let report = doc
-                .graph
-                .ingest(decoded.item, |meta| decoded.payloads[meta.hash()].clone())?;
-            ensure!(
-                report.rejected.is_empty(),
-                "queued items rejected: {:?}",
-                report.rejected
-            );
+        for bytes in incoming {
+            let report = doc.graph.ingest(&bytes)?;
+            check_report(&report)?;
         }
         Ok(doc.graph.pending_items())
     })();
@@ -173,7 +169,7 @@ pub async fn run(remote: Option<RemoteServer>) -> Result<()> {
         }
     });
     let mut replicas = Vec::new();
-    let result = async {
+    let mut result = async {
         replicas.push(Replica::new(Client::connect(&remote).await?));
         replicas.push(Replica::new(Client::connect(&remote).await?));
         let id = SedimentreeId::new(rand::random());
@@ -187,15 +183,15 @@ pub async fn run(remote: Option<RemoteServer>) -> Result<()> {
             doc.set_write_permissions(&permissions);
         }
 
-        docs[0].set("title", "before");
+        docs[0].set("title", "before")?;
         converge(id, &mut replicas, &mut docs, |docs| {
             docs[0].get("title") == docs[1].get("title")
         })
         .await?;
 
         // Both edits start from the same history, before seeing the other edit.
-        docs[0].set("title", "Hello");
-        docs[1].set("title", "Howdy");
+        docs[0].set("title", "Hello")?;
+        docs[1].set("title", "Howdy")?;
         let expected = BTreeSet::from(["Hello".into(), "Howdy".into()]);
         converge(id, &mut replicas, &mut docs, |docs| {
             docs.iter().all(|d| d.get("title") == expected)
@@ -211,7 +207,7 @@ pub async fn run(remote: Option<RemoteServer>) -> Result<()> {
     .await;
     // Close connections on both success and failure.
     for replica in replicas {
-        replica.client.close().await;
+        result = transport::with_cleanup(result, replica.client.close().await);
     }
     if let Some(server) = &mut local_server {
         server.stop_and_drain().await;

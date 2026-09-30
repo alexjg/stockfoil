@@ -2,21 +2,33 @@
 //! Retain all assignments so revocation can reveal previously overwritten values.
 //! See [`sync`] for synchronization through a real Subduction WebSocket server.
 
+mod codec;
 pub mod sync;
 mod transport;
-mod wire;
+use codec::RegisterCodec;
+#[cfg(test)]
+mod encoded_tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use stockfoil::{
-    Author, CommitGraph, CommitHash, DiffError, MaterializationCursor, Signature, ViewPoint, Vis,
-    WritePermission,
+    Author, CommitGraph, CommitHash, DiffError, IngestReport, MaterializationCursor, Signature,
+    ViewPoint, Vis, WritePermission,
 };
 
+fn check_report(report: &IngestReport) -> eyre::Result<()> {
+    eyre::ensure!(
+        report.rejected.is_empty(),
+        "queued items rejected: {:?}",
+        report.rejected
+    );
+    Ok(())
+}
+
 pub struct MvRegisterMap {
-    graph: CommitGraph<Assignment>,
+    graph: CommitGraph<RegisterCodec>,
     signing_key: SigningKey,
     pending: BTreeSet<CommitHash>,
     materialized: Materialized,
@@ -41,7 +53,7 @@ struct Materialized {
 impl Materialized {
     fn update(
         &mut self,
-        graph: &CommitGraph<Assignment>,
+        graph: &CommitGraph<RegisterCodec>,
         view: &ViewPoint,
     ) -> Result<(), DiffError> {
         let mut affected = BTreeSet::new();
@@ -95,7 +107,7 @@ impl Default for MvRegisterMap {
 impl MvRegisterMap {
     pub fn new() -> Self {
         let mut doc = Self {
-            graph: CommitGraph::new(),
+            graph: CommitGraph::new(RegisterCodec),
             signing_key: SigningKey::from_bytes(&rand::random()),
             pending: BTreeSet::new(),
             materialized: Materialized::default(),
@@ -108,38 +120,47 @@ impl MvRegisterMap {
         Author::try_from(self.signing_key.verifying_key().as_bytes().as_slice()).unwrap()
     }
 
-    pub fn prepare_set(&mut self, key: &str, value: &str) -> CommitHash {
+    pub fn prepare_set(&mut self, key: &str, value: &str) -> eyre::Result<CommitHash> {
         let assignment = Assignment {
             key: key.to_owned(),
             value: value.to_owned(),
         };
-        let meta = self
-            .graph
-            .commit_by(self.author(), &bcs::to_bytes(&assignment).unwrap());
-        let hash = *meta.hash();
-        self.graph.ingest_local_commit(meta, assignment);
+        let draft = self.graph.commit(self.author(), assignment)?;
+        let hash = draft.hash;
         self.pending.insert(hash);
         self.materialize();
-        hash
+        check_report(&draft.report)?;
+        Ok(hash)
     }
 
-    pub fn publish(&mut self) {
-        for hash in std::mem::take(&mut self.pending) {
-            // Signing a fragment may already have admitted another pending edit.
-            if !self.graph.has_commit(&hash) {
-                let signature = Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
-                self.graph
-                    .ingest_signature(self.author(), hash, signature)
-                    .unwrap();
+    pub fn publish(&mut self) -> eyre::Result<()> {
+        let result = (|| {
+            while let Some(&hash) = self.pending.first() {
+                // Signing a fragment may already have admitted another pending edit.
+                let report = if !self.graph.has_commit(&hash) {
+                    let signature =
+                        Signature::from(self.signing_key.sign(hash.as_bytes()).to_bytes());
+                    Some(self.graph.ingest_signature(self.author(), hash, signature)?)
+                } else {
+                    None
+                };
+                // Keep unsigned drafts on failure, but don't retry a successful
+                // signature just because it unlocked a rejected queued item.
+                self.pending.remove(&hash);
+                if let Some(report) = report {
+                    check_report(&report)?;
+                }
             }
-        }
+            Ok(())
+        })();
         self.materialize();
+        result
     }
 
-    pub fn set(&mut self, key: &str, value: &str) -> CommitHash {
-        let hash = self.prepare_set(key, value);
-        self.publish();
-        hash
+    pub fn set(&mut self, key: &str, value: &str) -> eyre::Result<CommitHash> {
+        let hash = self.prepare_set(key, value)?;
+        self.publish()?;
+        Ok(hash)
     }
 
     pub fn set_write_permissions(&mut self, permissions: &HashMap<Author, WritePermission>) {
@@ -163,16 +184,19 @@ impl MvRegisterMap {
         Ok(historical.get(key))
     }
 
-    pub fn fork(&self) -> Self {
+    pub fn fork(&self) -> eyre::Result<Self> {
         let mut fork = Self::new();
         fork.set_write_permissions(self.view_point().write_permissions());
-        fork.merge(self);
-        fork
+        fork.merge(self)?;
+        Ok(fork)
     }
 
-    pub fn merge(&mut self, other: &Self) {
-        self.graph.merge(&other.graph);
+    pub fn merge(&mut self, other: &Self) -> eyre::Result<()> {
+        let result = self.graph.merge(&other.graph);
+        // Merge is atomic per item, not per batch. Keep the materialized state
+        // current even when a later item fails, and retain the typed error/report.
         self.materialize();
+        check_report(&result?)
     }
 
     fn materialize(&mut self) {

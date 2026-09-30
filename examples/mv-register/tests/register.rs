@@ -18,11 +18,11 @@ fn values(values: &[&str]) -> BTreeSet<String> {
 
 fn conflicting_replicas() -> (MvRegisterMap, MvRegisterMap) {
     let mut left = MvRegisterMap::new();
-    left.set("title", "Hi");
-    let mut right = left.fork();
+    left.set("title", "Hi").unwrap();
+    let mut right = left.fork().unwrap();
     grant_access(&mut [&mut left, &mut right]);
-    left.set("title", "Hello");
-    right.set("title", "Howdy");
+    left.set("title", "Hello").unwrap();
+    right.set("title", "Howdy").unwrap();
     (left, right)
 }
 
@@ -30,24 +30,24 @@ fn conflicting_replicas() -> (MvRegisterMap, MvRegisterMap) {
 fn sequential_assignments_overwrite() {
     let mut doc = MvRegisterMap::new();
     assert!(doc.get("title").is_empty());
-    doc.set("title", "Hi");
+    doc.set("title", "Hi").unwrap();
     assert_eq!(doc.get("title"), values(&["Hi"]));
-    doc.set("title", "Hello");
+    doc.set("title", "Hello").unwrap();
     assert_eq!(doc.get("title"), values(&["Hello"]));
 }
 
 #[test]
 fn concurrent_assignments_survive_both_merge_directions() {
     let (mut left, mut right) = conflicting_replicas();
-    let original_left = left.fork();
-    left.merge(&right);
-    right.merge(&original_left);
+    let original_left = left.fork().unwrap();
+    left.merge(&right).unwrap();
+    right.merge(&original_left).unwrap();
     assert_eq!(left.get("title"), values(&["Hello", "Howdy"]));
     assert_eq!(right.get("title"), left.get("title"));
 
     // Neither repeated delivery nor exchanging merged histories changes the result.
-    left.merge(&right);
-    right.merge(&left);
+    left.merge(&right).unwrap();
+    right.merge(&left).unwrap();
     assert_eq!(left.get("title"), values(&["Hello", "Howdy"]));
     assert_eq!(right.get("title"), left.get("title"));
 }
@@ -55,18 +55,18 @@ fn concurrent_assignments_survive_both_merge_directions() {
 #[test]
 fn unrelated_key_does_not_resolve_conflict() {
     let (mut left, mut right) = conflicting_replicas();
-    left.merge(&right);
-    left.set("description", "A greeting");
+    left.merge(&right).unwrap();
+    left.set("description", "A greeting").unwrap();
     assert_eq!(left.get("title"), values(&["Hello", "Howdy"]));
     assert_eq!(left.get("description"), values(&["A greeting"]));
-    right.merge(&left);
+    right.merge(&left).unwrap();
     assert_eq!(right.get("title"), left.get("title"));
     assert_eq!(right.get("description"), left.get("description"));
 
     // Both title writes are ancestors, even though the immediate parent writes
     // a different key. Supersession must account for transitive ancestry.
-    right.set("title", "Welcome");
-    left.merge(&right);
+    right.set("title", "Welcome").unwrap();
+    left.merge(&right).unwrap();
     assert_eq!(left.get("title"), values(&["Welcome"]));
     assert_eq!(left.get("description"), values(&["A greeting"]));
 }
@@ -74,14 +74,14 @@ fn unrelated_key_does_not_resolve_conflict() {
 #[test]
 fn identical_concurrent_values_keep_distinct_write_identities() {
     let mut left = MvRegisterMap::new();
-    let mut right = left.fork();
+    let mut right = left.fork().unwrap();
     grant_access(&mut [&mut left, &mut right]);
-    left.set("title", "Same");
-    right.set("title", "Same");
+    left.set("title", "Same").unwrap();
+    right.set("title", "Same").unwrap();
     // Only the left-hand write has been observed by this assignment.
-    left.set("title", "Updated");
-    left.merge(&right);
-    right.merge(&left);
+    left.set("title", "Updated").unwrap();
+    left.merge(&right).unwrap();
+    right.merge(&left).unwrap();
     assert_eq!(left.get("title"), values(&["Same", "Updated"]));
     assert_eq!(right.get("title"), left.get("title"));
 }
@@ -89,15 +89,15 @@ fn identical_concurrent_values_keep_distinct_write_identities() {
 #[test]
 fn three_way_merge_preserves_only_causally_maximal_writes() {
     let (mut left, mut right) = conflicting_replicas();
-    let mut third = left.fork();
+    let mut third = left.fork().unwrap();
     grant_access(&mut [&mut left, &mut right, &mut third]);
-    third.set("title", "Welcome");
+    third.set("title", "Welcome").unwrap();
     // Welcome supersedes Hello but is concurrent with Howdy.
-    left.merge(&right);
-    left.merge(&third);
-    right.merge(&third);
-    right.merge(&left);
-    third.merge(&right);
+    left.merge(&right).unwrap();
+    left.merge(&third).unwrap();
+    right.merge(&third).unwrap();
+    right.merge(&left).unwrap();
+    third.merge(&right).unwrap();
     for doc in [&left, &right, &third] {
         assert_eq!(doc.get("title"), values(&["Welcome", "Howdy"]));
     }
