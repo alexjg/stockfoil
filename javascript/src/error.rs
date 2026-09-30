@@ -57,19 +57,3 @@ impl From<stockfoil::DiffError> for Error {
         Self::new("MissingCommit", error)
     }
 }
-
-pub(crate) fn verification(error: stockfoil::VerificationError, fragment: bool) -> Error {
-    use stockfoil::VerificationError::*;
-    match error {
-        InvalidSignature(error) => error.into(),
-        InvalidItem => Error::new(
-            if fragment {
-                "InvalidFragment"
-            } else {
-                "InvalidItem"
-            },
-            error,
-        ),
-        MissingSignature { .. } => Error::new("MissingSignature", error),
-    }
-}

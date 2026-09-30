@@ -5,6 +5,8 @@ import {
   StockfoilError,
 } from 'stockfoil';
 
+import { byteCodec } from './fixture-codec.mjs';
+
 export const bytes = (text) => new TextEncoder().encode(text);
 export const copy = (value) => structuredClone(value);
 
@@ -53,15 +55,17 @@ export function signedCommit(commit, who = alice) {
   return { kind: 'commit', commit: copy(commit), signatures: [who.proof(commit.hash)] };
 }
 
-// Do not normalize malformed fragments: tests must exercise native validation.
+// Test-only fixture descriptions, explicitly encoded at each receipt call.
+// Do not repair incomplete ranges: tests must exercise native validation.
 export function fragment(head, commits, boundary = [], signatures = [alice.proof(head.hash)]) {
-  return { kind: 'fragment', head: head.hash, boundary: [...boundary], commits: copy(commits), signatures, checkpoints: [] };
+  return { kind: 'fragment', head: head.hash, boundary: [...boundary], commits: copy(commits), signatures };
 }
 
 export function itemId(item) {
-  return item.kind === 'commit'
-    ? { kind: 'commit', hash: item.commit.hash }
-    : { kind: 'fragment', head: item.head, boundary: [...item.boundary].sort() };
+  const meta = item.metadata ?? item;
+  return meta.kind === 'commit'
+    ? { kind: 'commit', hash: meta.hash ?? meta.commit.hash }
+    : { kind: 'fragment', head: meta.head, boundary: [...meta.boundary].sort() };
 }
 
 export function assertIds(actual, expected) {
@@ -90,7 +94,7 @@ export function throwsCode(fn, code) {
 }
 
 export function graph(t, permissions = []) {
-  const result = new CommitGraph();
+  const result = new CommitGraph(byteCodec);
   t.after(() => result.dispose());
   result.setWritePermissions(new Map(permissions.map((who) => [who.author, 'unbounded'])));
   return result;

@@ -7,6 +7,15 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as root from 'stockfoil';
 import * as slim from 'stockfoil/slim';
+import { byteCodec } from './fixture-codec.mjs';
+
+// Self-contained codec declaration used in isolated ESM/CJS package consumers.
+const codecSource = `const codec = {
+  formatId: 'test/bytes/v1',
+  encodeCommit: value => value, decodeCommit: value => value,
+  encodeFragment: (_shape, values) => new TextEncoder().encode(JSON.stringify(values.map(v => [...v]))),
+  decodeFragment: (_shape, bytes) => JSON.parse(new TextDecoder().decode(bytes)).map(v => Uint8Array.from(v)),
+};`;
 
 const directory = fileURLToPath(new URL('../', import.meta.url));
 const run = (script, format = 'module', cwd = directory) => execFileSync(
@@ -16,7 +25,7 @@ const run = (script, format = 'module', cwd = directory) => execFileSync(
 
 test('root and slim graphs accept each other’s cursors, including returned cursors and clones', () => {
   const author = root.authorId(new Uint8Array(32));
-  const a = new root.CommitGraph(), b = new slim.CommitGraph();
+  const a = new root.CommitGraph(byteCodec), b = new slim.CommitGraph(byteCodec);
   try {
     a.commit(author, new Uint8Array([1]));
     b.commit(author, new Uint8Array([1]));
@@ -35,10 +44,16 @@ test('CommonJS root auto-initializes and shares its Wasm instance with CommonJS 
   run(`
     const assert = require('node:assert/strict');
     const root = require('stockfoil'), slim = require('stockfoil/slim');
-    const graph = new root.CommitGraph();
+    ${codecSource}
+    const graph = new root.CommitGraph(codec);
     assert.deepEqual(graph.changes(new slim.MaterializationCursor()).changes, []);
     assert.equal(root.StockfoilError, slim.StockfoilError);
+    assert.throws(() => graph.ingest({}), slim.StockfoilError);
     graph.dispose();
+    const typed = new root.CommitGraph(codec);
+    typed.commit(root.authorId(new Uint8Array(32)), new Uint8Array([42]));
+    assert.deepEqual(typed.changes(new slim.MaterializationCursor()).changes[0].commit.payload, new Uint8Array([42]));
+    typed.dispose();
   `, 'commonjs');
 });
 
@@ -50,7 +65,8 @@ test('slim supports synchronous and asynchronous initialization without importin
       import init, { initSync, CommitGraph, MaterializationCursor } from 'stockfoil/slim';
       const bytes = readFileSync(new URL(import.meta.resolve('stockfoil/wasm')));
       ${initializer};
-      const graph = new CommitGraph();
+      ${codecSource}
+      const graph = new CommitGraph(codec);
       assert.deepEqual(graph.changes(new MaterializationCursor()).changes, []);
       graph.dispose();
     `);
@@ -78,12 +94,13 @@ test('published tarball runs independently and its public declarations compile w
     run(`
       import assert from 'node:assert/strict';
       import { CommitGraph, MaterializationCursor } from 'stockfoil';
-      const graph = new CommitGraph();
+      ${codecSource}
+      const graph = new CommitGraph(codec);
       assert.deepEqual(graph.changes(new MaterializationCursor()).changes, []);
       graph.dispose();
       assert.throws(() => import.meta.resolve('stockfoil/bindings'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
     `, 'module', temporary);
-    run(`const { CommitGraph } = require('stockfoil'); new CommitGraph().dispose();`, 'commonjs', temporary);
+    run(`const { CommitGraph } = require('stockfoil'); ${codecSource} new CommitGraph(codec).dispose();`, 'commonjs', temporary);
     const manifest = JSON.parse(readFileSync(join(temporary, 'node_modules/stockfoil/package.json'), 'utf8'));
     assert.equal(manifest.exports['./bindings'], undefined);
   } finally { rmSync(temporary, { recursive: true, force: true }); }

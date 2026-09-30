@@ -1,21 +1,25 @@
 import {
-  RawGraph, RawMaterializationCursor, RawExportCursor,
+  RawCodecGraph, RawMaterializationCursor, RawExportCursor,
   authorId as rawAuthorId, commitHash as rawCommitHash,
   describeCommit as rawDescribeCommit,
 } from "#wasm-bodge/bindings";
 import {
   StockfoilError, type ErrorCode, type AuthorId, type CommitHash, type Commit,
   type WritePermission, type ViewPoint, type SignatureEvidence,
-  type TransportItem, type ItemId, type IngestReport, type MaterializationChange,
+  type ItemId, type IngestReport, type MaterializationChange,
+  type PayloadCodec, type DecodeLimits, type EncodedItem,
 } from "./types.js";
 export * from "./types.js";
+import { codecBridge, limits } from "./codec.js";
 
 function call<T>(fn: () => T): T {
   try { return fn(); }
   catch (error) {
     if (error instanceof StockfoilError) throw error;
     if (error instanceof Error && error.name === "StockfoilError" && "code" in error) {
-      throw new StockfoilError(error.code as ErrorCode, error.message, { cause: error });
+      throw new StockfoilError(error.code as ErrorCode, error.message, {
+        cause: "cause" in error ? error.cause : error,
+      });
     }
     throw error;
   }
@@ -104,15 +108,9 @@ export class ExportCursor {
   }
 }
 
-export interface MaterializationBatch {
-  readonly changes: readonly MaterializationChange[];
+export interface MaterializationBatch<P = Uint8Array> {
+  readonly changes: readonly MaterializationChange<P>[];
   readonly cursor: MaterializationCursor;
-}
-
-export interface ExportBatch {
-  readonly added: readonly TransportItem[];
-  readonly retired: readonly ItemId[];
-  readonly cursor: ExportCursor;
 }
 
 interface RawReport {
@@ -131,76 +129,104 @@ function report(raw: RawReport): IngestReport {
   };
 }
 
-export class CommitGraph {
-  #raw: RawGraph | undefined = new RawGraph();
+/** Complete native envelopes and the captured publication inventory cursor. */
+export interface ExportBatch {
+  readonly added: readonly EncodedItem[];
+  readonly retired: readonly ItemId[];
+  readonly cursor: ExportCursor;
+}
 
-  #graph(): RawGraph {
-    if (!this.#raw) throw new StockfoilError("Disposed", "graph has been disposed");
-    return this.#raw;
+/** A typed graph using the native Stockfoil envelope and an application codec. */
+export class CommitGraph<P> {
+  #raw: RawCodecGraph | undefined;
+  #busy = false;
+  #maxItemBytes: number;
+
+  constructor(codec: PayloadCodec<P>, options: Partial<DecodeLimits> = {}) {
+    const bridge = codecBridge(codec);
+    const budget = limits(options);
+    this.#maxItemBytes = budget.maxItemBytes;
+    this.#raw = call(() => new RawCodecGraph(bridge, bridge.formatId, budget));
   }
 
-  /** Add an unsigned local draft using the current working heads. */
-  commit(author: AuthorId, payload: Uint8Array): {
+  #run<T>(operation: (graph: RawCodecGraph) => T): T {
+    if (this.#busy) throw new StockfoilError("ReentrantCall", "graph operation in progress");
+    if (!this.#raw) throw new StockfoilError("Disposed", "graph has been disposed");
+    this.#busy = true;
+    try { return call(() => operation(this.#raw!)); }
+    finally { this.#busy = false; }
+  }
+
+  commit(author: AuthorId, payload: P): {
     hash: CommitHash; signingBytes: Uint8Array; report: IngestReport;
   } {
-    const draft = call(() => this.#graph().commit(identifier(author), bytes(payload))) as {
+    const draft = this.#run(g => g.commit(identifier(author), payload)) as {
       hash: CommitHash; signingBytes: Uint8Array; report: RawReport;
     };
     return { ...draft, report: report(draft.report) };
   }
 
+  /** Prepare metadata using current working heads, without inserting a draft. */
+  describeCommit(author: AuthorId, payload: P): Commit<P> {
+    return this.#run(g => g.describeCommit(identifier(author), payload)) as Commit<P>;
+  }
+
   addSignature(evidence: SignatureEvidence): IngestReport {
-    return report(call(() => this.#graph().addSignature(evidence)) as RawReport);
+    return report(this.#run(g => g.addSignature(evidence)) as RawReport);
   }
 
-  /** Validate all contents and signatures, then admit or queue the received item. */
-  ingest(item: TransportItem): IngestReport {
-    return report(call(() => this.#graph().ingest(item)) as RawReport);
+  /** Replace inbound budgets: omitted options reset to constructor defaults. */
+  setDecodeLimits(options: Partial<DecodeLimits>): void {
+    this.#run(g => {
+      const budget = limits(options);
+      g.setDecodeLimits(budget);
+      this.#maxItemBytes = budget.maxItemBytes;
+    });
   }
 
-  viewPoint(): ViewPoint { return call(() => this.#graph().viewPoint()) as ViewPoint; }
-  signedViewPoint(): ViewPoint { return call(() => this.#graph().signedViewPoint()) as ViewPoint; }
-
-  /** Replace permissions. Unlisted authors are denied. */
-  setWritePermissions(permissions: ReadonlyMap<AuthorId, WritePermission>): void {
-    call(() => this.#graph().setWritePermissions(permissions));
+  /** Decode and authenticate one native envelope before admission or queuing. */
+  ingest(item: Uint8Array): IngestReport {
+    return report(this.#run(g => {
+      const input = bytes(item);
+      // Avoid even copying an oversized envelope into Wasm linear memory.
+      if (input.byteLength > this.#maxItemBytes) {
+        throw new StockfoilError("LimitExceeded", "encoded item bytes exceed maxItemBytes");
+      }
+      return g.ingest(input);
+    }) as RawReport);
   }
 
-  /** Owned changes in ancestors-before-descendants order; defaults to the working view. */
-  changes(since: MaterializationCursor, view?: ViewPoint): MaterializationBatch {
-    const batch = call(() => this.#graph().changes(handle(materializationCursors, since), view)) as {
-      changes: MaterializationChange[]; cursor: RawMaterializationCursor;
-    };
-    return { changes: batch.changes, cursor: wrapMaterializationCursor(batch.cursor) };
-  }
-
-  /** Advance the returned cursor only after successful publication of the batch. */
   exportChanges(since: ExportCursor): ExportBatch {
-    const batch = call(() => this.#graph().exportChanges(handle(exportCursors, since))) as {
-      added: TransportItem[]; retired: ItemId[]; cursor: RawExportCursor;
+    const batch = this.#run(g => g.exportChanges(handle(exportCursors, since))) as {
+      added: EncodedItem[]; retired: ItemId[]; cursor: RawExportCursor;
     };
     return { added: batch.added, retired: batch.retired, cursor: wrapExportCursor(batch.cursor) };
   }
 
-  /** Whether the commit belongs to admitted, authenticated history. */
-  hasCommit(hash: CommitHash): boolean {
-    return call(() => this.#graph().hasCommit(identifier(hash)));
+  changes(since: MaterializationCursor, view?: ViewPoint): MaterializationBatch<P> {
+    const batch = this.#run(g => g.changes(handle(materializationCursors, since), view)) as {
+      changes: MaterializationChange<P>[]; cursor: RawMaterializationCursor;
+    };
+    return { changes: batch.changes, cursor: wrapMaterializationCursor(batch.cursor) };
   }
 
+  viewPoint(): ViewPoint { return this.#run(g => g.viewPoint()) as ViewPoint; }
+  signedViewPoint(): ViewPoint { return this.#run(g => g.signedViewPoint()) as ViewPoint; }
+  setWritePermissions(permissions: ReadonlyMap<AuthorId, WritePermission>): void {
+    this.#run(g => g.setWritePermissions(permissions));
+  }
+  hasCommit(hash: CommitHash): boolean { return this.#run(g => g.hasCommit(identifier(hash))); }
   isAncestor(ancestor: CommitHash, descendant: CommitHash): boolean {
-    return call(() => this.#graph().isAncestor(identifier(ancestor), identifier(descendant)));
+    return this.#run(g => g.isAncestor(identifier(ancestor), identifier(descendant)));
   }
-
-  pendingItems(): number { return call(() => this.#graph().pendingItems()); }
+  pendingItems(): number { return this.#run(g => g.pendingItems()); }
   missingDependencies(): readonly CommitHash[] {
-    return call(() => this.#graph().missingDependencies()) as CommitHash[];
+    return this.#run(g => g.missingDependencies()) as CommitHash[];
   }
 
-  /** Release the graph's Wasm memory. Safe to call more than once. */
+  /** Idempotent, except that disposal during a codec callback is rejected. */
   dispose(): void {
-    if (this.#raw) {
-      this.#raw.free();
-      this.#raw = undefined;
-    }
+    if (this.#busy) throw new StockfoilError("ReentrantCall", "graph operation in progress");
+    if (this.#raw) { this.#raw.free(); this.#raw = undefined; }
   }
 }

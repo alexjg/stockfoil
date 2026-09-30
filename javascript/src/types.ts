@@ -1,4 +1,4 @@
-import { RawGraph } from "#wasm-bodge/bindings";
+import { RawCodecGraph } from "#wasm-bodge/bindings";
 
 export type CommitHash = string & { readonly __brand: "CommitHash" };
 export type AuthorId = string & { readonly __brand: "AuthorId" };
@@ -13,12 +13,12 @@ export interface ViewPoint {
   readonly writePermissions: ReadonlyMap<AuthorId, WritePermission>;
 }
 
-export interface Commit {
+export interface Commit<P = Uint8Array> {
   readonly hash: CommitHash;
   readonly author: AuthorId;
   readonly parents: readonly CommitHash[];
   readonly payloadHash: string;
-  readonly payload: Uint8Array;
+  readonly payload: P;
 }
 
 export interface SignatureEvidence {
@@ -35,32 +35,21 @@ export type ItemId =
       readonly boundary: readonly CommitHash[];
     };
 
-export type TransportItem =
-  | {
-      readonly kind: "commit";
-      readonly commit: Commit;
-      readonly signatures: readonly SignatureEvidence[];
-    }
-  | {
-      readonly kind: "fragment";
-      readonly head: CommitHash;
-      readonly boundary: readonly CommitHash[];
-      readonly commits: readonly Commit[];
-      readonly signatures: readonly SignatureEvidence[];
-      /** 12-byte reconciliation hints, not evidence. Exports are sorted, unique copies. */
-      readonly checkpoints: readonly Uint8Array[];
-    };
-
-export interface MaterializationChange {
-  readonly commit: Commit;
+export interface MaterializationChange<P = Uint8Array> {
+  readonly commit: Commit<P>;
   readonly newlyDelivered: boolean;
   readonly visibility: "before" | "after" | "both" | "neither";
 }
 
 export type ErrorCode =
+  | "CodecError"
+  | "InvalidEncoding"
+  | "WrongCodec"
+  | "NonCanonicalPayload"
+  | "LimitExceeded"
+  | "ReentrantCall"
   | "InvalidInput"
   | "PayloadHashMismatch"
-  | "CommitHashMismatch"
   | "InvalidSignature"
   | "InvalidPublicKey"
   | "MissingSignature"
@@ -81,7 +70,7 @@ class StockfoilError extends Error {
 // Root and slim wrappers share the raw constructor, but are bundled separately.
 // Keep error identity shared too, so libraries can use instanceof across them.
 const errorKey = Symbol.for("stockfoil.StockfoilError");
-const shared = RawGraph as unknown as { [key: symbol]: typeof StockfoilError | undefined };
+const shared = RawCodecGraph as unknown as { [key: symbol]: typeof StockfoilError | undefined };
 const SharedStockfoilError = shared[errorKey] ??= StockfoilError;
 type SharedStockfoilError = StockfoilError;
 export { SharedStockfoilError as StockfoilError };
@@ -95,4 +84,47 @@ export interface IngestReport {
   readonly admitted: readonly ItemId[];
   readonly rejected: readonly IngestRejection[];
   readonly pending: number;
+}
+
+/** Inbound per-item budgets only; not local commit/export limits or pending-queue quotas. */
+export interface DecodeLimits {
+  readonly maxItemBytes: number;
+  readonly maxMembers: number;
+  readonly maxParents: number;
+  readonly maxSignatures: number;
+  readonly maxPayloadBytes: number;
+}
+
+export type ParentRef =
+  | { readonly kind: "member"; readonly index: number }
+  | { readonly kind: "external"; readonly hash: CommitHash };
+
+export interface FragmentShape {
+  readonly members: readonly {
+    readonly author: AuthorId;
+    readonly parents: readonly ParentRef[];
+  }[];
+}
+
+/** All callbacks are synchronous. Values must support structuredClone. */
+export interface PayloadCodec<P> {
+  readonly formatId: string;
+  encodeCommit(payload: P): Uint8Array;
+  decodeCommit(bytes: Uint8Array, limits: DecodeLimits): P;
+  encodeFragment(shape: FragmentShape, payloads: readonly P[]): Uint8Array;
+  decodeFragment(shape: FragmentShape, bytes: Uint8Array, limits: DecodeLimits): P[];
+}
+
+export type TransportMetadata =
+  | { readonly kind: "commit"; readonly hash: CommitHash; readonly parents: readonly CommitHash[] }
+  | {
+      readonly kind: "fragment";
+      readonly head: CommitHash;
+      readonly boundary: readonly CommitHash[];
+      readonly checkpoints: readonly Uint8Array[];
+    };
+
+export interface EncodedItem {
+  readonly metadata: TransportMetadata;
+  readonly bytes: Uint8Array;
 }
