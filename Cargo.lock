@@ -1022,6 +1022,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1087,12 +1093,14 @@ dependencies = [
  "bijoux",
  "blake3",
  "ed25519-dalek",
+ "event-listener",
  "future_form",
  "futures",
  "getrandom 0.2.17",
  "nonempty",
  "sedimentree_core",
  "siphasher",
+ "spin",
  "subduction_crypto",
  "thiserror",
  "tracing",
