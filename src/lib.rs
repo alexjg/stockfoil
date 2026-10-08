@@ -1,69 +1,38 @@
 //! # Stockfoil
 //!
-//! `stockfoil` is a library for storing and synchronizing authenticated commit
-//! graphs.
+//! Authenticated commit histories for CRDTs, independent of payload contents.
 //!
-//! # Received history
-//!
-//! [`CommitGraph::ingest`] decodes and authenticates encoded items with the graph's
-//! payload codec, owning their payloads and queuing them when dependencies are
-//! missing. Queued items are not delivered graph history. Admission, including
-//! local signing, automatically
-//! wakes their dependents. Check [`IngestReport::rejected`] after ingestion,
-//! signing, local commits, and merge for deferred graph-dependent failures;
-//! valid dependencies are not rolled back. The queue currently has no limits.
-//!
-//! # Materialization
-//!
-//! Use [`CommitGraph::visit_changes`] to build and update a CRDT view. Keep a
-//! [`MaterializationCursor`] alongside the materialized state and use one
-//! callback for newly delivered payloads and changes in commit participation.
-//! This handles cold starts, local edits, merge, signing, and revocation without
-//! coordinating separate delivery and diff traversals.
-//!
-//! Target [`CommitGraph::view_point`] for the working view (including drafts),
-//! [`CommitGraph::signed_view_point`] for admitted history, or a captured
-//! [`ViewPoint`] for a historical view. For an isolated historical read, copy
-//! both the materialized state and its cursor before updating the copy.
-//!
-//! [`CommitGraph::diff`], [`CommitGraph::traverse`], and
-//! [`CommitGraph::traverse_since`] are lower-level tools for specialized queries
-//! and graph inspection.
-mod ancestor_clock;
+//! - [`History`] holds topology, authorship, logical payload IDs, admission
+//!   state, and signature evidence. It never holds payload bytes or calls
+//!   application code.
+//! - Local commits are hashed with a [`CommitBuilder`], published as drafts,
+//!   and admitted once signed ([`History::sign`]).
+//! - [`History::export`] plans what a destination is missing.
+//! - [`History::changes`] tells a materializer which commits were delivered or
+//!   changed participation, without reading payloads.
 mod author;
-pub use author::Author;
-mod errors;
-pub use errors::{DiffError, IngestError, QueryError, SignatureError, VerificationError};
-pub(crate) use errors::FragmentReadError;
-#[cfg(test)]
-pub(crate) use errors::ExportError;
-mod export;
-pub use export::ExportCursor;
-mod ingest;
-pub use ingest::{IngestRejection, IngestReport, ItemId};
-pub(crate) use ingest::{SignatureEvidence, UnverifiedItem, VerifiedItem};
-mod pending_ingest;
 mod blob_hash;
-pub use blob_hash::BlobHash;
 mod commit_hash;
-pub use commit_hash::{CommitHash, InvalidCommitHash};
-mod commit_graph;
-pub use commit_graph::CommitGraph;
-mod codec;
-mod wire;
-pub use codec::*;
-pub(crate) use commit_graph::NodeIdx;
-mod commit_meta;
-pub use commit_meta::{CommitContents, CommitMeta};
-mod parsing;
-mod view_point;
-pub use view_point::{CommitDiff, ViewPoint, ViewPointDiff, Vis, VisDiff};
-mod materialization;
-pub use materialization::{MaterializationChange, MaterializationCursor};
+mod error;
+mod evidence;
+mod history;
+mod meta;
+mod reader;
 mod signature;
-pub use signature::Signature;
-mod sedimentree;
-pub use sedimentree::{Checkpoint, FragmentRange};
-pub(crate) use sedimentree::{Fragment, LooseCommit, SedimentreeSummary};
 mod write_permission;
+
+pub use author::{Author, InvalidAuthor};
+pub use blob_hash::{BlobHash, BlobHasher};
+pub use commit_hash::{CommitHash, InvalidCommitHash};
+pub use error::Error;
+pub use history::{
+    Batch, Change, Changes, CommitBuilder, CommitDiff, CommitInfo, Delivered, ExportCursor,
+    ExportItem, ExportPlan, Heads, History, MaterializationCursor, Prepared, ViewDiff, ViewPoint,
+    Vis, VisDiff, WritePermissions,
+};
+pub use meta::{
+    BundleMeta, Evidence, FormatId, FragmentRange, FragmentShape, ItemId, Limits, MemberShape,
+    ParentRef, PayloadId,
+};
+pub use signature::Signature;
 pub use write_permission::WritePermission;

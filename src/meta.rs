@@ -1,0 +1,168 @@
+//! Structural metadata shared by the wire format, verification, history, and codecs.
+use crate::{Author, BlobHash, CommitHash, Error, Signature};
+use std::collections::BTreeSet;
+
+/// Application logical payload ID. Stockfoil only stores and returns it.
+pub type PayloadId = u64;
+
+/// A sedimentree fragment: the head, plus its ancestry down to (and excluding)
+/// the boundary commits and all their ancestors.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FragmentRange {
+    pub head: CommitHash,
+    pub boundary: BTreeSet<CommitHash>,
+}
+
+/// A standalone commit or a canonical fragment.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ItemId {
+    Commit(CommitHash),
+    Fragment(FragmentRange),
+}
+
+impl ItemId {
+    pub fn head(&self) -> CommitHash {
+        match self {
+            Self::Commit(hash) => *hash,
+            Self::Fragment(range) => range.head,
+        }
+    }
+}
+
+/// Ancestors-first member structure, as supplied to application codecs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FragmentShape {
+    pub members: Vec<MemberShape>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberShape {
+    pub author: Author,
+    /// Order and multiplicity are part of the commit identity.
+    pub parents: Vec<ParentRef>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParentRef {
+    /// An earlier member of the same bundle.
+    Member(usize),
+    /// A commit outside the bundle.
+    External(CommitHash),
+}
+
+/// A signature by `author` over the hash of member `member`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Evidence {
+    pub author: Author,
+    pub member: usize,
+    pub signature: Signature,
+}
+
+/// Structural bundle metadata. Untrusted until its bundle has been admitted;
+/// a decoder receives it before any authentication has happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleMeta {
+    pub id: ItemId,
+    pub shape: FragmentShape,
+    pub evidence: Vec<Evidence>,
+}
+
+impl BundleMeta {
+    pub fn len(&self) -> usize {
+        self.shape.members.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.shape.members.is_empty()
+    }
+    pub fn head(&self) -> CommitHash {
+        self.id.head()
+    }
+}
+
+/// A trusted application format identifier: 1–128 UTF-8 bytes, compared exactly.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FormatId(Box<str>);
+
+impl FormatId {
+    pub fn new(id: &str) -> Result<Self, Error> {
+        if id.is_empty() || id.len() > 128 {
+            return Err(Error::Limit("format ID must have 1..=128 bytes"));
+        }
+        Ok(Self(id.into()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Per-item structural limits for untrusted input. They are hard errors.
+///
+/// Metadata memory grows with members and parents. The byte limits default to
+/// unbounded so that payloads of any size can stream; tighten them to bound the
+/// hashing work a single item can demand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub max_header_bytes: usize,
+    pub max_members: usize,
+    pub max_parents: usize,
+    pub max_signatures: usize,
+    pub max_boundaries: usize,
+    /// Total canonical bytes across all members.
+    pub max_canonical_bytes: u64,
+    /// Total stored item bytes, header included.
+    pub max_item_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_header_bytes: 64 << 20,
+            // Depth-2 fragments average 65,536 members; leave room for large ones.
+            max_members: 1 << 20,
+            max_parents: 4 << 20,
+            max_signatures: 1 << 20,
+            max_boundaries: 65_536,
+            max_canonical_bytes: u64::MAX,
+            max_item_bytes: u64::MAX,
+        }
+    }
+}
+
+/// Sedimentree depth: the number of leading zero bytes of a commit hash.
+pub(crate) fn depth(hash: &CommitHash) -> usize {
+    hash.as_bytes().iter().take_while(|b| **b == 0).count()
+}
+
+/// Incremental commit identity:
+/// `BLAKE3(J(parent count) || parents || author || BLAKE3(payload))`.
+pub(crate) struct CommitHasher(blake3::Hasher);
+
+impl CommitHasher {
+    pub fn new(parent_count: usize) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        let mut count = Vec::with_capacity(10);
+        bijoux::u64::encode(parent_count as u64, &mut count);
+        hasher.update(&count);
+        Self(hasher)
+    }
+    pub fn parent(&mut self, parent: &CommitHash) {
+        self.0.update(parent.as_bytes());
+    }
+    pub fn finish(mut self, author: &Author, payload: &BlobHash) -> CommitHash {
+        self.0.update(author.as_slice());
+        self.0.update(payload.as_slice());
+        CommitHash::from(self.0.finalize())
+    }
+}
+
+pub(crate) fn commit_hash<'a>(
+    parents: impl ExactSizeIterator<Item = &'a CommitHash>,
+    author: &Author,
+    payload: &BlobHash,
+) -> CommitHash {
+    let mut hasher = CommitHasher::new(parents.len());
+    for parent in parents {
+        hasher.parent(parent);
+    }
+    hasher.finish(author, payload)
+}

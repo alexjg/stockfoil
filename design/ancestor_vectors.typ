@@ -13,7 +13,7 @@ The heads identify a causally complete history: the heads themselves
 and all their ancestors. Write permissions map author IDs (Ed25519 public keys)
 to an unbounded permission, a bounded frontier of commit hashes, or a denial.
 Missing authors are denied. A bounded frontier defines the down-set accepted
-for that author, subject to the frontier heads being in the delivered history.
+for that author, subject to the frontier heads being in the selected history.
 Delivery and visibility are different: an invisible commit can still have
 visible ancestors or descendants. Encountering it is not a reason to stop
 traversing the graph.
@@ -25,25 +25,29 @@ intersection of the before/after write-frontier down-sets: permissions are
 per author, and visible commits need not form a down-set. Each candidate commit
 must instead be classified by its delivery and author permission in each view.
 Author-specific chains let us compile those permissions into a visibility clock.
-The current diff iterator scans the stored topological prefix through the
-latest coordinate in either visibility clock, yielding commits whose visibility
-changes. It does not implement a frontier-to-head traversal.
+Because visibility is a prefix of every chain, the commits whose visibility
+changes form one interval per chain, which `ViewDiff::changed_commits` and
+`History::changes` enumerate directly. Neither implements a frontier-to-head
+traversal.
 
-In other scenarios materialization is split into two steps: first ingesting
-newly delivered, causally ready commits, then filtering commits by their
-visibility before and after some viewpoint. For example, Automerge stores all
-operations ever received in a log and materializes a view by walking that log
-and filtering out things which are not visible.
+Materialization combines two questions: which commits are newly delivered to
+the materializer, and which commits' visibility differs before and after some
+viewpoint. `History::changes` answers both, comparing the current delivery
+clock with the clock of the cursor's delivery heads and the two masked clocks.
+For example, Automerge stores all operations ever received in a log and
+materializes a view by walking that log and filtering out things which are not
+visible.
 
-This second requirement motivates a simple way to check whether an individual
+Such filtering motivates a simple way to check whether an individual
 commit is visible in a viewpoint, without walking its ancestry on every query.
 
 == Chain Clocks
 
 Parent links already allow ancestry checks by graph traversal, but repeated
-walks are expensive in large graphs. The implementation in
-`src/ancestor_clock.rs` and `src/commit_graph.rs` instead uses graph-local
-chain clocks. `src/view_point.rs` queries permission-masked clocks for visibility.
+walks are expensive in large graphs. `History` instead uses history-local chain
+clocks: `src/history/clock.rs` defines them, `src/history/mod.rs` assigns chains
+and caches clocks, and `src/history/view.rs` builds permission-masked clocks for
+visibility.
 
 A chain is a set of commits by one author, totally ordered by ancestry. An
 author may own several chains: sharing a signing key does not make concurrent
@@ -53,7 +57,7 @@ parents-before-children node store. Positions increase along a chain but need
 not be consecutive, and adjacent chain members need not share a direct parent
 edge. `NodeIdx(0)` is a real position, not an empty-clock sentinel.
 
-A down-set intersects each chain in a prefix. `AncestorClock` represents it
+A down-set intersects each chain in a prefix. `Clock` represents it
 exactly as a sparse vector of `(chain ID, greatest included NodeIdx)` pairs,
 sorted by chain ID. An absent coordinate means that no member of that chain is
 included. A commit belongs to the down-set exactly when its chain coordinate
@@ -70,8 +74,10 @@ otherwise it tests membership in the descendant's inclusive clock.
 
 === Chain Decomposition
 
-Chains are assigned greedily as commits arrive with all parents present.
-The node store tracks the current tip of every chain. For a new commit:
+Chains are assigned greedily as commits are delivered, always with all
+parents present. Drafts and admitted commits share one node store; admitting a
+draft does not move it. The store tracks the current tip of every chain. For a
+new commit:
 
 - Prefer a direct parent by the same author which is still the current tip of
   its chain. If there are several eligible parents, choose the smallest chain ID.
@@ -112,7 +118,7 @@ safe shortcuts are revisits and cached *full ancestry* clocks, not partially
 accumulated coordinates. There is no nearest-containing-fragment lookup or
 containing-fragment index in this algorithm.
 
-Each node has a `OnceLock<Arc<AncestorClock>>`. Computing a requested clock
+Each node has a `OnceLock<Arc<Clock>>`. Computing a requested clock
 initializes that node's cache; the backward walk does not populate every
 intermediate node's cache. In addition, insertion eagerly requests a clock
 when any of these conditions holds:
@@ -128,18 +134,16 @@ are cached regardless of fragment certification; an ancestry clock is not a
 fragment certificate.
 
 For a singleton set of heads, `clock_for_heads` shares the head's cached `Arc`.
-For multiple heads it merges their cached clocks into a new clock; an empty
-set produces an empty clock. When the requested delivery heads are exactly the
-current graph heads (after deduplication), the whole history contains every
-stored node. Its clock is constructed directly from the chain-tip table in
-linear time in the number of chains, with no ancestry walk.
+For multiple heads it merges their clocks into a new clock; an empty set
+produces an empty clock. When the requested heads are exactly the current
+delivered heads (after deduplication), the whole history contains every stored
+node. Its clock is constructed directly from the chain-tip table in linear time
+in the number of chains, with no ancestry walk. `History::changes` uses the
+same construction for the currently delivered history.
 
 Cached clocks are immutable: appending descendants cannot change a node's
-ancestry. Cloning a graph preserves the earlier prefix's indices and chain
-labels, and already initialized cache entries share their immutable clocks
-through `Arc`. Uninitialized entries can be filled independently after cloning.
-This does not make clocks interchangeable between independently built replicas,
-or between divergent suffixes of graph clones.
+ancestry. Chain labels and node indices depend on delivery order, so clocks are
+not interchangeable between independently built replicas.
 
 == Normalized Fragment Membership
 
@@ -152,19 +156,22 @@ Each chain also stores its nodes in increasing position order. For each head
 clock coordinate, binary searches select the interval above the boundary clock's
 coordinate and at or below the head's coordinate. Enumerating these intervals
 visits normalized members without scanning the excluded history or unrelated
-nodes. Traversal, summaries, export, and local certificate construction use the
-same member calculation.
+nodes. Export, local certificate assembly, and retiring covered fragments use
+this member calculation; `traverse_since` and the delivery part of
+`History::changes` use the same interval difference. Placement checks for
+received fragments test members against the boundary clock directly.
 
 == Permission-Masked Clocks
 
-The portable `ViewPoint` is unchanged: it owns delivered commit hashes and
-write permissions. It contains no chain labels, node indices, or ancestry
+The portable `ViewPoint` owns history heads and write permissions
+(`WritePermissions`). It contains no chain labels, node indices, or ancestry
 clocks. Those are local implementation details, and are never transported or
 compared across replicas. Diffing requires both viewpoints' history heads to be
-delivered and may include pending local commits. Admission is a separate concern:
-callers requiring admitted history can check each head with `has_commit`.
+delivered (otherwise `Error::UnknownCommit`) and may include unadmitted local
+drafts. Admission is a separate concern: callers requiring admitted history can
+check each head with `is_admitted`.
 
-Preparing a viewpoint starts with its inclusive delivery-history clock and masks
+Preparing a viewpoint starts with its inclusive selected-history clock and masks
 each coordinate according to that chain owner's permission:
 
 - Unbounded: keep the history's position unchanged.
@@ -178,20 +185,21 @@ Each bounded author's frontier clock is computed at most once during preparation
 even if that author owns several chains. Only the final masked clock is retained.
 
 For each bounded frontier, first retain only frontier heads which are known
-and belong to this viewpoint's delivery history. Then union those retained
+and belong to this viewpoint's selected history. Then union those retained
 heads' inclusive ancestry clocks. Filtering the heads *before* union is
 essential: an out-of-history bound grants nothing in this snapshot, even if
-some of its ancestors are delivered. Unioning all bounds and intersecting the
-result with delivery history would incorrectly grant those ancestors.
+some of its ancestors are in that history. Unioning all bounds and intersecting the
+result with selected history would incorrectly grant those ancestors.
 
 A commit is visible exactly when the masked clock contains its chain position.
 Each query uses one coordinate lookup, with no author lookup or ancestry walk.
-Diff classification applies this test to the before and after masked clocks.
+`ViewDiff::visibility` and the `visibility` of each `Change` record apply this
+test to the before and after masked clocks.
 
-Delivery and individual bound clocks are down-sets. Visibility is not
+History and individual bound clocks are down-sets. Visibility is not
 necessarily a down-set, because permissions filter commits by author. However,
 single-author chains ensure visibility is still a prefix on every chain, so it
-fits the same `AncestorClock` representation. An allowed descendant can remain
+fits the same `Clock` representation. An allowed descendant can remain
 visible while an intermediate commit by a denied author is excluded on another
 chain. Masked clocks are never put into node ancestry caches or used for fragment
 membership: those operations must retain the full parent-closed histories.
@@ -211,11 +219,14 @@ coordinates of its input, and the current `BTreeMap` builder takes logarithmic
 time per coordinate update in the size of the accumulated clock. Multiple
 heads, bounded authors, and fallback chain assignment can require these unions.
 Checkpoint spacing limits uncached path lengths, not the total branching work
-or the size of the clocks being merged. Enumerating changed commits still
-scans a topological prefix; fast membership is not an output-sensitive diff.
+or the size of the clocks being merged. Enumerating changed commits does a few
+binary searches per coordinate of the two clocks, visits only the changed
+nodes, then sorts them by node index to emit parents first. It is
+output-sensitive apart from that per-chain overhead and the cost of preparing
+the clocks.
 
 Each cached clock uses space proportional to its own coordinate count, in
-addition to per-node metadata and the chain-tip and chain-owner tables. Small chain counts make
+addition to per-node metadata and the chain-tip, chain-owner, and per-chain node tables. Small chain counts make
 long, mostly sequential histories cheap, and `Arc` avoids copying shared
 immutable clocks. Many authors, wide histories, or a poor greedy decomposition
 can make clocks large, however. With many large cached clocks, storage and accumulated

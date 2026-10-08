@@ -1,0 +1,369 @@
+//! Views, participation, and metadata-only change batches for materializers.
+//!
+//! A [`ViewPoint`] is a set of history heads plus write permissions. A commit
+//! *participates* in a view if it is in the heads' ancestry and its author's
+//! permission allows it. Change planning compares two participation sets and the
+//! materializer's previously delivered history, and enumerates only the chain
+//! intervals that differ, so small updates cost about as much as they change.
+use super::clock::{self, Clock};
+use super::{Heads, History, NodeIdx};
+use crate::{Author, CommitHash, Error, PayloadId, WritePermission};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+pub type WritePermissions = HashMap<Author, WritePermission>;
+
+/// History heads and write permissions. Missing authors are denied; bounds
+/// outside the view's history grant nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ViewPoint {
+    heads: Vec<CommitHash>,
+    write_permissions: WritePermissions,
+}
+
+impl ViewPoint {
+    pub fn from_parts(heads: Vec<CommitHash>, write_permissions: WritePermissions) -> Self {
+        Self {
+            heads,
+            write_permissions,
+        }
+    }
+    pub fn heads(&self) -> &[CommitHash] {
+        &self.heads
+    }
+    pub fn write_permissions(&self) -> &WritePermissions {
+        &self.write_permissions
+    }
+}
+
+/// Participation of one commit in two views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vis {
+    Before,
+    After,
+    Both,
+    Neither,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisDiff {
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitDiff {
+    pub commit: CommitHash,
+    pub change: VisDiff,
+}
+
+/// Participation changes between two views of one history.
+#[derive(Debug)]
+pub struct ViewDiff<'h> {
+    history: &'h History,
+    before: Clock,
+    after: Clock,
+}
+
+impl ViewDiff<'_> {
+    pub fn visibility(&self, commit: &CommitHash) -> Result<Vis, Error> {
+        let idx = *self
+            .history
+            .by_hash
+            .get(commit)
+            .ok_or(Error::UnknownCommit(*commit))?;
+        Ok(self.history.visibility(&self.before, &self.after, idx))
+    }
+
+    /// Commits whose participation differs, parents first.
+    pub fn changed_commits(&self) -> Vec<CommitDiff> {
+        let mut changed = Vec::new();
+        clock::symmetric_difference(&self.history.chain_nodes, &self.before, &self.after, |i| {
+            changed.push(i)
+        });
+        changed.sort_unstable();
+        changed
+            .into_iter()
+            .map(|idx| CommitDiff {
+                commit: self.history.node(idx).hash,
+                change: if self.history.contains(&self.before, idx) {
+                    VisDiff::Before
+                } else {
+                    VisDiff::After
+                },
+            })
+            .collect()
+    }
+}
+
+/// A materializer's completed progress: the history it has been told about and
+/// the view it materialized. Persist it atomically with the materialized state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MaterializationCursor {
+    delivery_heads: Vec<CommitHash>,
+    view_point: ViewPoint,
+}
+
+const CURSOR_MAGIC: &[u8; 5] = b"SFMC\x01";
+
+impl MaterializationCursor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn delivery_heads(&self) -> &[CommitHash] {
+        &self.delivery_heads
+    }
+    pub fn view_point(&self) -> &ViewPoint {
+        &self.view_point
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = CURSOR_MAGIC.to_vec();
+        let hashes = |out: &mut Vec<u8>, hashes: &[CommitHash]| {
+            out.extend((hashes.len() as u64).to_le_bytes());
+            for h in hashes {
+                out.extend(h.as_bytes());
+            }
+        };
+        hashes(&mut out, &self.delivery_heads);
+        hashes(&mut out, &self.view_point.heads);
+        let mut permissions: Vec<_> = self.view_point.write_permissions.iter().collect();
+        permissions.sort_by_key(|(a, _)| **a);
+        out.extend((permissions.len() as u64).to_le_bytes());
+        for (author, permission) in permissions {
+            out.extend(author.as_slice());
+            match permission {
+                WritePermission::Unbounded => out.push(0),
+                WritePermission::Denied => out.push(1),
+                WritePermission::Bounded(frontier) => {
+                    out.push(2);
+                    hashes(&mut out, frontier);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let bad = || Error::Malformed("materialization cursor");
+        let mut r = crate::reader::Reader::new(bytes);
+        if r.take(5).map_err(|_| bad())? != CURSOR_MAGIC {
+            return Err(bad());
+        }
+        let hashes = |r: &mut crate::reader::Reader| -> Result<Vec<CommitHash>, Error> {
+            let n = r.u64_le().map_err(|_| bad())?;
+            (0..n).map(|_| r.hash().map_err(|_| bad())).collect()
+        };
+        let delivery_heads = hashes(&mut r)?;
+        let heads = hashes(&mut r)?;
+        let n = r.u64_le().map_err(|_| bad())?;
+        let mut write_permissions = HashMap::new();
+        for _ in 0..n {
+            let author =
+                crate::Author::try_from(r.take(32).map_err(|_| bad())?).map_err(|_| bad())?;
+            let permission = match r.take(1).map_err(|_| bad())?[0] {
+                0 => WritePermission::Unbounded,
+                1 => WritePermission::Denied,
+                2 => WritePermission::Bounded(hashes(&mut r)?),
+                _ => return Err(bad()),
+            };
+            write_permissions.insert(author, permission);
+        }
+        r.finish().map_err(|_| bad())?;
+        Ok(Self {
+            delivery_heads,
+            view_point: ViewPoint::from_parts(heads, write_permissions),
+        })
+    }
+}
+
+/// One metadata change for a materializer. Contains no payload bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Change {
+    pub hash: CommitHash,
+    /// The retained logical payload ID.
+    pub payload: PayloadId,
+    /// Not delivered to this materializer before. Store it even if it does not
+    /// participate now: a later view may enable it.
+    pub newly_delivered: bool,
+    /// Participation before (the cursor's view) and after (the target view).
+    pub visibility: Vis,
+}
+
+/// A captured change traversal. Later deliveries belong to a later traversal.
+#[derive(Debug)]
+pub struct Changes {
+    history: u64,
+    pending: Vec<NodeIdx>,
+    next: usize,
+    delivered_before: Arc<Clock>,
+    before: Clock,
+    after: Clock,
+    delivery_heads: Vec<CommitHash>,
+    target: ViewPoint,
+}
+
+impl Changes {
+    /// Records remaining in this traversal.
+    pub fn remaining(&self) -> usize {
+        self.pending.len() - self.next
+    }
+}
+
+/// Whether a change traversal has finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Batch {
+    More,
+    /// Every record has been emitted. Persist this cursor together with the
+    /// application effects of the whole traversal.
+    Complete(MaterializationCursor),
+}
+
+impl History {
+    /// The working view: every delivered commit, drafts included.
+    pub fn view_point(&self, permissions: &WritePermissions) -> ViewPoint {
+        self.view(Heads::Delivered, permissions)
+    }
+
+    /// Authenticated history only.
+    pub fn signed_view_point(&self, permissions: &WritePermissions) -> ViewPoint {
+        self.view(Heads::Admitted, permissions)
+    }
+
+    pub fn view(&self, heads: Heads, permissions: &WritePermissions) -> ViewPoint {
+        ViewPoint::from_parts(self.heads(heads).collect(), permissions.clone())
+    }
+
+    /// Participation-only comparison. Every head of both views must be delivered.
+    pub fn diff(&self, before: &ViewPoint, after: &ViewPoint) -> Result<ViewDiff<'_>, Error> {
+        Ok(ViewDiff {
+            history: self,
+            before: self.participation(before)?,
+            after: self.participation(after)?,
+        })
+    }
+
+    /// Start a change traversal from a materializer's cursor to `target`.
+    ///
+    /// It captures the currently delivered history. A commit produces one record
+    /// if it was not delivered to this materializer before, or if its
+    /// participation differs between the cursor's view and `target`. Records
+    /// come parents first. All heads named by the cursor and target must be
+    /// delivered; this is checked before any record is produced.
+    pub fn changes(
+        &self,
+        cursor: &MaterializationCursor,
+        target: &ViewPoint,
+    ) -> Result<Changes, Error> {
+        let delivered_before = self.history_clock(&cursor.delivery_heads)?;
+        let before = self.participation(&cursor.view_point)?;
+        let after = self.participation(target)?;
+        let delivered_now = Clock::from_tips(&self.chain_tips);
+        let mut pending = Vec::new();
+        clock::difference(&self.chain_nodes, &delivered_now, &delivered_before, |i| {
+            pending.push(i)
+        });
+        clock::symmetric_difference(&self.chain_nodes, &before, &after, |i| pending.push(i));
+        pending.sort_unstable();
+        pending.dedup();
+        Ok(Changes {
+            history: self.id,
+            pending,
+            next: 0,
+            delivered_before,
+            before,
+            after,
+            delivery_heads: self.heads.iter().copied().collect(),
+            target: target.clone(),
+        })
+    }
+
+    /// Append up to `max` records to `out`.
+    pub fn next_changes(
+        &self,
+        changes: &mut Changes,
+        out: &mut Vec<Change>,
+        max: usize,
+    ) -> Result<Batch, Error> {
+        if changes.history != self.id {
+            return Err(Error::WrongHistory);
+        }
+        let end = changes.pending.len().min(changes.next.saturating_add(max));
+        for &idx in &changes.pending[changes.next..end] {
+            let node = self.node(idx);
+            out.push(Change {
+                hash: node.hash,
+                payload: node.payload,
+                newly_delivered: !self.contains(&changes.delivered_before, idx),
+                visibility: self.visibility(&changes.before, &changes.after, idx),
+            });
+        }
+        changes.next = end;
+        if end < changes.pending.len() {
+            return Ok(Batch::More);
+        }
+        Ok(Batch::Complete(MaterializationCursor {
+            delivery_heads: changes.delivery_heads.clone(),
+            view_point: changes.target.clone(),
+        }))
+    }
+
+    /// Every delivered commit, parents first, drafts included.
+    pub fn traverse(&self) -> impl Iterator<Item = CommitHash> + '_ {
+        self.nodes.iter().map(|n| n.hash)
+    }
+
+    /// Delivered commits outside the ancestry of `since`, parents first.
+    /// Hashes in `since` that are not delivered are ignored.
+    pub fn traverse_since(&self, since: &[CommitHash]) -> Vec<CommitHash> {
+        let known: Vec<_> = since
+            .iter()
+            .filter_map(|h| self.by_hash.get(h).copied())
+            .collect();
+        let excluded = self.clock_for_heads(&known);
+        let mut found = Vec::new();
+        clock::difference(
+            &self.chain_nodes,
+            &Clock::from_tips(&self.chain_tips),
+            &excluded,
+            |i| found.push(i),
+        );
+        found.sort_unstable();
+        found.into_iter().map(|i| self.node(i).hash).collect()
+    }
+
+    fn visibility(&self, before: &Clock, after: &Clock, idx: NodeIdx) -> Vis {
+        match (self.contains(before, idx), self.contains(after, idx)) {
+            (true, false) => Vis::Before,
+            (false, true) => Vis::After,
+            (true, true) => Vis::Both,
+            (false, false) => Vis::Neither,
+        }
+    }
+
+    /// The view's ancestry, with each chain capped by its author's permission.
+    fn participation(&self, view: &ViewPoint) -> Result<Clock, Error> {
+        let history = self.history_clock(&view.heads)?;
+        let mut bounded: HashMap<Author, Arc<Clock>> = HashMap::new();
+        Ok(history.mask(|chain, tip| {
+            let author = self.chain_authors[chain as usize];
+            match view.write_permissions.get(&author) {
+                Some(WritePermission::Unbounded) => Some(tip),
+                Some(WritePermission::Bounded(frontier)) => bounded
+                    .entry(author)
+                    .or_insert_with(|| {
+                        let available: Vec<_> = frontier
+                            .iter()
+                            .filter_map(|h| self.by_hash.get(h).copied())
+                            .filter(|&idx| self.contains(&history, idx))
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
+                        self.clock_for_heads(&available)
+                    })
+                    .position(chain),
+                Some(WritePermission::Denied) | None => None,
+            }
+        }))
+    }
+}
