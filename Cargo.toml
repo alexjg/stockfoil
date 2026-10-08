@@ -1,5 +1,5 @@
 [workspace]
-members = ["examples/mv-register"]
+members = ["javascript", "examples/mv-register"]
 resolver = "3"
 
 [package]
