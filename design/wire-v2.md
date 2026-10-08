@@ -386,6 +386,54 @@ boundary set)` for a fragment; it is not a hash of the envelope bytes. A store
 MAY address a stored item by the BLAKE3 hash of its complete bytes; a receiver
 reading a stored item SHOULD check that hash, but it authenticates nothing.
 
+## 9. Interoperability vectors
+
+The linked files contain complete v2 items as hexadecimal text. They are valid
+example representations, not a requirement that all equivalent exports produce
+the same bytes. Their commit identities equal the version 1 vectors'.
+
+Both use application format ID `stockfoil-test/chunks-v1`. Its body is, for each
+member in order, zero or more chunks — a **fixed-width little-endian u32** length
+`L > 0` followed by `L` canonical payload octets — and then a zero u32. The body
+ends after the last member's zero.
+
+The author/public key in both vectors is:
+
+```text
+ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c
+```
+
+It is derived from the Ed25519 seed consisting of 32 repetitions of octet `07`.
+
+### 9.1 Standalone commit
+
+[Complete item: `wire-v2-commit.hex`](../tests/fixtures/wire-v2-commit.hex)
+
+- One parentless member with canonical payload `hello` (`68 65 6c 6c 6f`).
+- One signature by the author, targeting member 0.
+- Reconstructed hash and claimed head:
+
+```text
+ea2a999164d3363faffdc4263955bcb022710eb844362f87c46eccb5bf915436
+```
+
+### 9.2 Fragment
+
+[Complete item: `wire-v2-fragment.hex`](../tests/fixtures/wire-v2-fragment.hex)
+
+- 101 members by the same author, in a chain. Member 0 is parentless; every later
+  member has exactly the preceding member as its parent.
+- Members 0–99 each have canonical payload `shared long application key and repeated value`
+  (46 UTF-8 octets). Member 100 has `checkpoint:129955` (17 octets).
+- Empty boundary and external-parent dictionary; one signature targeting member 100.
+- The reconstructed head has depth 2:
+
+```text
+0000bf36ab272ffdc22d98460eae2c0ab59764a0a5e28ac9ad9a7d791e5ae0ae
+```
+
+`tests/vectors.rs` regenerates and checks both files.
+
 ## Appendix A. Signature verification profile (normative)
 
 This appendix fixes the acceptance rules; a library function named “strict

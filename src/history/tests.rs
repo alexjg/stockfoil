@@ -163,6 +163,7 @@ fn unsigned_members_block_fragment_assembly_until_their_author_signs() {
 fn shared_types_cross_threads() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<History>();
+    assert_send_sync::<crate::Admission>();
     assert_send_sync::<Changes>();
     assert_send_sync::<ExportPlan>();
 }

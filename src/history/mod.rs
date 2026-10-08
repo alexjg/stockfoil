@@ -12,10 +12,13 @@ mod admit;
 pub(crate) mod clock;
 mod export;
 mod local;
+mod publish;
 mod view;
 
 pub use export::{ExportCursor, ExportItem, ExportPlan};
 pub use local::{CommitBuilder, Prepared};
+pub(crate) use publish::Readiness;
+pub use publish::Receipt;
 pub use view::{
     Batch, Change, Changes, CommitDiff, MaterializationCursor, ViewDiff, ViewPoint, Vis, VisDiff,
     WritePermissions,
@@ -140,6 +143,9 @@ impl History {
         }
     }
 
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
 
     /// Number of delivered commits, drafts included.
     pub fn len(&self) -> usize {
