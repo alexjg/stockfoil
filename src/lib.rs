@@ -7,7 +7,8 @@
 //!   application code.
 //! - Local commits are hashed with a [`CommitBuilder`], published as drafts,
 //!   and admitted once signed ([`History::sign`]).
-//! - [`History::export`] plans what a destination is missing.
+//! - [`History::export`] plans what a destination is missing; [`wire`] reads
+//!   and writes item headers.
 //! - [`History::changes`] tells a materializer which commits were delivered or
 //!   changed participation, without reading payloads.
 mod author;
@@ -19,6 +20,7 @@ mod history;
 mod meta;
 mod reader;
 mod signature;
+pub mod wire;
 mod write_permission;
 
 pub use author::{Author, InvalidAuthor};

@@ -8,6 +8,9 @@ impl<'a> Reader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self(bytes)
     }
+    pub fn remaining(&self) -> usize {
+        self.0.len()
+    }
     pub fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         if n > self.0.len() {
             return Err(Error::Malformed("truncated"));
@@ -24,6 +27,10 @@ impl<'a> Reader<'a> {
     }
     pub fn u64_le(&mut self) -> Result<u64, Error> {
         Ok(u64::from_le_bytes(self.array::<8>()?))
+    }
+    /// The unread bytes, without consuming them.
+    pub fn rest(&self) -> &'a [u8] {
+        self.0
     }
     pub fn finish(self) -> Result<(), Error> {
         if self.0.is_empty() {
