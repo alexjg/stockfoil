@@ -1,6 +1,7 @@
-//! Local commit creation: validate parents, hash canonical bytes, publish a draft.
+//! Local commit creation (validate parents, hash canonical bytes, publish a
+//! draft) and checking payloads read back from storage.
 use super::History;
-use crate::meta::commit_hash;
+use crate::meta::{CommitHasher, commit_hash};
 use crate::{Author, BlobHash, CommitHash, Error};
 
 /// Hashes one local commit's canonical payload. Created by
@@ -68,6 +69,56 @@ impl History {
             parents,
             payload: blake3::Hasher::new(),
             len: 0,
+        })
+    }
+}
+
+/// Checks that canonical bytes read back from storage are a delivered
+/// commit's payload. Created by [`History::check_payload`].
+pub struct PayloadCheck {
+    commit: CommitHash,
+    author: Author,
+    hasher: CommitHasher,
+    payload: blake3::Hasher,
+}
+
+impl PayloadCheck {
+    pub fn commit(&self) -> CommitHash {
+        self.commit
+    }
+
+    /// Append canonical payload bytes. The caller chooses the chunking.
+    pub fn update(&mut self, canonical: &[u8]) {
+        self.payload.update(canonical);
+    }
+
+    /// [`Error::CorruptPayload`] unless the bytes reproduce the commit hash.
+    pub fn finish(self) -> Result<(), Error> {
+        let payload = BlobHash::from(<[u8; 32]>::from(self.payload.finalize()));
+        if self.hasher.finish(&self.author, &payload) == self.commit {
+            Ok(())
+        } else {
+            Err(Error::CorruptPayload(self.commit))
+        }
+    }
+}
+
+impl History {
+    /// Start checking a delivered commit's payload, using the parents and
+    /// author recorded in history. Storage needs no integrity guarantees of its
+    /// own: whatever it returns is checked here before it is trusted.
+    pub fn check_payload(&self, commit: &CommitHash) -> Result<PayloadCheck, Error> {
+        let info = self.lookup(commit).ok_or(Error::UnknownCommit(*commit))?;
+        let parents = self.parents(commit).ok_or(Error::UnknownCommit(*commit))?;
+        let mut hasher = CommitHasher::new(parents.len());
+        for parent in parents {
+            hasher.parent(&parent);
+        }
+        Ok(PayloadCheck {
+            commit: *commit,
+            author: info.author,
+            hasher,
+            payload: blake3::Hasher::new(),
         })
     }
 }

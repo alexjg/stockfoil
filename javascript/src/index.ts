@@ -8,17 +8,17 @@
  */
 import {
   Admission, Changes, CommitBuilder, ExportCursor, ExportPlan, History,
-  MaterializationCursor, Prepared, ViewPoint, blobHash, readHeader,
+  MaterializationCursor, PayloadCheck, Prepared, ViewPoint, blobHash, readHeader,
 } from "#wasm-bodge/bindings";
 
 export {
   Admission, Changes, CommitBuilder, ExportCursor, ExportPlan, History,
-  MaterializationCursor, Prepared, ViewPoint, blobHash, readHeader,
+  MaterializationCursor, PayloadCheck, Prepared, ViewPoint, blobHash, readHeader,
 };
 
 // ---- shapes of the owned values the core returns ----
 
-/** A 32-byte commit hash, blob hash, or author; or a 64-byte signature. */
+/** A 32-byte commit hash or author; or a 64-byte signature. */
 export type Bytes = Uint8Array;
 /** Application payload ID: always a BigInt, never a lossy number. */
 export type PayloadId = bigint;
@@ -41,9 +41,9 @@ export type DecodeStatus = "working" | "needInput" | "endMember" | "finished";
 export interface DecodeStep { consumed: number; output: Uint8Array; status: DecodeStatus }
 
 export type Request =
-  | { kind: "read"; item: Bytes; offset: number; max: number }
+  | { kind: "read"; offset: number; max: number }
   | { kind: "decode"; input: Uint8Array; eof: boolean; capacity: number }
-  | { kind: "bind"; item: Bytes; memberCount: number };
+  | { kind: "bind"; memberCount: number };
 
 export type Next =
   | { type: "continue" }
@@ -100,12 +100,12 @@ export interface Decoder {
   step(input: Uint8Array, eof: boolean, capacity: number): MaybePromise<DecodeStep>;
 }
 
-/** What `drive` needs from the application. */
+/** What `drive` needs from the application to admit one stored item. */
 export interface Host {
-  /** Up to `max` bytes of stored item `item` at `offset`; empty at its end. */
-  read(item: Bytes, offset: number, max: number): MaybePromise<Uint8Array>;
-  /** Allocate one payload ID per member of stored item `item`, in member order. */
-  bind(item: Bytes, memberCount: number): MaybePromise<readonly PayloadId[]>;
+  /** Up to `max` bytes of the stored item at `offset`; empty at its end. */
+  read(offset: number, max: number): MaybePromise<Uint8Array>;
+  /** Allocate one payload ID per member of the stored item, in member order. */
+  bind(memberCount: number): MaybePromise<readonly PayloadId[]>;
   decoder(meta: BundleMeta): MaybePromise<Decoder>;
 }
 
@@ -188,7 +188,7 @@ export async function drive(
   async function execute(request: Request): Promise<Reply> {
     switch (request.kind) {
       case "read": {
-        const bytes = await host.read(request.item, request.offset, request.max);
+        const bytes = await host.read(request.offset, request.max);
         return { kind: "read", bytes, eof: bytes.length === 0 };
       }
       case "decode": {
@@ -197,24 +197,29 @@ export async function drive(
         return { kind: "decoded", ...step };
       }
       case "bind":
-        return { kind: "bound", ids: await host.bind(request.item, request.memberCount) };
+        return { kind: "bound", ids: await host.bind(request.memberCount) };
     }
   }
 }
 
 // ---- convenience graph: history + JS codec + JS storage ----
 
+/** A storage key naming one blob. */
+export type Key = string;
+
 export type PayloadLocation =
-  | { kind: "canonical"; blob: Bytes }
-  | { kind: "member"; item: Bytes; index: number };
+  | { kind: "canonical"; blob: Key }
+  | { kind: "member"; item: Key; index: number };
 
 /**
- * Content-addressed blobs and payload IDs. `put` returns the BLAKE3 hash of
- * the bytes (see `blobHash`). IDs from `bind` must never be rebound.
+ * Blobs and payload IDs. `put` returns a key of the storage's choosing: a
+ * content hash, a path, or the digest of an encrypted copy all work, because
+ * payloads read back are checked against their commits rather than trusted.
+ * IDs from `bind` must never be rebound.
  */
 export interface Storage {
-  put(bytes: Uint8Array): MaybePromise<Bytes>;
-  read(blob: Bytes, offset: number, max: number): MaybePromise<Uint8Array>;
+  put(bytes: Uint8Array): MaybePromise<Key>;
+  read(blob: Key, offset: number, max: number): MaybePromise<Uint8Array>;
   bind(location: PayloadLocation): MaybePromise<PayloadId>;
   location(id: PayloadId): MaybePromise<PayloadLocation>;
 }
@@ -229,22 +234,25 @@ export interface Codec {
 export const hex = (bytes: Uint8Array): string =>
   Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 
-/** In-memory `Storage`. `firstId` sets the first payload ID handed out. */
+/**
+ * In-memory `Storage`, keyed by the hex BLAKE3 hash of each blob. `firstId`
+ * sets the first payload ID handed out.
+ */
 export class MemoryStorage implements Storage {
-  readonly blobs = new Map<string, Uint8Array>();
+  readonly blobs = new Map<Key, Uint8Array>();
   readonly locations = new Map<PayloadId, PayloadLocation>();
   private nextId: PayloadId;
   constructor(options: { firstId?: PayloadId } = {}) {
     this.nextId = options.firstId ?? 0n;
   }
-  put(bytes: Uint8Array): Bytes {
-    const hash = blobHash(bytes);
-    this.blobs.set(hex(hash), bytes.slice());
-    return hash;
+  put(bytes: Uint8Array): Key {
+    const key = hex(blobHash(bytes));
+    this.blobs.set(key, bytes.slice());
+    return key;
   }
-  read(blob: Bytes, offset: number, max: number): Uint8Array {
-    const bytes = this.blobs.get(hex(blob));
-    if (!bytes) throw new Error(`unknown blob ${hex(blob)}`);
+  read(blob: Key, offset: number, max: number): Uint8Array {
+    const bytes = this.blobs.get(blob);
+    if (!bytes) throw new Error(`unknown blob ${blob}`);
     return bytes.slice(offset, offset + max);
   }
   bind(location: PayloadLocation): PayloadId {
@@ -274,15 +282,18 @@ function concat(parts: Uint8Array[]): Uint8Array {
  */
 export class Graph {
   readonly history = new History();
-  readonly host: Host;
   constructor(
     readonly codec: Codec,
     readonly storage: Storage = new MemoryStorage(),
     readonly options: Omit<ReceiveOptions, "format"> = {},
-  ) {
-    this.host = {
-      read: (item, offset, max) => storage.read(item, offset, max),
-      bind: async (item, memberCount) => {
+  ) {}
+
+  /** The host that admits stored item `item` from this graph's storage. */
+  host(item: Key): Host {
+    const { storage, codec } = this;
+    return {
+      read: (offset, max) => storage.read(item, offset, max),
+      bind: async memberCount => {
         const ids: PayloadId[] = [];
         for (let index = 0; index < memberCount; index++) {
           ids.push(await storage.bind({ kind: "member", item, index }));
@@ -299,10 +310,10 @@ export class Graph {
   }
 
   /** Admit an item already in storage. */
-  async admit(item: Bytes, options?: DriveOptions): Promise<Receipt> {
-    const admission = this.history.receive(item, { ...this.options, format: this.codec.format });
+  async admit(item: Key, options?: DriveOptions): Promise<Receipt> {
+    const admission = this.history.receive({ ...this.options, format: this.codec.format });
     try {
-      return await drive(this.history, admission, this.host, options);
+      return await drive(this.history, admission, this.host(item), options);
     } finally {
       admission.free();
     }
@@ -331,30 +342,42 @@ export class Graph {
   /** Planned item `index` as wire bytes: header followed by the encoded body. */
   async writeItem(plan: ExportPlan, index: number): Promise<Uint8Array> {
     const item = this.history.exportItem(plan, index, this.codec.format) as {
-      header: Uint8Array; members: { payload: PayloadId }[]; meta: BundleMeta;
+      header: Uint8Array; members: { hash: Bytes }[]; meta: BundleMeta;
     };
-    const payloads = await this.payloads(item.members.map(m => m.payload));
+    const payloads = await this.payloads(item.members.map(m => m.hash));
     return concat([item.header, await this.codec.encode(item.meta, payloads)]);
   }
 
-  /** One payload's canonical bytes. */
-  async payload(id: PayloadId): Promise<Uint8Array> {
-    return (await this.payloads([id]))[0];
+  /**
+   * A delivered commit's canonical payload, checked against the commit.
+   * Rejects with a `CorruptPayload` error if storage returns anything else.
+   */
+  async payload(commit: Bytes): Promise<Uint8Array> {
+    return (await this.payloads([commit]))[0];
   }
 
-  /** Canonical bytes for several payloads, decoding each stored item once. */
-  async payloads(ids: readonly PayloadId[]): Promise<Uint8Array[]> {
-    const items = new Map<string, Promise<Uint8Array[]>>();
-    return Promise.all(ids.map(async id => {
-      const location = await this.storage.location(id);
-      if (location.kind === "canonical") return this.readAll(location.blob);
-      const key = hex(location.item);
-      if (!items.has(key)) items.set(key, this.decodeItem(location.item));
-      return (await items.get(key)!)[location.index];
+  /** Checked payloads of several commits, decoding each stored item once. */
+  async payloads(commits: readonly Bytes[]): Promise<Uint8Array[]> {
+    const items = new Map<Key, Promise<Uint8Array[]>>();
+    return Promise.all(commits.map(async commit => {
+      const info = this.history.lookup(commit) as { payload: PayloadId } | undefined;
+      if (!info) throw new Error(`unknown commit ${hex(commit)}`);
+      const location = await this.storage.location(info.payload);
+      let bytes: Uint8Array | undefined;
+      if (location.kind === "canonical") {
+        bytes = await this.readAll(location.blob);
+      } else {
+        if (!items.has(location.item)) items.set(location.item, this.decodeItem(location.item));
+        bytes = (await items.get(location.item)!)[location.index] ?? new Uint8Array();
+      }
+      const check = this.history.checkPayload(commit);
+      check.update(bytes);
+      check.finish();
+      return bytes;
     }));
   }
 
-  private async readAll(blob: Bytes): Promise<Uint8Array> {
+  private async readAll(blob: Key): Promise<Uint8Array> {
     const parts: Uint8Array[] = [];
     for (let offset = 0; ;) {
       const part = await this.storage.read(blob, offset, CHUNK);
@@ -364,8 +387,8 @@ export class Graph {
     }
   }
 
-  /** Every member's canonical bytes from a stored item. */
-  async decodeItem(item: Bytes): Promise<Uint8Array[]> {
+  /** Every member's canonical bytes from a stored item, unchecked. */
+  private async decodeItem(item: Key): Promise<Uint8Array[]> {
     const bytes = await this.readAll(item);
     const header = readHeader(bytes, this.codec.format, this.options.limits) as
       { length: number; meta: BundleMeta } | undefined;

@@ -71,10 +71,14 @@ draft are kept as co-signing evidence.
 ## 3. Admission (receiving)
 
 A received item is one stored blob: wire header plus codec body. `History::receive`
-creates an `Admission` that owns its buffers and progress and borrows nothing:
+creates an `Admission` that owns its buffers and progress and borrows nothing. It
+does not know where the item is stored: the host that answers its requests does.
+Storage keys are the host's business and need not be content hashes (an
+end-to-end encrypted store knows only ciphertext digests), and nothing about the
+stored representation is checked beyond the canonical payloads it decodes to.
 
 ```text
-Read*        hash every stored byte (must equal the item hash); parse the header
+Read*        parse the header
 Decode*      hash canonical members; boundaries, EOF, codec Finished
              signatures and per-author coverage            — Admission::next
 dependencies admitted? fragment placement                  — History::advance
@@ -96,9 +100,9 @@ does the history-dependent step and then reports the next state (possibly the
 
 | Request | Reply |
 | --- | --- |
-| `Read { item, offset, max }` | `Read { bytes, eof }` — empty only with `eof` |
+| `Read { offset, max }` | `Read { bytes, eof }` — empty only with `eof` |
 | `Decode { meta, input, eof, capacity }` | `Decoded { consumed, output, status }` |
-| `Bind { item, meta }` | `Bound(ids)` — one per member |
+| `Bind { meta }` | `Bound(ids)` — one per member, bound to (item, member) |
 | any | `Failed(message)` — terminal |
 
 Decoder statuses: `Working` (must have made progress), `NeedInput` (consumed all
@@ -203,17 +207,29 @@ deferred: an interrupted traversal restarts from the last saved cursor.
 `Graph<C: Codec<S>, S: Storage>` owns a history, codec, and storage and drives
 the same requests synchronously.
 
-- `Storage`: content-addressed blobs (`create`/`finish` returns the BLAKE3 hash,
-  `read_at`), and logical IDs (`bind(PayloadLocation)`, `location`).
-  `PayloadLocation::Member { item, index }` means "decode member `index` of stored
-  item `item`"; there is no per-member canonical object on receive.
+- `Storage`: blobs under keys of the storage's choosing (`type Key`;
+  `create`/`finish` returns the key, `read_at`), and logical IDs
+  (`bind(PayloadLocation<Key>)`, `location`). `PayloadLocation::Member { item,
+  index }` means "decode member `index` of stored item `item`"; there is no
+  per-member canonical object on receive. Nothing read back is trusted.
 - `Codec`: `format`, `decoder(meta)`, `encoder(item)`; `Decoder::step(input, eof,
   output)` and `Encoder::step(storage, output)`.
-- `receive(reader)` stores then admits; `admit(item)`; `begin_admit` + `drive` keep
-  a verified operation across `Driven::Waiting`. `commit`, `sign`, `export`,
-  `write_item`, `store_item`, `payload`, `read_payload`, and `decode_item` (one
+- `receive(reader)` stores then admits; `admit(&key)`; `begin_admit` +
+  `drive(&key, op)` keep a verified operation across `Driven::Waiting`. `commit`,
+  `sign`, `export`, `write_item`, `store_item`, `payload(&commit)`,
+  `read_payload(&commit, out)`, and `decode_item(&key, wanted, visit)` (one
   decoding pass for many members of a stored item).
-- `MemoryStorage` is a complete in-memory store.
+- `MemoryStorage` is a complete in-memory store keyed by BLAKE3 hashes.
+
+**Checked reads.** `History::check_payload(commit)` returns a `PayloadCheck`: feed
+it canonical bytes, and `finish` recomputes the commit hash from them and the
+parents and author recorded in history, failing with `Error::CorruptPayload` on
+any difference. `Graph` reads payloads only through it, so storage needs no
+integrity guarantees of its own: a lost, corrupted, or substituted blob makes reads
+fail rather than return wrong bytes. Streamed bytes precede the check's verdict;
+on `CorruptPayload` discard what was received. Encoders still read storage
+directly for export; a corrupt payload there produces an item that receivers
+reject. Bindings expose `checkPayload` for hosts that read payloads themselves.
 
 ## 7. Bindings
 
@@ -234,7 +250,8 @@ Swift) are expected to use one UniFFI crate over the same objects; not yet built
 - One exclusive `Next` state instead of independent readiness flags; publication
   happens inside `History::advance`.
 - Received items are read back from storage instead of being staged from a
-  stream; storage computes content hashes.
+  stream. Storage keys are opaque; payload reads are checked against commits
+  instead of trusting content-addressed keys.
 - One wire format (v2); no probe, no v1 reader, no SFSE envelope.
 - Export inventory is "every certificate not covered by a fragment", not a
   recomputed minimal cover.

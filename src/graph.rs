@@ -3,37 +3,44 @@
 //! would; it has no receive, publication, or export logic of its own.
 use crate::{
     Admission, Author, BlobHash, BundleMeta, CommitHash, DecodeStatus, Error, ExportItem,
-    ExportPlan, FormatId, History, ItemId, Limits, Next, PayloadId, Prepared, Receipt,
-    ReceiveOptions, Reply, Request, Signature,
+    ExportPlan, FormatId, History, ItemId, Limits, Next, PayloadCheck, PayloadId, Prepared,
+    Receipt, ReceiveOptions, Reply, Request, Signature,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Debug;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
-/// Where a logical payload's canonical bytes can be reproduced from.
+/// Where a logical payload's canonical bytes can be reproduced from. `K` is
+/// the storage's blob key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PayloadLocation {
+pub enum PayloadLocation<K> {
     /// A blob holding exactly the canonical bytes.
-    Canonical(BlobHash),
+    Canonical(K),
     /// Member `index` of a stored wire item, decoded with the application codec.
-    Member { item: BlobHash, index: usize },
+    Member { item: K, index: usize },
 }
 
-/// Content-addressed blobs plus logical payload IDs.
+/// Blobs plus logical payload IDs.
 ///
 /// `finish` must durably accept the written bytes (to the application's
-/// standard) and return their BLAKE3 hash. `read_at` returns bytes of an
-/// accepted blob, or `Ok(0)` at its end. IDs returned by `bind` must stay
-/// resolvable while history refers to them and must never be rebound.
-/// Failed operations may leave unused blobs or IDs behind; reclaiming them is
-/// the application's business.
+/// standard) and return a key naming them. Keys are the storage's choice: a
+/// content hash, a path, or the digest of an encrypted copy all work.
+/// `read_at` returns bytes of an accepted blob, or `Ok(0)` at its end. Nothing
+/// read back is trusted: payloads are checked against their commits, so a blob
+/// that is lost or changed makes reads fail rather than return wrong bytes.
+///
+/// IDs returned by `bind` must stay resolvable while history refers to them
+/// and must never be rebound. Failed operations may leave unused blobs or IDs
+/// behind; reclaiming them is the application's business.
 pub trait Storage {
+    type Key: Clone + Debug;
     type Writer: Write;
     fn create(&mut self) -> io::Result<Self::Writer>;
-    fn finish(&mut self, writer: Self::Writer) -> io::Result<BlobHash>;
-    fn read_at(&mut self, blob: &BlobHash, offset: u64, out: &mut [u8]) -> io::Result<usize>;
-    fn bind(&mut self, location: PayloadLocation) -> io::Result<PayloadId>;
-    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation>;
+    fn finish(&mut self, writer: Self::Writer) -> io::Result<Self::Key>;
+    fn read_at(&mut self, blob: &Self::Key, offset: u64, out: &mut [u8]) -> io::Result<usize>;
+    fn bind(&mut self, location: PayloadLocation<Self::Key>) -> io::Result<PayloadId>;
+    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation<Self::Key>>;
 }
 
 /// One decoder step's progress. See [`DecodeStatus`] for the contract.
@@ -131,10 +138,10 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
     }
 
     /// Start admitting a stored item without driving it. Keep the returned
-    /// operation across [`Driven::Waiting`] to avoid re-reading and
-    /// re-verifying the item once its dependency arrives.
-    pub fn begin_admit(&self, item: BlobHash) -> Admission {
-        self.history.receive(item, self.options.clone())
+    /// operation, with the item's key, across [`Driven::Waiting`] to avoid
+    /// re-reading and re-verifying the item once its dependency arrives.
+    pub fn begin_admit(&self) -> Admission {
+        self.history.receive(self.options.clone())
     }
 
     /// Store an incoming item, then admit it. Fails with
@@ -145,21 +152,22 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
     pub fn receive(&mut self, mut item: impl Read) -> Result<Receipt, Error> {
         let mut writer = self.storage.create().map_err(storage_error)?;
         io::copy(&mut item, &mut writer).map_err(storage_error)?;
-        let hash = self.storage.finish(writer).map_err(storage_error)?;
-        self.admit(hash)
+        let key = self.storage.finish(writer).map_err(storage_error)?;
+        self.admit(&key)
     }
 
     /// Admit an item already in storage.
-    pub fn admit(&mut self, item: BlobHash) -> Result<Receipt, Error> {
-        let mut op = self.begin_admit(item);
-        match self.drive(&mut op)? {
+    pub fn admit(&mut self, item: &S::Key) -> Result<Receipt, Error> {
+        let mut op = self.begin_admit();
+        match self.drive(item, &mut op)? {
             Driven::Done(receipt) => Ok(receipt),
             Driven::Waiting(hash) => Err(Error::MissingDependency(hash)),
         }
     }
 
-    /// Drive an admission until it is done, fails, or waits for a dependency.
-    pub fn drive(&mut self, op: &mut Admission) -> Result<Driven, Error> {
+    /// Drive an admission of stored item `item` until it is done, fails, or
+    /// waits for a dependency. Always drive one operation with the same key.
+    pub fn drive(&mut self, item: &S::Key, op: &mut Admission) -> Result<Driven, Error> {
         let mut decoder: Option<C::Decoder> = None;
         let mut buffer = vec![0u8; CHUNK.max(self.options.read_size)];
         loop {
@@ -180,7 +188,7 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
             let Some((ticket, request)) = op.request() else {
                 continue;
             };
-            let outcome = self.execute(request, &mut decoder, &mut buffer);
+            let outcome = self.execute(item, request, &mut decoder, &mut buffer);
             let reply = match &outcome {
                 Ok(Executed::Read { len, eof }) => Reply::Read {
                     bytes: &buffer[..*len],
@@ -202,16 +210,17 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
 
     fn execute(
         &mut self,
+        item: &S::Key,
         request: Request<'_>,
         decoder: &mut Option<C::Decoder>,
         buffer: &mut [u8],
     ) -> Result<Executed, String> {
         match request {
-            Request::Read { item, offset, max } => {
+            Request::Read { offset, max } => {
                 let len = max.min(buffer.len());
                 let n = self
                     .storage
-                    .read_at(&item, offset, &mut buffer[..len])
+                    .read_at(item, offset, &mut buffer[..len])
                     .map_err(|e| e.to_string())?;
                 Ok(Executed::Read {
                     len: n,
@@ -235,8 +244,13 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
                     .map_err(|e| e.to_string())?;
                 Ok(Executed::Decoded(progress))
             }
-            Request::Bind { item, meta } => (0..meta.len())
-                .map(|index| self.storage.bind(PayloadLocation::Member { item, index }))
+            Request::Bind { meta } => (0..meta.len())
+                .map(|index| {
+                    self.storage.bind(PayloadLocation::Member {
+                        item: item.clone(),
+                        index,
+                    })
+                })
                 .collect::<io::Result<Vec<_>>>()
                 .map(Executed::Bound)
                 .map_err(|e| e.to_string()),
@@ -266,9 +280,6 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
         }
         let prepared = builder.finish();
         let blob = self.storage.finish(writer).map_err(storage_error)?;
-        if blob != prepared.payload_hash {
-            return Err(Error::Storage("stored payload hash differs".into()));
-        }
         let id = self
             .storage
             .bind(PayloadLocation::Canonical(blob))
@@ -326,16 +337,24 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
     }
 
     /// Write planned item `index` into this graph's storage.
-    pub fn store_item(&mut self, plan: &ExportPlan, index: usize) -> Result<BlobHash, Error> {
+    pub fn store_item(&mut self, plan: &ExportPlan, index: usize) -> Result<S::Key, Error> {
         let mut writer = self.storage.create().map_err(storage_error)?;
         self.write_item(plan, index, &mut writer)?;
         self.storage.finish(writer).map_err(storage_error)
     }
 
-    /// Write one payload's canonical bytes to `out`.
-    pub fn read_payload(&mut self, id: PayloadId, mut out: impl Write) -> Result<u64, Error> {
+    /// Write a delivered commit's canonical payload to `out`, checking it
+    /// against the commit. Returns bytes written. On [`Error::CorruptPayload`]
+    /// discard what was written: bytes are streamed before the check ends.
+    pub fn read_payload(&mut self, commit: &CommitHash, mut out: impl Write) -> Result<u64, Error> {
+        let id = self
+            .history
+            .lookup(commit)
+            .ok_or(Error::UnknownCommit(*commit))?
+            .payload;
         match self.storage.location(id).map_err(storage_error)? {
             PayloadLocation::Canonical(blob) => {
+                let mut check = self.history.check_payload(commit)?;
                 let mut chunk = vec![0u8; CHUNK];
                 let mut offset = 0u64;
                 loop {
@@ -344,41 +363,47 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
                         .read_at(&blob, offset, &mut chunk)
                         .map_err(storage_error)?;
                     if n == 0 {
+                        check.finish()?;
                         return Ok(offset);
                     }
+                    check.update(&chunk[..n]);
                     out.write_all(&chunk[..n]).map_err(storage_error)?;
                     offset += n as u64;
                 }
             }
             PayloadLocation::Member { item, index } => {
                 let mut written = 0u64;
-                self.decode_item(item, |member, bytes| {
-                    if member == index {
-                        out.write_all(bytes)?;
-                        written += bytes.len() as u64;
-                    }
-                    Ok(member <= index)
+                self.decode_item(&item, &BTreeMap::from([(index, *commit)]), |_, bytes| {
+                    written += bytes.len() as u64;
+                    out.write_all(bytes)
                 })?;
                 Ok(written)
             }
         }
     }
 
-    /// One payload's canonical bytes.
-    pub fn payload(&mut self, id: PayloadId) -> Result<Vec<u8>, Error> {
+    /// A delivered commit's canonical payload, checked against the commit.
+    pub fn payload(&mut self, commit: &CommitHash) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::new();
-        self.read_payload(id, &mut bytes)?;
+        self.read_payload(commit, &mut bytes)?;
         Ok(bytes)
     }
 
-    /// Decode a stored item once, passing each canonical chunk with its member
-    /// index to `visit`. Members end in order; `visit` returns `false` to stop.
-    /// Use this to read many payloads that share one compressed item.
+    /// Decode a stored item once, passing the canonical bytes of each `wanted`
+    /// member (index to commit) to `visit`, in member order. Use this to read
+    /// many payloads that share one compressed item. Decoding stops after the
+    /// last wanted member. Each wanted member is checked against its commit
+    /// when it ends; on [`Error::CorruptPayload`] discard what that member
+    /// passed to `visit`.
     pub fn decode_item(
         &mut self,
-        item: BlobHash,
-        mut visit: impl FnMut(usize, &[u8]) -> io::Result<bool>,
+        item: &S::Key,
+        wanted: &BTreeMap<usize, CommitHash>,
+        mut visit: impl FnMut(usize, &[u8]) -> io::Result<()>,
     ) -> Result<(), Error> {
+        let Some(&last) = wanted.keys().next_back() else {
+            return Ok(());
+        };
         let mut prefix = Vec::new();
         let mut chunk = vec![0u8; CHUNK];
         let mut offset = 0u64;
@@ -390,7 +415,7 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
             }
             let n = self
                 .storage
-                .read_at(&item, offset, &mut chunk)
+                .read_at(item, offset, &mut chunk)
                 .map_err(storage_error)?;
             if n == 0 {
                 return Err(Error::Malformed("truncated header"));
@@ -410,6 +435,7 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
             .map_err(|e| Error::Codec(e.to_string()))?;
         let mut output = vec![0u8; CHUNK];
         let mut member = 0usize;
+        let mut check = self.member_check(wanted, member)?;
         let mut eof = false;
         let mut start = 0usize;
         loop {
@@ -418,7 +444,7 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
                 start = 0;
                 let n = self
                     .storage
-                    .read_at(&item, offset, &mut chunk)
+                    .read_at(item, offset, &mut chunk)
                     .map_err(storage_error)?;
                 offset += n as u64;
                 eof = n == 0;
@@ -434,21 +460,45 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
                 return Err(Error::Protocol("decoder made no progress"));
             }
             start += p.consumed;
-            if p.produced > 0 || p.status == DecodeStatus::EndMember {
-                let keep = visit(member, &output[..p.produced]).map_err(storage_error)?;
-                if !keep {
-                    return Ok(());
-                }
+            if let Some(check) = &mut check
+                && p.produced > 0
+            {
+                check.update(&output[..p.produced]);
+                visit(member, &output[..p.produced]).map_err(storage_error)?;
             }
             match p.status {
-                DecodeStatus::EndMember => member += 1,
-                DecodeStatus::Finished => return Ok(()),
+                DecodeStatus::EndMember => {
+                    if let Some(check) = check.take() {
+                        check.finish()?;
+                    }
+                    member += 1;
+                    if member > last {
+                        return Ok(());
+                    }
+                    check = self.member_check(wanted, member)?;
+                }
+                DecodeStatus::Finished => {
+                    // The stored item has fewer members than the wanted ones.
+                    let (_, missing) = wanted.range(member..).next().unwrap();
+                    return Err(Error::CorruptPayload(*missing));
+                }
                 DecodeStatus::NeedInput if eof => {
                     return Err(Error::Codec("decoder needs input after end of body".into()));
                 }
                 _ => {}
             }
         }
+    }
+
+    fn member_check(
+        &self,
+        wanted: &BTreeMap<usize, CommitHash>,
+        member: usize,
+    ) -> Result<Option<PayloadCheck>, Error> {
+        wanted
+            .get(&member)
+            .map(|commit| self.history.check_payload(commit))
+            .transpose()
     }
 }
 
@@ -462,7 +512,7 @@ enum Executed {
 #[derive(Debug, Default, Clone)]
 pub struct MemoryStorage {
     blobs: HashMap<BlobHash, Arc<Vec<u8>>>,
-    payloads: Vec<PayloadLocation>,
+    payloads: Vec<PayloadLocation<BlobHash>>,
 }
 
 impl MemoryStorage {
@@ -482,7 +532,9 @@ impl MemoryStorage {
     }
 }
 
+/// Keys are BLAKE3 hashes of the stored bytes.
 impl Storage for MemoryStorage {
+    type Key = BlobHash;
     type Writer = Vec<u8>;
     fn create(&mut self) -> io::Result<Vec<u8>> {
         Ok(Vec::new())
@@ -502,11 +554,11 @@ impl Storage for MemoryStorage {
         out[..n].copy_from_slice(&bytes[start..start + n]);
         Ok(n)
     }
-    fn bind(&mut self, location: PayloadLocation) -> io::Result<PayloadId> {
+    fn bind(&mut self, location: PayloadLocation<BlobHash>) -> io::Result<PayloadId> {
         self.payloads.push(location);
         Ok(self.payloads.len() as PayloadId - 1)
     }
-    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation> {
+    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation<BlobHash>> {
         usize::try_from(id)
             .ok()
             .and_then(|i| self.payloads.get(i))

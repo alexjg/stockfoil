@@ -134,8 +134,8 @@ impl Decoder for ChunkDecoder {
 
 /// Reads one payload's canonical bytes from storage, decoding a stored item
 /// when the payload is a member of one.
-pub struct PayloadSource {
-    location: PayloadLocation,
+pub struct PayloadSource<K> {
+    location: PayloadLocation<K>,
     offset: u64,
     decoder: Option<(ChunkDecoder, usize)>,
     pending: Vec<u8>,
@@ -143,8 +143,8 @@ pub struct PayloadSource {
     done: bool,
 }
 
-impl PayloadSource {
-    pub fn new<S: Storage>(storage: &S, id: PayloadId) -> io::Result<Self> {
+impl<K: Clone> PayloadSource<K> {
+    pub fn new<S: Storage<Key = K>>(storage: &S, id: PayloadId) -> io::Result<Self> {
         Ok(Self {
             location: storage.location(id)?,
             offset: 0,
@@ -156,8 +156,12 @@ impl PayloadSource {
     }
 
     /// Fill `out` with the next canonical bytes; `Ok(0)` at the end.
-    pub fn read<S: Storage>(&mut self, storage: &mut S, out: &mut [u8]) -> io::Result<usize> {
-        match self.location {
+    pub fn read<S: Storage<Key = K>>(
+        &mut self,
+        storage: &mut S,
+        out: &mut [u8],
+    ) -> io::Result<usize> {
+        match self.location.clone() {
             PayloadLocation::Canonical(blob) => {
                 let n = storage.read_at(&blob, self.offset, out)?;
                 self.offset += n as u64;
@@ -230,14 +234,14 @@ impl PayloadSource {
     }
 }
 
-pub struct ChunkEncoder {
+pub struct ChunkEncoder<K> {
     members: Vec<PayloadId>,
     next: usize,
-    source: Option<PayloadSource>,
+    source: Option<PayloadSource<K>>,
     chunk: usize,
 }
 
-impl<S: Storage> Encoder<S> for ChunkEncoder {
+impl<S: Storage> Encoder<S> for ChunkEncoder<S::Key> {
     fn step(&mut self, storage: &mut S, output: &mut [u8]) -> io::Result<EncodeProgress> {
         let mut produced = 0;
         while output.len() - produced >= 5 {
@@ -272,14 +276,14 @@ impl<S: Storage> Encoder<S> for ChunkEncoder {
 
 impl<S: Storage> Codec<S> for ChunkCodec {
     type Decoder = ChunkDecoder;
-    type Encoder = ChunkEncoder;
+    type Encoder = ChunkEncoder<S::Key>;
     fn format(&self) -> &FormatId {
         &self.format
     }
     fn decoder(&self, meta: &Arc<BundleMeta>) -> io::Result<ChunkDecoder> {
         Ok(ChunkDecoder::new(meta.len()))
     }
-    fn encoder(&self, item: &ExportItem) -> io::Result<ChunkEncoder> {
+    fn encoder(&self, item: &ExportItem) -> io::Result<ChunkEncoder<S::Key>> {
         Ok(ChunkEncoder {
             members: item.members.iter().map(|(_, id)| *id).collect(),
             next: 0,
@@ -367,7 +371,7 @@ pub fn sync(from: &mut TestGraph, to: &mut TestGraph, cursor: &ExportCursor) -> 
     }
     while !waiting.is_empty() {
         let before = waiting.len();
-        waiting.retain(|(i, item)| match to.admit(*item) {
+        waiting.retain(|(i, item)| match to.admit(item) {
             Ok(_) => {
                 plan.acknowledge(*i).unwrap();
                 false

@@ -76,7 +76,7 @@ export class Replica {
       for (const { hash, payload, newlyDelivered, visibility } of batch.records) {
         if (newlyDelivered) {
           // Keep every delivered assignment: a later view may enable it.
-          const { key, value } = decodeAssignment(await this.graph.payload(payload));
+          const { key, value } = decodeAssignment(await this.graph.payload(hash));
           this.assignments.set(hex(hash), { hash, key, value });
         }
         const assignment = this.assignments.get(hex(hash));

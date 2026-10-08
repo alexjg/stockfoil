@@ -16,7 +16,7 @@ mod publish;
 mod view;
 
 pub use export::{ExportCursor, ExportItem, ExportPlan};
-pub use local::{CommitBuilder, Prepared};
+pub use local::{CommitBuilder, PayloadCheck, Prepared};
 pub(crate) use publish::Readiness;
 pub use publish::Receipt;
 pub use view::{

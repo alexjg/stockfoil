@@ -21,11 +21,16 @@ impl Host {
         hash
     }
 
-    /// Execute a request into owned reply data.
-    fn execute(&mut self, request: Request<'_>, decoder: &mut Option<ChunkDecoder>) -> Owned {
+    /// Execute a request for stored item `item` into owned reply data.
+    fn execute(
+        &mut self,
+        item: &BlobHash,
+        request: Request<'_>,
+        decoder: &mut Option<ChunkDecoder>,
+    ) -> Owned {
         match request {
-            Request::Read { item, offset, max } => {
-                let bytes = &self.blobs[&item];
+            Request::Read { offset, max } => {
+                let bytes = &self.blobs[item];
                 let max = self.read_limit.map_or(max, |l| l.min(max));
                 let start = (offset as usize).min(bytes.len());
                 let end = (start + max).min(bytes.len());
@@ -47,7 +52,7 @@ impl Host {
                     Err(e) => Owned::Failed(e.to_string()),
                 }
             }
-            Request::Bind { meta, .. } => {
+            Request::Bind { meta } => {
                 let ids = (0..meta.len() as u64).map(|i| self.next_id + i).collect();
                 self.next_id += meta.len() as u64;
                 Owned::Bound(ids)
@@ -88,8 +93,8 @@ enum Outcome {
     Failed(Error),
 }
 
-/// Drive to completion, executing requests immediately.
-fn run(history: &mut History, op: &mut Admission, host: &mut Host) -> Outcome {
+/// Drive the admission of `item` to completion, executing requests immediately.
+fn run(history: &mut History, op: &mut Admission, host: &mut Host, item: &BlobHash) -> Outcome {
     let mut decoder = None;
     loop {
         let pending = match op.next() {
@@ -102,10 +107,10 @@ fn run(history: &mut History, op: &mut Admission, host: &mut Host) -> Outcome {
                 Next::Waiting(h) => return Outcome::Waiting(h),
                 _ => None,
             },
-            Next::Request(t, r) => Some((t, host.execute(r, &mut decoder))),
+            Next::Request(t, r) => Some((t, host.execute(item, r, &mut decoder))),
             Next::AwaitReply => {
                 let (t, r) = op.request().unwrap();
-                Some((t, host.execute(r, &mut decoder)))
+                Some((t, host.execute(item, r, &mut decoder)))
             }
         };
         if let Some((ticket, owned)) = pending
@@ -171,8 +176,8 @@ fn admits_with_one_byte_reads_and_one_byte_decoder_output() {
     };
     let bytes = fragment(&items);
     let item = host.store(bytes.clone());
-    let mut op = history.receive(item, options());
-    let Outcome::Done(receipt) = run(&mut history, &mut op, &mut host) else {
+    let mut op = history.receive(options());
+    let Outcome::Done(receipt) = run(&mut history, &mut op, &mut host, &item) else {
         panic!("not admitted")
     };
     assert_eq!(receipt.members.len(), 5);
@@ -192,12 +197,12 @@ fn stale_duplicate_and_wrong_kind_replies_do_not_disturb_the_operation() {
     let mut history = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     let mut decoder = None;
     let Next::Request(first, request) = op.next() else {
         panic!()
     };
-    let read = host.execute(request, &mut decoder);
+    let read = host.execute(&item, request, &mut decoder);
     // Wrong kind for the outstanding read.
     assert_eq!(
         op.reply(first, Reply::Bound(&[1, 2, 3])).unwrap_err(),
@@ -215,7 +220,7 @@ fn stale_duplicate_and_wrong_kind_replies_do_not_disturb_the_operation() {
         ReplyError::Stale
     );
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Done(_)
     ));
 }
@@ -226,14 +231,14 @@ fn local_work_and_other_admissions_proceed_while_a_request_is_pending() {
     let mut history = History::new();
     let mut host = Host::default();
     let ids: Vec<_> = items.iter().map(|(_, b)| host.store(b.clone())).collect();
-    let mut ops: Vec<_> = ids.iter().map(|&i| history.receive(i, options())).collect();
+    let mut ops: Vec<_> = ids.iter().map(|_| history.receive(options())).collect();
     // Start every operation and leave its first read outstanding.
     let mut pending = vec![];
-    for op in &mut ops {
+    for (op, item) in ops.iter_mut().zip(&ids) {
         let Next::Request(t, r) = op.next() else {
             panic!()
         };
-        pending.push((t, host.execute(r, &mut None)));
+        pending.push((t, host.execute(item, r, &mut None)));
     }
     // Local edits happen meanwhile.
     let bob = key(2);
@@ -248,8 +253,8 @@ fn local_work_and_other_admissions_proceed_while_a_request_is_pending() {
     }
     let mut done = 0;
     for _round in 0..ops.len() {
-        for op in &mut ops {
-            if let Outcome::Done(_) = run(&mut history, op, &mut host) {
+        for (op, item) in ops.iter_mut().zip(&ids) {
+            if let Outcome::Done(_) = run(&mut history, op, &mut host, item) {
                 done += 1;
             }
         }
@@ -272,8 +277,10 @@ fn waiting_costs_nothing_until_the_epoch_changes() {
         .find(|(id, _)| *id == ItemId::Commit(hashes[5]))
         .unwrap();
     let item = host.store(after.1.clone());
-    let mut op = history.receive(item, options());
-    assert!(matches!(run(&mut history, &mut op, &mut host), Outcome::Waiting(h) if h == hashes[4]));
+    let mut op = history.receive(options());
+    assert!(
+        matches!(run(&mut history, &mut op, &mut host, &item), Outcome::Waiting(h) if h == hashes[4])
+    );
     let read = op.counts().bytes_read;
     assert!(matches!(history.advance(&mut op), Next::Waiting(_)));
     assert_eq!(op.counts().bytes_read, read);
@@ -286,13 +293,13 @@ fn waiting_costs_nothing_until_the_epoch_changes() {
     history.publish_commit(p, 7).unwrap();
     assert!(matches!(history.advance(&mut op), Next::Waiting(_)));
     let frag = host.store(fragment(&items));
-    let mut first = history.receive(frag, options());
+    let mut first = history.receive(options());
     assert!(matches!(
-        run(&mut history, &mut first, &mut host),
+        run(&mut history, &mut first, &mut host, &frag),
         Outcome::Done(_)
     ));
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Done(_)
     ));
     assert!(history.is_admitted(&hashes[5]));
@@ -305,13 +312,13 @@ fn wrong_history_is_rejected_without_failing_the_operation() {
     let mut other = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     let mut decoder = None;
     loop {
         match op.next() {
             Next::NeedHistory => break,
             Next::Request(t, r) => {
-                let owned = host.execute(r, &mut decoder);
+                let owned = host.execute(&item, r, &mut decoder);
                 op.reply(t, owned.reply()).unwrap();
             }
             Next::Continue => {}
@@ -324,7 +331,7 @@ fn wrong_history_is_rejected_without_failing_the_operation() {
     ));
     assert!(other.is_empty());
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Done(_)
     ));
 }
@@ -335,11 +342,11 @@ fn dropping_an_operation_leaves_history_untouched() {
     let history = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     let Next::Request(t, r) = op.next() else {
         panic!()
     };
-    let owned = host.execute(r, &mut None);
+    let owned = host.execute(&item, r, &mut None);
     op.reply(t, owned.reply()).unwrap();
     drop(op);
     assert!(history.is_empty());
@@ -354,24 +361,16 @@ fn tampered_items_are_rejected() {
         .unwrap()
         .unwrap();
 
-    // Stored under the wrong hash.
     let mut host = Host::default();
-    let wrong = BlobHash::of_contents(b"something else");
-    host.blobs.insert(wrong, bytes.clone());
     let mut history = History::new();
-    let mut op = history.receive(wrong, options());
-    assert!(matches!(
-        run(&mut history, &mut op, &mut host),
-        Outcome::Failed(Error::RepresentationMismatch)
-    ));
 
     // A corrupted signature.
     let mut corrupt = bytes.clone();
     corrupt[header - 1] ^= 1;
     let item = host.store(corrupt);
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Failed(Error::InvalidSignature { .. })
     ));
 
@@ -379,9 +378,9 @@ fn tampered_items_are_rejected() {
     let mut corrupt = bytes.clone();
     corrupt[header + 10] ^= 1;
     let item = host.store(corrupt);
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Failed(Error::InvalidItem(_) | Error::InvalidSignature { .. } | Error::Codec(_))
     ));
 
@@ -389,17 +388,17 @@ fn tampered_items_are_rejected() {
     let mut trailing = bytes.clone();
     trailing.push(0);
     let item = host.store(trailing);
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Failed(_)
     ));
 
     // Truncated body: the codec sees EOF early.
     let item = host.store(bytes[..bytes.len() - 3].to_vec());
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     assert!(matches!(
-        run(&mut history, &mut op, &mut host),
+        run(&mut history, &mut op, &mut host, &item),
         Outcome::Failed(Error::Codec(_))
     ));
     assert!(history.is_empty());
@@ -411,12 +410,12 @@ fn unexpected_format_fails_before_any_decoding() {
     let history = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut op = history.receive(item, ReceiveOptions::new(FormatId::new("other").unwrap()));
+    let mut op = history.receive(ReceiveOptions::new(FormatId::new("other").unwrap()));
     loop {
         match op.next() {
             Next::Request(t, r) => {
                 assert!(matches!(r, Request::Read { .. }), "decoder must not run");
-                let owned = host.execute(r, &mut None);
+                let owned = host.execute(&item, r, &mut None);
                 let _ = op.reply(t, owned.reply());
             }
             Next::Failed(e) => {
@@ -446,7 +445,7 @@ fn decoder_protocol_violations_fail_the_operation() {
         let history = History::new();
         let mut host = Host::default();
         let item = host.store(bytes.clone());
-        let mut op = history.receive(item, options());
+        let mut op = history.receive(options());
         let mut decoder = None;
         let failed = loop {
             match op.next() {
@@ -462,7 +461,7 @@ fn decoder_protocol_violations_fail_the_operation() {
                     }
                 }
                 Next::Request(t, r) => {
-                    let owned = host.execute(r, &mut decoder);
+                    let owned = host.execute(&item, r, &mut decoder);
                     op.reply(t, owned.reply()).unwrap();
                 }
                 Next::Failed(e) => break e.clone(),
@@ -484,11 +483,11 @@ fn host_failures_are_terminal_and_keep_counts() {
     let history = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut op = history.receive(item, options());
+    let mut op = history.receive(options());
     let Next::Request(t, r) = op.next() else {
         panic!()
     };
-    let owned = host.execute(r, &mut None);
+    let owned = host.execute(&item, r, &mut None);
     op.reply(t, owned.reply()).unwrap();
     let before = op.counts();
     let Next::Request(t, _) = op.next() else {
@@ -508,18 +507,18 @@ fn bind_is_skipped_when_every_member_is_already_delivered() {
     let mut history = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut op = history.receive(item, options());
-    let Outcome::Done(first) = run(&mut history, &mut op, &mut host) else {
+    let mut op = history.receive(options());
+    let Outcome::Done(first) = run(&mut history, &mut op, &mut host, &item) else {
         panic!()
     };
-    let mut again = history.receive(item, options());
+    let mut again = history.receive(options());
     let mut binds = 0;
     let mut decoder = None;
     loop {
         match again.next() {
             Next::Request(t, r) => {
                 binds += matches!(r, Request::Bind { .. }) as usize;
-                let owned = host.execute(r, &mut decoder);
+                let owned = host.execute(&item, r, &mut decoder);
                 again.reply(t, owned.reply()).unwrap();
             }
             Next::NeedHistory => {
@@ -553,8 +552,8 @@ fn concurrent_admissions_of_one_item_keep_the_first_payload_ids() {
     let mut history = History::new();
     let mut host = Host::default();
     let item = host.store(fragment(&items));
-    let mut a = history.receive(item, options());
-    let mut b = history.receive(item, options());
+    let mut a = history.receive(options());
+    let mut b = history.receive(options());
     // Drive both up to their bind requests.
     let mut binds = vec![];
     for op in [&mut a, &mut b] {
@@ -562,16 +561,16 @@ fn concurrent_admissions_of_one_item_keep_the_first_payload_ids() {
         loop {
             match op.next() {
                 Next::Request(t, r @ Request::Bind { .. }) => {
-                    binds.push((t, host.execute(r, &mut None)));
+                    binds.push((t, host.execute(&item, r, &mut None)));
                     break;
                 }
                 Next::Request(t, r) => {
-                    let owned = host.execute(r, &mut decoder);
+                    let owned = host.execute(&item, r, &mut decoder);
                     op.reply(t, owned.reply()).unwrap();
                 }
                 Next::NeedHistory => {
                     if let Next::Request(t, r) = history.advance(op) {
-                        binds.push((t, host.execute(r, &mut None)));
+                        binds.push((t, host.execute(&item, r, &mut None)));
                         break;
                     }
                 }
@@ -603,10 +602,10 @@ fn replies_for_another_operation_are_stale() {
     let history = History::new();
     let mut host = Host::default();
     let ids: Vec<_> = items.iter().take(2).map(|(_, b)| host.store(b.clone())).collect();
-    let mut a = history.receive(ids[0], options());
-    let mut b = history.receive(ids[1], options());
+    let mut a = history.receive(options());
+    let mut b = history.receive(options());
     let Next::Request(ta, ra) = a.next() else { panic!() };
-    let reply_a = host.execute(ra, &mut None);
+    let reply_a = host.execute(&ids[0], ra, &mut None);
     let Next::Request(tb, _) = b.next() else { panic!() };
     assert_ne!(ta, tb);
     assert_eq!(b.reply(ta, reply_a.reply()).unwrap_err(), ReplyError::Stale);

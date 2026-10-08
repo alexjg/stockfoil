@@ -19,6 +19,7 @@ and tested from what remains. Contracts are in
 | Views, permissions, diff, metadata-only change batches, durable completed cursor | `src/history/view.rs` | `tests/reference.rs` (against a naive whole-history model) |
 | Wire v2 header (v1 columns, length-prefixed header, streaming body) | `src/wire.rs`, `design/wire-v2.md` | unit tests, golden vectors `tests/vectors.rs` (identities equal v1's) |
 | Native adapter, `MemoryStorage`, payload reads, single-pass item decoding | `src/graph.rs` | all integration tests |
+| Opaque storage keys (no content-hash assumption, so encrypted stores work); payload reads checked against commits (`check_payload`, `CorruptPayload`) | `src/graph.rs`, `src/history/local.rs` | `tests/storage.rs` (counter-keyed, masked storage; corrupted blobs); JS `storage keys are opaque…` test; `admission_bytes` fuzzing under unrelated keys |
 | Bounded payload buffers for items over 4 GiB | `tests/large.rs` | 4 GiB + 12 KiB admitted with unchanged peak RSS (release, ignored by default) |
 | JavaScript/Wasm binding and async host driver | `javascript/` | `npm test` (Rust interop fixture, delayed hosts, BigInt IDs) |
 | Examples | `examples/` | mv-register (Rust and JS) test suites; file-backed storage example |

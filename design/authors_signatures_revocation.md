@@ -119,8 +119,9 @@ delivery.
 The native `Graph<C, S>` runs these requests synchronously. `Graph::receive`
 stores the item and returns `Error::MissingDependency(hash)` when the admission
 would wait; the item stays in storage for a later `Graph::admit`.
-`Graph::begin_admit` and `Graph::drive` keep the verified operation instead,
-returning `Driven::Waiting(hash)`. Errors are terminal for that operation and
+`Graph::begin_admit` and `Graph::drive(&key, &mut op)` keep the verified
+operation, alongside the item's storage key, instead, returning
+`Driven::Waiting(hash)`. Errors are terminal for that operation and
 leave history untouched; storage may keep unused blobs or payload IDs.
 
 #### Signing Drafts
@@ -255,7 +256,8 @@ parents first. `next_changes(&mut changes, &mut out, max)` appends up to `max`
 records and returns `Batch::More` until it returns `Batch::Complete(cursor)`.
 Records carry metadata only: `hash`, `payload` (the logical payload ID),
 `newly_delivered`, and `visibility`. Payload bytes are fetched separately, for
-example with `Graph::payload` or `Graph::decode_item`. The cursor records the
+example with `Graph::payload(&hash)` or `Graph::decode_item`, which check them
+against the commits. The cursor records the
 delivery heads separately from the materialized viewpoint, so historical reads
 do not rewind delivery; persist it (`to_bytes`) atomically with the materialized
 state. Comparing viewpoints determines participation changes, including changes
@@ -397,17 +399,17 @@ graph.sign(alice, draft.hash, signature)?;
 // Received items need not arrive in causal order. A waiting admission keeps
 // its verified state; retry it whenever the history's epoch has changed.
 let blob = graph.storage_mut().insert(bytes);
-let mut op = graph.begin_admit(blob);
-match graph.drive(&mut op)? {
+let mut op = graph.begin_admit();
+match graph.drive(&blob, &mut op)? {
     Driven::Done(_receipt) => {}
-    Driven::Waiting(_dependency) => waiting.push(op),
+    Driven::Waiting(_dependency) => waiting.push((blob, op)),
 }
 let mut epoch = None;
 while epoch != Some(graph.history().epoch()) {
     epoch = Some(graph.history().epoch());
-    for mut op in std::mem::take(&mut waiting) {
-        match graph.drive(&mut op) {
-            Ok(Driven::Waiting(_)) => waiting.push(op),
+    for (blob, mut op) in std::mem::take(&mut waiting) {
+        match graph.drive(&blob, &mut op) {
+            Ok(Driven::Waiting(_)) => waiting.push((blob, op)),
             Ok(Driven::Done(_)) => {}
             Err(e) => handle(e),
         }

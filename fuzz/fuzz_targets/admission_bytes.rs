@@ -433,11 +433,11 @@ fuzz_target!(|data: &[u8]| {
     let mut r = receiver(t, stage, drafts);
     let (epoch, len) = (r.history.epoch(), r.history.len());
     let dag_before = Dag::of(&r.history);
-    let wrong_hash = cfg[8] & 1 != 0;
-    let item = if wrong_hash {
-        let h = BlobHash::of_contents(b"not the item");
-        r.host.blobs.insert(h, bytes.clone());
-        h
+    // Storage keys are opaque: an item stored under an unrelated key must be
+    // received exactly as under its content hash.
+    let opaque_key = cfg[8] & 1 != 0;
+    let item = if opaque_key {
+        BlobHash::of_contents(&[b"opaque key".as_slice(), &bytes].concat())
     } else {
         BlobHash::of_contents(&bytes)
     };
@@ -449,8 +449,8 @@ fuzz_target!(|data: &[u8]| {
         decode_limit: [1, 2, 3, 7, 64, 4096, 65536][cfg[5] as usize % 7],
         max_steps: 64 * (bytes.len() + 4096),
     };
-    let mut op = r.history.receive(item, options.clone());
-    let outcome = r.host.run(&mut r.history, &mut op, &cfg_drive);
+    let mut op = r.history.receive(options.clone());
+    let outcome = r.host.run(&mut r.history, &mut op, item, &cfg_drive);
     if std::env::var_os("STOCKFOIL_FUZZ_TRACE").is_some() {
         let kind = match op.meta().map(|m| &m.id) {
             Some(ItemId::Commit(_)) => "commit",
@@ -469,7 +469,6 @@ fuzz_target!(|data: &[u8]| {
     match &outcome {
         Outcome::Stuck => panic!("admission did not terminate"),
         Outcome::Done(receipt) => {
-            assert!(!wrong_hash, "admitted bytes stored under the wrong hash");
             assert!(options.format == format(), "admitted an item of another format");
             if let Some(c) = &crafted {
                 if c.intact {
@@ -490,8 +489,7 @@ fuzz_target!(|data: &[u8]| {
             if let Some(c) = &crafted {
                 let default_shape = options.read_size > 0
                     && options.decode_capacity > 0
-                    && options.format == format()
-                    && !wrong_hash;
+                    && options.format == format();
                 if c.intact
                     && default_shape
                     && invalid_reason(c).is_none()

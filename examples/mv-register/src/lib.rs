@@ -179,7 +179,7 @@ fn load<'a>(
             .map_err(|e| Error::Storage(e.to_string()))?;
         match location {
             PayloadLocation::Canonical(_) => {
-                if let Some(a) = Assignment::decode(&graph.payload(change.payload)?) {
+                if let Some(a) = Assignment::decode(&graph.payload(&change.hash)?) {
                     loaded.insert(change.hash, a);
                 }
             }
@@ -189,13 +189,10 @@ fn load<'a>(
         }
     }
     for (item, wanted) in members {
-        let last = *wanted.keys().next_back().unwrap();
         let mut bytes: HashMap<usize, Vec<u8>> = HashMap::new();
-        graph.decode_item(item, |member, chunk| {
-            if wanted.contains_key(&member) {
-                bytes.entry(member).or_default().extend_from_slice(chunk);
-            }
-            Ok(member <= last)
+        graph.decode_item(&item, &wanted, |member, chunk| {
+            bytes.entry(member).or_default().extend_from_slice(chunk);
+            Ok(())
         })?;
         for (member, hash) in wanted {
             if let Some(a) = bytes.get(&member).and_then(|b| Assignment::decode(b)) {
@@ -212,8 +209,9 @@ pub struct MvRegisterMap {
     signing_key: SigningKey,
     permissions: WritePermissions,
     materialized: Materialized,
-    /// Received items that are verified but wait for history they build on.
-    waiting: Vec<Admission>,
+    /// Received items that are verified but wait for history they build on,
+    /// with their storage keys.
+    waiting: Vec<(BlobHash, Admission)>,
     /// What each peer, named by its author key, has acknowledged.
     sent: HashMap<Author, ExportCursor>,
 }
@@ -368,15 +366,15 @@ impl MvRegisterMap {
         writer.write_all(item)?;
         let blob = storage.finish(writer)?;
         let options = ReceiveOptions::new(self.graph.codec().format_id().clone());
-        let mut op = self.graph.history().receive(blob, options);
-        match self.graph.drive(&mut op)? {
+        let mut op = self.graph.history().receive(options);
+        match self.graph.drive(&blob, &mut op)? {
             Driven::Done(receipt) => {
                 self.retry_waiting()?;
                 let new = receipt.members.iter().filter(|m| m.newly_delivered).count();
                 Ok(Received::Admitted { new })
             }
             Driven::Waiting(dependency) => {
-                self.waiting.push(op);
+                self.waiting.push((blob, op));
                 Ok(Received::Waiting(dependency))
             }
         }
@@ -389,10 +387,10 @@ impl MvRegisterMap {
         let mut epoch = None;
         while epoch != Some(self.graph.history().epoch()) {
             epoch = Some(self.graph.history().epoch());
-            for mut op in std::mem::take(&mut self.waiting) {
-                match self.graph.drive(&mut op) {
+            for (blob, mut op) in std::mem::take(&mut self.waiting) {
+                match self.graph.drive(&blob, &mut op) {
                     Ok(Driven::Done(_)) => {}
-                    Ok(Driven::Waiting(_)) => self.waiting.push(op),
+                    Ok(Driven::Waiting(_)) => self.waiting.push((blob, op)),
                     Err(e) => {
                         first_error.get_or_insert(e);
                     }

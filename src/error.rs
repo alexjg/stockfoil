@@ -25,8 +25,8 @@ pub enum Error {
         author: Author,
         member: usize,
     },
-    /// The stored bytes do not hash to the requested item.
-    RepresentationMismatch,
+    /// Bytes read back from storage are not the payload of this commit.
+    CorruptPayload(CommitHash),
     /// The fragment does not sit at its canonical place in admitted history.
     InvalidPlacement,
     /// An admitted dependency is missing. Only blocking conveniences report this;
@@ -62,7 +62,7 @@ impl Error {
             Self::InvalidPublicKey(_) => "InvalidPublicKey",
             Self::InvalidSignature { .. } => "InvalidSignature",
             Self::MissingSignature { .. } => "MissingSignature",
-            Self::RepresentationMismatch => "RepresentationMismatch",
+            Self::CorruptPayload(_) => "CorruptPayload",
             Self::InvalidPlacement => "InvalidPlacement",
             Self::MissingDependency(_) => "MissingDependency",
             Self::UnknownCommit(_) => "UnknownCommit",
@@ -95,7 +95,7 @@ impl fmt::Display for Error {
                     "member {member} is not covered by its author's signature"
                 )
             }
-            Self::RepresentationMismatch => write!(f, "stored bytes do not match the item hash"),
+            Self::CorruptPayload(_) => write!(f, "stored payload does not match its commit"),
             Self::InvalidPlacement => write!(f, "fragment is not canonically placed"),
             Self::MissingDependency(_) => write!(f, "missing admitted dependency"),
             Self::UnknownCommit(_) => write!(f, "unknown commit"),

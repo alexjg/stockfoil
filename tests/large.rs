@@ -30,8 +30,7 @@ fn fill_payload(offset: u64, out: &mut [u8]) {
 /// One stored item: a header plus a ChunkCodec body, generated on demand.
 struct Synthetic {
     header: Vec<u8>,
-    item: BlobHash,
-    bound: Vec<PayloadLocation>,
+    bound: Vec<PayloadLocation<()>>,
 }
 
 impl Synthetic {
@@ -87,23 +86,24 @@ impl Synthetic {
     }
 }
 
+/// Holds exactly one item, so its key carries no information.
 impl Storage for Synthetic {
+    type Key = ();
     type Writer = io::Sink;
     fn create(&mut self) -> io::Result<io::Sink> {
         Ok(io::sink())
     }
-    fn finish(&mut self, _: io::Sink) -> io::Result<BlobHash> {
+    fn finish(&mut self, _: io::Sink) -> io::Result<()> {
         Err(io::Error::other("read-only"))
     }
-    fn read_at(&mut self, blob: &BlobHash, offset: u64, out: &mut [u8]) -> io::Result<usize> {
-        assert_eq!(*blob, self.item);
+    fn read_at(&mut self, _: &(), offset: u64, out: &mut [u8]) -> io::Result<usize> {
         Ok(self.fill(offset, out))
     }
-    fn bind(&mut self, location: PayloadLocation) -> io::Result<PayloadId> {
+    fn bind(&mut self, location: PayloadLocation<()>) -> io::Result<PayloadId> {
         self.bound.push(location);
         Ok(self.bound.len() as PayloadId - 1)
     }
-    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation> {
+    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation<()>> {
         Ok(self.bound[id as usize])
     }
 }
@@ -115,7 +115,7 @@ fn peak_rss_kib() -> Option<u64> {
 }
 
 #[test]
-#[ignore = "hashes about 13 GiB; run in release"]
+#[ignore = "hashes about 9 GiB; run in release"]
 fn payload_over_four_gib_streams_with_bounded_memory() {
     let alice = key(1);
     // Commit identity requires the payload hash: stream it once.
@@ -144,28 +144,15 @@ fn payload_over_four_gib_streams_with_bounded_memory() {
             signature: sign(&alice, &prepared.hash),
         }],
     };
-    let mut storage = Synthetic {
+    let storage = Synthetic {
         header: wire::encode_header(&meta, &format()),
-        item: BlobHash::from([0; 32]),
         bound: vec![],
     };
-    let mut hasher = blake3::Hasher::new();
-    let mut offset = 0;
-    loop {
-        let n = storage.fill(offset, &mut buf);
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        offset += n as u64;
-    }
-    storage.item = BlobHash::from(<[u8; 32]>::from(hasher.finalize()));
     drop(buf);
     let before = peak_rss_kib();
 
-    let item = storage.item;
     let mut graph = Graph::new(ChunkCodec::default(), storage);
-    let receipt = graph.admit(item).unwrap();
+    let receipt = graph.admit(&()).unwrap();
     assert_eq!(receipt.members.len(), 1);
     assert!(graph.history().is_admitted(&prepared.hash));
     assert_eq!(
@@ -196,7 +183,6 @@ fn synthetic_layout_matches_the_chunk_codec() {
     // The generator's first frames match the codec's for any payload length.
     let synthetic = Synthetic {
         header: vec![],
-        item: BlobHash::from([0; 32]),
         bound: vec![],
     };
     let mut generated = vec![0u8; (CHUNK + 8) as usize];

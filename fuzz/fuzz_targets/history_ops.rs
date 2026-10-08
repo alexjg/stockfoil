@@ -261,7 +261,7 @@ impl World {
             let pending = std::mem::take(&mut self.reps[r].pending);
             let before = pending.len();
             for blob in pending {
-                match self.reps[r].g.admit(blob) {
+                match self.reps[r].g.admit(&blob) {
                     Ok(_) => {}
                     Err(Error::MissingDependency(_)) => self.reps[r].pending.push(blob),
                     Err(e) => panic!("stored honest item rejected on retry: {e:?}"),
@@ -308,8 +308,7 @@ impl World {
         for r in 0..2 {
             let hashes: Vec<_> = self.reps[r].delivered();
             for h in hashes {
-                let id = self.reps[r].g.history().lookup(&h).unwrap().payload;
-                let bytes = self.reps[r].g.payload(id).expect("payload unreadable");
+                let bytes = self.reps[r].g.payload(&h).expect("payload unreadable");
                 assert_eq!(&bytes, &self.payloads[&h], "payload bytes differ");
             }
         }

@@ -43,8 +43,8 @@ pub use graph::{
 };
 pub use history::{
     Batch, Change, Changes, CommitBuilder, CommitDiff, CommitInfo, Delivered, ExportCursor,
-    ExportItem, ExportPlan, Heads, History, MaterializationCursor, Prepared, Receipt, ViewDiff,
-    ViewPoint, Vis, VisDiff, WritePermissions,
+    ExportItem, ExportPlan, Heads, History, MaterializationCursor, PayloadCheck, Prepared, Receipt,
+    ViewDiff, ViewPoint, Vis, VisDiff, WritePermissions,
 };
 pub use meta::{
     BundleMeta, Evidence, FormatId, FragmentRange, FragmentShape, ItemId, Limits, MemberShape,

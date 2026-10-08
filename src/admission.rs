@@ -5,8 +5,13 @@
 //! decoder, and bind payload IDs, and it hashes and verifies everything itself:
 //! there is no host reply that means "verified".
 //!
+//! An operation does not know where its item is stored. The host does: storage
+//! keys are the host's business and need not be content hashes (an encrypted
+//! store, for example, knows only ciphertext digests). Nothing depends on the
+//! stored representation beyond the canonical payloads it decodes to.
+//!
 //! ```text
-//! Read*        hash the stored bytes (must equal the item hash); parse the header
+//! Read*        parse the header
 //! Decode*      hash canonical members; check boundaries, EOF, codec completion
 //!              check signatures and coverage            (all without the history)
 //! NeedHistory  dependencies and fragment placement      (History::advance)
@@ -15,9 +20,7 @@
 //! ```
 use crate::history::Readiness;
 use crate::verify::{Verified, Verifier};
-use crate::{
-    BlobHash, BundleMeta, CommitHash, Error, FormatId, History, Limits, PayloadId, Receipt,
-};
+use crate::{BundleMeta, CommitHash, Error, FormatId, History, Limits, PayloadId, Receipt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -65,11 +68,7 @@ impl Ticket {
 #[derive(Debug, Clone, Copy)]
 pub enum Request<'a> {
     /// Read up to `max` bytes of the stored item starting at `offset`.
-    Read {
-        item: BlobHash,
-        offset: u64,
-        max: usize,
-    },
+    Read { offset: u64, max: usize },
     /// Run one decoder step. Create this operation's decoder from `meta` on the
     /// first `Decode`; drop it when the operation ends. `eof` means `input`
     /// ends the encoded body.
@@ -80,10 +79,7 @@ pub enum Request<'a> {
         capacity: usize,
     },
     /// Allocate a payload ID for every member and bind it to `(item, member)`.
-    Bind {
-        item: BlobHash,
-        meta: &'a Arc<BundleMeta>,
-    },
+    Bind { meta: &'a Arc<BundleMeta> },
 }
 
 /// Decoder progress, as defined by the application codec contract.
@@ -186,12 +182,10 @@ enum Stage {
 /// Receive one stored item. Created by [`History::receive`].
 pub struct Admission {
     history: u64,
-    item: BlobHash,
     options: ReceiveOptions,
     stage: Stage,
     meta: Option<Arc<BundleMeta>>,
     outstanding: Option<Outstanding>,
-    representation: blake3::Hasher,
     offset: u64,
     eof: bool,
     input: Vec<u8>,
@@ -212,15 +206,15 @@ pub struct Admission {
 impl std::fmt::Debug for Admission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Admission")
-            .field("item", &self.item)
             .field("counts", &self.counts)
             .finish_non_exhaustive()
     }
 }
 
 impl History {
-    /// Start receiving the stored item `item` (header and body, as one blob).
-    pub fn receive(&self, item: BlobHash, mut options: ReceiveOptions) -> Admission {
+    /// Start receiving one stored item (header and body, as one blob). The
+    /// host that answers the operation's requests decides which item that is.
+    pub fn receive(&self, mut options: ReceiveOptions) -> Admission {
         // Zero sizes could never make progress; huge ones are capped so that
         // buffer arithmetic cannot overflow.
         const MAX_BUFFER: usize = 1 << 30;
@@ -229,12 +223,10 @@ impl History {
         options.quantum = options.quantum.max(1);
         Admission {
             history: self.id(),
-            item,
             options,
             stage: Stage::Header { buffer: Vec::new() },
             meta: None,
             outstanding: None,
-            representation: blake3::Hasher::new(),
             offset: 0,
             eof: false,
             input: Vec::new(),
@@ -302,10 +294,6 @@ static WRONG_HISTORY: Error = Error::WrongHistory;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 impl Admission {
-    pub fn item(&self) -> BlobHash {
-        self.item
-    }
-
     pub fn counts(&self) -> Counts {
         self.counts
     }
@@ -324,7 +312,6 @@ impl Admission {
     fn describe(&self, o: Outstanding) -> Request<'_> {
         match o.kind {
             Kind::Read => Request::Read {
-                item: self.item,
                 offset: self.offset,
                 max: o.max,
             },
@@ -335,7 +322,6 @@ impl Admission {
                 capacity: o.max,
             },
             Kind::Bind => Request::Bind {
-                item: self.item,
                 meta: self.meta.as_ref().unwrap(),
             },
         }
@@ -452,10 +438,6 @@ impl Admission {
                     if verifier.members_ended() != verifier.meta().len() {
                         return Err(Error::InvalidItem("decoder finished before every member"));
                     }
-                    let hash = BlobHash::from(<[u8; 32]>::from(self.representation.finalize()));
-                    if hash != self.item {
-                        return Err(Error::RepresentationMismatch);
-                    }
                     self.input = Vec::new();
                     self.canonical = Vec::new();
                     self.stage = Stage::Verify;
@@ -552,7 +534,6 @@ impl Admission {
                     .filter(|&n| n <= self.options.limits.max_item_bytes)
                     .ok_or(Error::Limit("item bytes"))?;
                 self.counts.bytes_read += bytes.len() as u64;
-                self.representation.update(bytes);
                 self.eof |= eof;
                 match &mut self.stage {
                     Stage::Header { buffer } => {

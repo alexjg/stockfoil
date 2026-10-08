@@ -99,7 +99,7 @@ impl RegisterCodec {
     }
 }
 
-impl<S: Storage> Codec<S> for RegisterCodec {
+impl<S: Storage<Key = BlobHash>> Codec<S> for RegisterCodec {
     type Decoder = RegisterDecoder;
     type Encoder = RegisterEncoder;
     fn format(&self) -> &FormatId {
@@ -311,7 +311,7 @@ pub(crate) struct MemberReader {
 }
 
 impl PayloadReader {
-    pub fn open(location: PayloadLocation) -> Self {
+    pub fn open(location: PayloadLocation<BlobHash>) -> Self {
         match location {
             PayloadLocation::Canonical(blob) => Self::Canonical { blob, offset: 0 },
             PayloadLocation::Member { item, index } => Self::Member(Box::new(MemberReader {
@@ -332,7 +332,7 @@ impl PayloadReader {
 
     /// Reuse this reader for `location` if it is a later member of the item
     /// being decoded; otherwise open a new one.
-    pub fn reopen(self, location: PayloadLocation) -> Self {
+    pub fn reopen(self, location: PayloadLocation<BlobHash>) -> Self {
         match (self, location) {
             (Self::Member(mut r), PayloadLocation::Member { item, index })
                 if r.item == item && r.done && index >= r.member =>
@@ -346,7 +346,11 @@ impl PayloadReader {
     }
 
     /// Fill `out` with the next canonical bytes; `Ok(0)` at the end.
-    pub fn read<S: Storage>(&mut self, storage: &mut S, out: &mut [u8]) -> io::Result<usize> {
+    pub fn read<S: Storage<Key = BlobHash>>(
+        &mut self,
+        storage: &mut S,
+        out: &mut [u8],
+    ) -> io::Result<usize> {
         match self {
             Self::Canonical { blob, offset } => {
                 let n = storage.read_at(blob, *offset, out)?;
@@ -359,7 +363,11 @@ impl PayloadReader {
 }
 
 impl MemberReader {
-    fn read<S: Storage>(&mut self, storage: &mut S, out: &mut [u8]) -> io::Result<usize> {
+    fn read<S: Storage<Key = BlobHash>>(
+        &mut self,
+        storage: &mut S,
+        out: &mut [u8],
+    ) -> io::Result<usize> {
         if out.is_empty() {
             return Ok(0);
         }
@@ -464,7 +472,7 @@ impl RegisterEncoder {
     }
 
     /// Make canonical input available. `false` at the end of the payload.
-    fn fill<S: Storage>(&mut self, storage: &mut S) -> io::Result<bool> {
+    fn fill<S: Storage<Key = BlobHash>>(&mut self, storage: &mut S) -> io::Result<bool> {
         if self.start < self.input.len() {
             return Ok(true);
         }
@@ -497,7 +505,7 @@ impl RegisterEncoder {
     }
 }
 
-impl<S: Storage> Encoder<S> for RegisterEncoder {
+impl<S: Storage<Key = BlobHash>> Encoder<S> for RegisterEncoder {
     fn step(&mut self, storage: &mut S, output: &mut [u8]) -> io::Result<EncodeProgress> {
         let mut produced = 0;
         loop {

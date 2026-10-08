@@ -21,8 +21,7 @@ fn commit_sign_export_receive_round_trip() {
     assert!(b.history().is_admitted(&first));
     assert!(b.history().is_admitted(&second));
     assert!(b.history().is_ancestor(&first, &second));
-    let id = b.history().lookup(&second).unwrap().payload;
-    assert_eq!(b.payload(id).unwrap(), b"world");
+    assert_eq!(b.payload(&second).unwrap(), b"world");
 
     // Nothing new to send.
     assert!(a.export(&cursor).is_empty());
@@ -148,8 +147,7 @@ fn local_fragment_certificates_cover_their_members() {
     for h in chain.iter().chain([&base, &head]) {
         assert!(b.history().is_admitted(h));
     }
-    let id = b.history().lookup(&chain[2]).unwrap().payload;
-    assert_eq!(b.payload(id).unwrap(), b"m2");
+    assert_eq!(b.payload(&chain[2]).unwrap(), b"m2");
 }
 
 #[test]
@@ -179,11 +177,11 @@ fn received_items_wait_for_dependencies() {
         .is_some();
     assert!(stored);
     b.receive(first_item.as_slice()).unwrap();
-    let receipt = b.admit(BlobHash::of_contents(second_item)).unwrap();
+    let receipt = b.admit(&BlobHash::of_contents(second_item)).unwrap();
     assert_eq!(receipt.members.len(), 1);
     assert!(receipt.members[0].newly_delivered);
     // Receiving it again delivers nothing new and keeps the first payload ID.
-    let again = b.admit(BlobHash::of_contents(second_item)).unwrap();
+    let again = b.admit(&BlobHash::of_contents(second_item)).unwrap();
     assert!(!again.members[0].newly_delivered);
     assert_eq!(again.members[0].payload, receipt.members[0].payload);
 }

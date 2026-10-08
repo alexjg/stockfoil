@@ -58,7 +58,7 @@ fn run(u: &mut Unstructured) -> Result<()> {
     let (epoch, len) = (history.epoch(), history.len());
     let before: Vec<Option<PayloadId>> =
         item.hashes.iter().map(|h| history.lookup(h).map(|i| i.payload)).collect();
-    let mut op = history.receive(blob, options);
+    let mut op = history.receive(options);
     let mut st = OpState::default();
     let mut deferred = false;
     let mut steps = 0usize;
@@ -82,15 +82,15 @@ fn run(u: &mut Unstructured) -> Result<()> {
                     Next::Done(r) => break Ok(r.clone()),
                     Next::Failed(e) => break Err(e.clone()),
                     Next::Waiting(h) => panic!("waiting for {h:?} although dependencies are admitted"),
-                    Next::Request(t, r) => (t, Req::of(&r)),
+                    Next::Request(t, r) => (t, Req::of(blob, &r)),
                     _ => continue,
                 }
             }
-            Next::Request(t, r) => (t, Req::of(&r)),
+            Next::Request(t, r) => (t, Req::of(blob, &r)),
             Next::AwaitReply => {
                 assert!(deferred, "AwaitReply without a deferred request");
                 let (t, r) = op.request().expect("AwaitReply without a request");
-                (t, Req::of(&r))
+                (t, Req::of(blob, &r))
             }
         };
         deferred = false;

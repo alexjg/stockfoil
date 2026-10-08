@@ -3,8 +3,9 @@
 //!
 //! Run with: `cargo run --example file_storage [MiB]` (default 64).
 //!
-//! - Blobs are content-addressed files named by their BLAKE3 hash, written to a
-//!   temporary file, fsynced, then renamed into place.
+//! - Blobs are files named by their BLAKE3 hash, written to a temporary file,
+//!   fsynced, then renamed into place. (Any naming would do: payloads read
+//!   back are checked against their commits, not against storage keys.)
 //! - Payload IDs are positions in an append-only index of fixed-size records,
 //!   so the receiver can reopen its storage and still resolve them.
 //! - The codec frames each member as `(u32 LE length, bytes)*` ending with an
@@ -22,7 +23,7 @@ use stockfoil::*;
 struct FileStorage {
     blobs: PathBuf,
     index: File,
-    locations: Vec<PayloadLocation>,
+    locations: Vec<PayloadLocation<BlobHash>>,
     /// The most recently read blob, kept open for sequential reads.
     open: Option<(BlobHash, File)>,
     temp: u64,
@@ -95,6 +96,7 @@ impl Drop for BlobWriter {
 }
 
 impl Storage for FileStorage {
+    type Key = BlobHash;
     type Writer = BlobWriter;
 
     fn create(&mut self) -> io::Result<BlobWriter> {
@@ -126,7 +128,7 @@ impl Storage for FileStorage {
         file.read(out)
     }
 
-    fn bind(&mut self, location: PayloadLocation) -> io::Result<PayloadId> {
+    fn bind(&mut self, location: PayloadLocation<BlobHash>) -> io::Result<PayloadId> {
         let mut record = Vec::with_capacity(RECORD);
         let (tag, blob, index) = match location {
             PayloadLocation::Canonical(blob) => (0, blob, 0),
@@ -141,7 +143,7 @@ impl Storage for FileStorage {
         Ok(self.locations.len() as PayloadId - 1)
     }
 
-    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation> {
+    fn location(&self, id: PayloadId) -> io::Result<PayloadLocation<BlobHash>> {
         self.locations
             .get(id as usize)
             .copied()
@@ -217,15 +219,15 @@ impl Decoder for ChunkDecoder {
 
 /// One payload's canonical bytes. A member of a stored item is found by
 /// jumping over earlier members' chunks without reading their data.
-struct Source {
-    blob: BlobHash,
+struct Source<K> {
+    blob: K,
     offset: u64,
     /// `(target member, current member, bytes left in this chunk)`.
     member: Option<(usize, usize, u64)>,
 }
 
-impl Source {
-    fn open<S: Storage>(storage: &mut S, id: PayloadId) -> io::Result<Self> {
+impl<K> Source<K> {
+    fn open<S: Storage<Key = K>>(storage: &mut S, id: PayloadId) -> io::Result<Self> {
         Ok(match storage.location(id)? {
             PayloadLocation::Canonical(blob) => Self {
                 blob,
@@ -247,7 +249,7 @@ impl Source {
         })
     }
 
-    fn read<S: Storage>(&mut self, storage: &mut S, out: &mut [u8]) -> io::Result<usize> {
+    fn read<S: Storage<Key = K>>(&mut self, storage: &mut S, out: &mut [u8]) -> io::Result<usize> {
         let Some((target, member, left)) = &mut self.member else {
             let n = storage.read_at(&self.blob, self.offset, out)?;
             self.offset += n as u64;
@@ -285,13 +287,13 @@ impl Source {
     }
 }
 
-struct ChunkEncoder {
+struct ChunkEncoder<K> {
     members: Vec<PayloadId>,
     next: usize,
-    source: Option<Source>,
+    source: Option<Source<K>>,
 }
 
-impl<S: Storage> Encoder<S> for ChunkEncoder {
+impl<S: Storage> Encoder<S> for ChunkEncoder<S::Key> {
     fn step(&mut self, storage: &mut S, output: &mut [u8]) -> io::Result<EncodeProgress> {
         let mut produced = 0;
         while output.len() - produced > 4 {
@@ -322,7 +324,7 @@ impl<S: Storage> Encoder<S> for ChunkEncoder {
 
 impl<S: Storage> Codec<S> for ChunkCodec {
     type Decoder = ChunkDecoder;
-    type Encoder = ChunkEncoder;
+    type Encoder = ChunkEncoder<S::Key>;
     fn format(&self) -> &FormatId {
         &self.0
     }
@@ -335,7 +337,7 @@ impl<S: Storage> Codec<S> for ChunkCodec {
             remaining: 0,
         })
     }
-    fn encoder(&self, item: &ExportItem) -> io::Result<ChunkEncoder> {
+    fn encoder(&self, item: &ExportItem) -> io::Result<ChunkEncoder<S::Key>> {
         let members = item.members.iter().map(|&(_, id)| id).collect();
         Ok(ChunkEncoder {
             members,
@@ -403,12 +405,29 @@ fn send(from: &mut FileGraph, to: &mut FileGraph, transfer: &Path) -> Fallible<E
     Ok(plan.cursor())
 }
 
-/// Stream payload `id` out of `graph` and check its hash.
-fn verify(graph: &mut FileGraph, id: PayloadId, expected: &Prepared) -> Fallible<()> {
-    let mut check = blake3::Hasher::new();
-    assert_eq!(graph.read_payload(id, &mut check)?, expected.len);
+/// Stream a commit's payload out of `graph`, which checks it against the commit.
+fn verify(graph: &mut FileGraph, expected: &Prepared) -> Fallible<()> {
     assert_eq!(
-        BlobHash::from(<[u8; 32]>::from(check.finalize())),
+        graph.read_payload(&expected.hash, io::sink())?,
+        expected.len
+    );
+    Ok(())
+}
+
+/// Stream payload `id` straight from storage, without a history to check it
+/// against, and compare its hash.
+fn verify_stored(storage: &mut FileStorage, id: PayloadId, expected: &Prepared) -> Fallible<()> {
+    let mut source = Source::open(storage, id)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 << 10];
+    loop {
+        match source.read(storage, &mut buf)? {
+            0 => break,
+            n => hasher.update(&buf[..n]),
+        };
+    }
+    assert_eq!(
+        BlobHash::from(<[u8; 32]>::from(hasher.finalize())),
         expected.payload_hash
     );
     Ok(())
@@ -465,19 +484,14 @@ fn main() -> Fallible<()> {
             path.display()
         );
     }
-    verify(&mut receiver, id, &prepared)?;
+    verify(&mut receiver, &prepared)?;
     println!("receiver -> relay");
     send(&mut receiver, &mut relay, &transfer)?;
-    let relayed = relay
-        .history()
-        .lookup(&prepared.hash)
-        .ok_or("not admitted")?
-        .payload;
-    verify(&mut relay, relayed, &prepared)?;
+    verify(&mut relay, &prepared)?;
 
     // Reopen the receiver's storage: blobs and the payload index persisted.
     drop(receiver);
-    verify(&mut open("receiver")?, id, &prepared)?;
+    verify_stored(open("receiver")?.storage_mut(), id, &prepared)?;
     println!(
         "payload verified after reopening storage; peak RSS {}",
         peak_rss()

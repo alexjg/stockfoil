@@ -58,7 +58,7 @@ let next = loop {
 };
 for change in records {
     if change.newly_delivered {
-        state.store(change.hash, graph.payload(change.payload)?); // even if not visible
+        state.store(change.hash, graph.payload(&change.hash)?); // even if not visible
     }
     match change.visibility {
         Vis::After => state.enable(change.hash),
@@ -75,7 +75,9 @@ cursor = next;
 `Graph` is a thin synchronous driver. Underneath, receiving is an `Admission`
 operation that asks its host to `Read` stored bytes, `Decode` with the
 application codec, and `Bind` payload IDs, while it hashes and verifies everything
-itself. A host can answer those requests from any runtime, worker, or language,
+itself. Storage keys are the host's own: nothing assumes they are content hashes,
+so an end-to-end encrypted store that names blobs by ciphertext digest works as is,
+and payloads read back later are checked against their commits. A host can answer those requests from any runtime, worker, or language,
 with several admissions and local edits in flight at once. The
 [JavaScript package](javascript) does exactly that with promises.
 

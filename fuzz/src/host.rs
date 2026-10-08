@@ -94,16 +94,17 @@ pub enum Req {
 }
 
 impl Req {
-    pub fn of(r: &Request<'_>) -> Self {
+    /// A request from the admission of stored item `item`.
+    pub fn of(item: BlobHash, r: &Request<'_>) -> Self {
         match *r {
-            Request::Read { item, offset, max } => Req::Read { item, offset, max },
+            Request::Read { offset, max } => Req::Read { item, offset, max },
             Request::Decode { meta, input, eof, capacity } => Req::Decode {
                 members: meta.len(),
                 input: input.to_vec(),
                 eof,
                 capacity,
             },
-            Request::Bind { item, meta } => Req::Bind { item, members: meta.len() },
+            Request::Bind { meta } => Req::Bind { item, members: meta.len() },
         }
     }
 }
@@ -153,8 +154,15 @@ impl Host {
         }
     }
 
-    /// Drive `op` honestly until done, failed, waiting, or `max_steps`.
-    pub fn run(&mut self, history: &mut History, op: &mut Admission, cfg: &DriveConfig) -> Outcome {
+    /// Drive the admission `op` of stored item `item` honestly until done,
+    /// failed, waiting, or `max_steps`.
+    pub fn run(
+        &mut self,
+        history: &mut History,
+        op: &mut Admission,
+        item: BlobHash,
+        cfg: &DriveConfig,
+    ) -> Outcome {
         let mut st = OpState::default();
         for _ in 0..cfg.max_steps {
             let req = match op.next() {
@@ -165,13 +173,13 @@ impl Host {
                     Next::Done(r) => return Outcome::Done(r.clone()),
                     Next::Failed(e) => return Outcome::Failed(e.clone()),
                     Next::Waiting(h) => return Outcome::Waiting(h),
-                    Next::Request(t, r) => Some((t, Req::of(&r))),
+                    Next::Request(t, r) => Some((t, Req::of(item, &r))),
                     _ => None,
                 },
-                Next::Request(t, r) => Some((t, Req::of(&r))),
+                Next::Request(t, r) => Some((t, Req::of(item, &r))),
                 Next::AwaitReply => {
                     let (t, r) = op.request().expect("AwaitReply without a request");
-                    Some((t, Req::of(&r)))
+                    Some((t, Req::of(item, &r)))
                 }
             };
             if let Some((ticket, req)) = req {
@@ -225,8 +233,8 @@ pub fn receive_all(
         let mut waiting = Vec::new();
         let before = pending.len();
         for blob in pending {
-            let mut op = history.receive(blob, ReceiveOptions::new(format()));
-            match host.run(history, &mut op, cfg) {
+            let mut op = history.receive(ReceiveOptions::new(format()));
+            match host.run(history, &mut op, blob, cfg) {
                 Outcome::Done(_) => {}
                 Outcome::Waiting(h) => waiting.push((blob, h)),
                 Outcome::Failed(e) => panic!("valid item rejected: {e:?}"),

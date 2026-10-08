@@ -33,7 +33,8 @@ fn core_error(e: &Error) -> JsValue {
         Error::MissingDependency(h)
         | Error::UnknownCommit(h)
         | Error::MissingParent(h)
-        | Error::NotDraft(h) => Some(("hash", bytes(h.as_slice()))),
+        | Error::NotDraft(h)
+        | Error::CorruptPayload(h) => Some(("hash", bytes(h.as_slice()))),
         _ => None,
     };
     let code = e.code();
@@ -77,10 +78,6 @@ fn commit_hash(b: &[u8]) -> Result<CommitHash> {
 
 fn author(b: &[u8]) -> Result<Author> {
     Ok(Author::try_from(fixed::<32>(b, "an author")?.as_slice()).expect("32 bytes"))
-}
-
-fn blob_hash(b: &[u8]) -> Result<BlobHash> {
-    Ok(BlobHash::from(fixed::<32>(b, "a blob hash")?))
 }
 
 fn byte_value(value: &JsValue, what: &str) -> Result<Vec<u8>> {
@@ -202,9 +199,8 @@ fn receipt(r: &Receipt) -> JsValue {
 fn request(ticket: Ticket, request: Request<'_>) -> JsValue {
     let r = Object::new();
     match request {
-        Request::Read { item, offset, max } => {
+        Request::Read { offset, max } => {
             set(&r, "kind", "read");
-            set(&r, "item", bytes(item.as_slice()));
             set(&r, "offset", offset as f64);
             set(&r, "max", max as f64);
         }
@@ -220,9 +216,8 @@ fn request(ticket: Ticket, request: Request<'_>) -> JsValue {
             set(&r, "eof", eof);
             set(&r, "capacity", capacity as f64);
         }
-        Request::Bind { item, meta } => {
+        Request::Bind { meta } => {
             set(&r, "kind", "bind");
-            set(&r, "item", bytes(item.as_slice()));
             set(&r, "memberCount", meta.len() as f64);
         }
     }
@@ -479,6 +474,13 @@ impl JsHistory {
             .is_ancestor(&commit_hash(ancestor)?, &commit_hash(descendant)?))
     }
 
+    /// Start checking canonical bytes read back from storage against a
+    /// delivered commit.
+    #[wasm_bindgen(js_name = checkPayload)]
+    pub fn check_payload(&self, hash: &[u8]) -> Result<PayloadCheck> {
+        core(self.inner.check_payload(&commit_hash(hash)?)).map(PayloadCheck)
+    }
+
     /// Start a local commit; every parent must be delivered.
     #[wasm_bindgen(js_name = beginCommit)]
     pub fn begin_commit(&self, author_bytes: &[u8], parents: JsValue) -> Result<CommitBuilder> {
@@ -510,9 +512,10 @@ impl JsHistory {
         Ok(item_ids(&result?))
     }
 
-    /// Start admitting a stored item. `options`: `{ format, readSize?,
-    /// decodeCapacity?, quantum?, limits? }`.
-    pub fn receive(&self, item: &[u8], options: JsValue) -> Result<Admission> {
+    /// Start admitting one stored item; the host answering its requests
+    /// knows which. `options`: `{ format, readSize?, decodeCapacity?, quantum?,
+    /// limits? }`.
+    pub fn receive(&self, options: JsValue) -> Result<Admission> {
         let format = get(&options, "format")
             .as_string()
             .ok_or_else(|| invalid("options.format must be a string"))?;
@@ -528,7 +531,7 @@ impl JsHistory {
                 *slot = number(&v, name)?.max(1);
             }
         }
-        Ok(Admission(self.inner.receive(blob_hash(item)?, o)))
+        Ok(Admission(self.inner.receive(o)))
     }
 
     /// Dependency checks, placement, and atomic publication. Returns a `Next`.
@@ -645,6 +648,23 @@ impl CommitBuilder {
     /// Consumes the builder.
     pub fn finish(self) -> Prepared {
         Prepared(self.0.finish())
+    }
+}
+
+/// Checks one payload read back from storage.
+#[wasm_bindgen]
+pub struct PayloadCheck(stockfoil::PayloadCheck);
+
+#[wasm_bindgen]
+impl PayloadCheck {
+    /// Append canonical payload bytes.
+    pub fn update(&mut self, canonical: &[u8]) {
+        self.0.update(canonical);
+    }
+    /// Consumes the check. Throws `CorruptPayload` unless the bytes are the
+    /// commit's payload.
+    pub fn finish(self) -> Result<()> {
+        core(self.0.finish())
     }
 }
 
@@ -771,12 +791,6 @@ impl Admission {
         set(&o, "canonicalBytes", c.canonical_bytes as f64);
         set(&o, "requests", c.requests as f64);
         o.into()
-    }
-
-    /// The stored item's hash.
-    #[wasm_bindgen(getter)]
-    pub fn item(&self) -> Uint8Array {
-        Uint8Array::from(self.0.item().as_slice())
     }
 
     /// The parsed (untrusted) header metadata once read, else `undefined`.

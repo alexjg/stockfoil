@@ -27,15 +27,21 @@ an owned copy. Errors are `StockfoilError`s whose `code` is the core error's
 
 ## Driving admissions yourself
 
-`drive(history, admission, host)` runs one admission against any host:
+`drive(history, admission, host)` runs one admission against a host for one
+stored item (`graph.host(key)` builds one from a `Storage`):
 
 ```ts
 interface Host {
-  read(item: Uint8Array, offset: number, max: number): MaybePromise<Uint8Array>; // empty = end
-  bind(item: Uint8Array, memberCount: number): MaybePromise<readonly bigint[]>;
+  read(offset: number, max: number): MaybePromise<Uint8Array>; // empty = end
+  bind(memberCount: number): MaybePromise<readonly bigint[]>;
   decoder(meta: BundleMeta): MaybePromise<Decoder>; // step(input, eof, capacity)
 }
 ```
+
+Storage keys are strings of the storage's choosing; they need not be content
+hashes. `graph.payload(hash)` checks what storage returns against the commit and
+rejects with a `CorruptPayload` error on any difference; hosts that read payloads
+themselves can use `history.checkPayload(hash)` (`update`, `finish`).
 
 It yields after each work quantum, never holds borrowed data across an `await`,
 and retries a waiting admission when `history.epochChanged()` resolves. Many

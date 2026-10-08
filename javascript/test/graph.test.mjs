@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
-  drive, ExportCursor, Graph, History, MaterializationCursor, MemoryStorage, ViewPoint, blobHash,
+  drive, ExportCursor, Graph, History, MaterializationCursor, MemoryStorage, ViewPoint,
 } from 'stockfoil';
 import {
   alice, bob, chunkCodec, fromHex, items, payloadAtDepth, settled, signed, SlowStorage, sync, text,
@@ -28,7 +28,7 @@ test('round trip between two JS graphs, with a fragment and a draft left behind'
   const cursor = await sync(a, b);
   for (const hash of hashes) {
     assert.ok(b.history.isAdmitted(hash));
-    assert.deepEqual(await b.payload(b.history.lookup(hash).payload), await a.payload(a.history.lookup(hash).payload));
+    assert.deepEqual(await b.payload(hash), await a.payload(hash));
   }
   assert.equal(b.history.lookup(draft.hash), undefined);
   assert.deepEqual(b.history.heads('admitted'), [tip]);
@@ -62,7 +62,7 @@ test('admits items exported by the native Rust graph', async () => {
     const info = js.history.lookup(fromHex(commit.hash));
     assert.ok(info.admitted);
     assert.deepEqual(info.author, alice.author);
-    assert.deepEqual(await js.payload(info.payload), fromHex(commit.payload));
+    assert.deepEqual(await js.payload(fromHex(commit.hash)), fromHex(commit.payload));
   }
   // And re-exported from JS to another JS graph.
   const other = graph();
@@ -96,11 +96,10 @@ test('stale, duplicate, and wrong-kind replies are rejected without disturbing t
   await signed(a, alice, [], text('only'));
   const [bytes] = (await items(a)).items;
   const history = new History();
-  const item = blobHash(bytes);
-  const admission = history.receive(item, { format: chunkCodec.format });
+  const admission = history.receive({ format: chunkCodec.format });
   const next = admission.next();
   assert.equal(next.type, 'request');
-  assert.deepEqual(next.request, { kind: 'read', item, offset: 0, max: 65536 });
+  assert.deepEqual(next.request, { kind: 'read', offset: 0, max: 65536 });
   assert.equal(admission.next().type, 'awaitReply');
   assert.deepEqual(admission.request().ticket, next.ticket);
 
@@ -113,8 +112,7 @@ test('stale, duplicate, and wrong-kind replies are rejected without disturbing t
 
   // The admission still completes through the ordinary driver.
   const storage = new MemoryStorage();
-  storage.put(bytes);
-  const host = new Graph(chunkCodec, storage).host;
+  const host = new Graph(chunkCodec, storage).host(storage.put(bytes));
   const receipt = await drive(history, admission, host);
   assert.equal(receipt.members.length, 1);
   assert.equal(admission.counts().bytesRead, bytes.length);
@@ -125,7 +123,7 @@ test('protocol violations and host failures fail the admission', async () => {
   await signed(a, alice, [], text('only'));
   const [bytes] = (await items(a)).items;
   const history = new History();
-  const admission = history.receive(blobHash(bytes), { format: chunkCodec.format, readSize: 4 });
+  const admission = history.receive({ format: chunkCodec.format, readSize: 4 });
   const { ticket } = admission.next();
   assert.throws(() => admission.reply(ticket, { kind: 'read', bytes: bytes.subarray(0, 5), eof: false }), { code: 'Protocol' });
   const failed = admission.next();
@@ -135,7 +133,7 @@ test('protocol violations and host failures fail the admission', async () => {
   const broken = new Error('disk on fire');
   const host = { read: async () => { throw broken; }, bind: () => [], decoder: () => null };
   await assert.rejects(
-    drive(history, history.receive(blobHash(bytes), { format: chunkCodec.format }), host),
+    drive(history, history.receive({ format: chunkCodec.format }), host),
     (e) => e.code === 'Storage' && e.cause === broken,
   );
   assert.equal(history.length, 0);
@@ -204,7 +202,7 @@ test('materialization through change batches and permission changes', async () =
     [short(a2), true, 'after'], [short(draft), true, 'after'],
   ]);
   for (const r of first.records) {
-    assert.deepEqual(await g.payload(r.payload), text(['a1', 'b1', 'a2', 'draft'][first.records.indexOf(r)]));
+    assert.deepEqual(await g.payload(r.hash), text(['a1', 'b1', 'a2', 'draft'][first.records.indexOf(r)]));
   }
 
   // The cursor round-trips through bytes.
@@ -236,7 +234,7 @@ test('payload IDs beyond 2^53 stay exact BigInts', async () => {
   const b = new Graph(chunkCodec, new MemoryStorage({ firstId: 2n ** 64n - 2n }));
   const [receipt] = await Promise.all([b.receive((await items(a)).items[0])]);
   assert.deepEqual(receipt.members.map(m => m.payload), [2n ** 64n - 2n]);
-  assert.deepEqual(await b.payload(2n ** 64n - 2n), text('root'));
+  assert.deepEqual(await b.payload(receipt.members[0].hash), text('root'));
 
   const changes = b.history.changes(new MaterializationCursor(), b.history.viewPoint([[alice.author, 'unbounded']]));
   assert.equal(b.history.nextChanges(changes, 10).records[0].payload, 2n ** 64n - 2n);
@@ -245,4 +243,35 @@ test('payload IDs beyond 2^53 stay exact BigInts', async () => {
   assert.equal(a.history.exportItem(plan, 0, chunkCodec.format).members[0].payload, big);
   assert.throws(() => a.history.publishCommit(child, 2n ** 64n), { code: 'InvalidInput' });
   assert.throws(() => a.history.publishCommit(child, 5), { code: 'InvalidInput' });
+});
+
+test('storage keys are opaque and payloads read back are checked', async () => {
+  // Stands in for an encrypting store: keys are its own, bytes are transformed.
+  class SealedStorage extends MemoryStorage {
+    #next = 0;
+    put(bytes) {
+      const key = `sealed-${this.#next++}`;
+      this.blobs.set(key, bytes.map(b => b ^ 0x5a));
+      return key;
+    }
+    read(blob, offset, max) {
+      return super.read(blob, offset, max).map(b => b ^ 0x5a);
+    }
+  }
+  const a = graph(new SealedStorage()), b = graph(new SealedStorage());
+  let tip = await signed(a, alice, [], text('root'));
+  tip = await signed(a, alice, [tip], payloadAtDepth(a.history, alice, [tip], 'head'));
+  await sync(a, b);
+  assert.deepEqual(await b.payload(tip), await a.payload(tip));
+
+  // Corrupt every stored blob: reads fail instead of returning wrong bytes.
+  for (const g of [a, b]) {
+    for (const [key, bytes] of g.storage.blobs) {
+      const corrupt = bytes.slice();
+      corrupt[corrupt.length - 6] ^= 1;
+      g.storage.blobs.set(key, corrupt);
+    }
+  }
+  await assert.rejects(a.payload(tip), { code: 'CorruptPayload' });
+  await assert.rejects(b.payload(tip), (e) => e.code === 'CorruptPayload' && e.hash.length === 32);
 });
