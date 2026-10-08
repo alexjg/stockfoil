@@ -20,6 +20,7 @@ and tested from what remains. Contracts are in
 | Wire v2 header (v1 columns, length-prefixed header, streaming body) | `src/wire.rs`, `design/wire-v2.md` | unit tests, golden vectors `tests/vectors.rs` (identities equal v1's) |
 | Native adapter, `MemoryStorage`, payload reads, single-pass item decoding | `src/graph.rs` | all integration tests |
 | Opaque storage keys (no content-hash assumption, so encrypted stores work); payload reads checked against commits (`check_payload`, `CorruptPayload`) | `src/graph.rs`, `src/history/local.rs` | `tests/storage.rs` (counter-keyed, masked storage; corrupted blobs); JS `storage keys are opaque…` test; `admission_bytes` fuzzing under unrelated keys |
+| Subduction storage (`SubductionStorage`, keyed by blob digest) and item ↔ `LooseCommit`/`Fragment` metadata mapping, with checks against admitted items | `subduction/` | `subduction/tests/node.rs` against an in-memory Subduction node: round trip with minimization, sealed blobs, lying metadata, corrupt blobs |
 | Bounded payload buffers for items over 4 GiB | `tests/large.rs` | 4 GiB + 12 KiB admitted with unchanged peak RSS (release, ignored by default) |
 | JavaScript/Wasm binding and async host driver | `javascript/` | `npm test` (Rust interop fixture, delayed hosts, BigInt IDs) |
 | Examples | `examples/` | mv-register (Rust and JS) test suites; file-backed storage example |
@@ -56,3 +57,18 @@ records 30 ms; a 10-commit incremental update 0.01 ms; revoking one author
    file-backed example shows one approach.
 8. **Format policy**: v2 is the only wire format. There is no negotiation and no
    v1 reader.
+9. **Subduction gaps**, to be fixed in Subduction:
+   - Its metadata allows at most 65,535 checkpoints per fragment. A fragment's
+     checkpoints are its members of nonzero depth other than its head, so a
+     depth-3 fragment (about 65,536 on average) does not fit about half the
+     time, and `export_item` fails for it.
+   - Its minimization prunes a loose commit only below a loose fragment head.
+     Stockfoil publishes a signed fragment head only inside its fragment, so
+     loose commits published before it stay offered (receivers admit them
+     again).
+   - Its minimization treats the range below a fragment's boundary commit as
+     covered. A standalone commit of nonzero depth from the liveness fallback
+     has no fragment of its own, so once a later fragment stops at it,
+     Subduction stops offering it and the loose commits below it.
+10. **The Subduction adapter itself**: the watch loop, publishing, rejecting
+    blobs whose metadata does not match, and an async driver for streamed blobs.

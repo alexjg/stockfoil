@@ -97,6 +97,9 @@ with several admissions and local edits in flight at once. The
   moving a 64 MiB payload between graphs with bounded memory
   (`cargo run --release --example file_storage`).
 - [`examples/mv-register-js`](examples/mv-register-js): the register in JavaScript.
+- [`subduction`](subduction): storage over Subduction blobs and the mapping between
+  items and sedimentree metadata. It builds against a sibling `../subduction`
+  checkout.
 
 ## Testing
 
