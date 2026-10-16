@@ -144,7 +144,11 @@ by `Limits` and scales with the item; the defaults admit fragments of up to 2^20
 members. Canonical and stored byte totals are unbounded by default so payloads
 of any size stream; applications that need to bound hashing work per item set
 them. Work per `next()` is bounded by `quantum` (bytes hashed; one signature
-counts as 16 KiB). History steps (placement and publication) are not budgeted:
+counts as 16 KiB; checking that signatures cover every member counts one per
+member and parent edge visited). The coverage check makes one pass over the
+members and parent edges for every 64 distinct member authors, and each author
+needs at least one signature, so its total stays within a small factor of the
+signature checks at any item size. History steps (placement and publication) are not budgeted:
 they cost about the size of the item and of the history between its external
 parents and its boundary.
 

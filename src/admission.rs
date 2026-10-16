@@ -34,7 +34,8 @@ pub struct ReceiveOptions {
     pub read_size: usize,
     /// Largest decoder output accepted per step.
     pub decode_capacity: usize,
-    /// Work per `next` call, in bytes hashed (a signature check counts as 16 KiB).
+    /// Work per `next` call, in bytes hashed (a signature check counts as 16 KiB,
+    /// and the coverage check one per member and parent edge visited).
     pub quantum: usize,
 }
 

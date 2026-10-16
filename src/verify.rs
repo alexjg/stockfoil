@@ -1,7 +1,7 @@
 //! Incremental bundle verification. Canonical member bytes arrive in order and
 //! are hashed as they stream past; nothing is buffered. Only this module creates
 //! [`Verified`], and history admits nothing else from received data.
-use crate::evidence::{coverage, reach, verify_signature};
+use crate::evidence::{Coverage, reach, verify_signature};
 use crate::meta::{CommitHasher, depth};
 use crate::{BlobHash, BundleMeta, CommitHash, Error, ItemId, Limits, ParentRef};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +47,7 @@ impl Verified {
 enum Phase {
     Members,
     Signatures(usize),
+    Coverage(Coverage),
     Done,
 }
 
@@ -203,14 +204,21 @@ impl Verifier {
                         },
                     )?;
                 }
-                if end == self.meta.evidence.len() {
-                    let evidence = coverage(&self.meta)
-                        .map_err(|(author, member)| Error::MissingSignature { author, member })?;
-                    self.complete(evidence);
+                self.phase = if end == self.meta.evidence.len() {
+                    Phase::Coverage(Coverage::new(&self.meta))
                 } else {
-                    self.phase = Phase::Signatures(end);
-                }
+                    Phase::Signatures(end)
+                };
                 Ok((end - start) * SIGNATURE_COST)
+            }
+            Phase::Coverage(ref mut coverage) => {
+                let work = coverage
+                    .step(&self.meta, budget)
+                    .map_err(|(author, member)| Error::MissingSignature { author, member })?;
+                if let Some(rows) = coverage.rows() {
+                    self.complete(rows);
+                }
+                Ok(work)
             }
             Phase::Done => Ok(0),
         }
@@ -242,8 +250,7 @@ impl Verifier {
             }
         }
         // Every member must be an ancestor of (or equal to) the head.
-        let mut visited = vec![false; self.meta.len()];
-        if reach(&self.meta, &mut visited, [head_index], |_| ()) != self.meta.len() {
+        if reach(&self.meta, [head_index], |_| ()) != self.meta.len() {
             return invalid("member unreachable from head");
         }
         Ok(())
