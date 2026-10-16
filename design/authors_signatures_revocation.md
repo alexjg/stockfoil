@@ -60,11 +60,13 @@ ancestor-or-self of a member its author signed (see the wire format,
 [Authentication](wire-v2.md#6-authentication)).
 
 Signature evidence lives in *certificates*: one per admitted standalone commit
-or fragment. A fragment's certificate drops older signatures by authors who
-signed its head, and admitting a fragment retires the standalone certificates
-and smaller fragments it fully covers from the export inventory. Evidence is
-used for verification and export only; it is not a viewpoint frontier or a
-participation predicate.
+or fragment. A certificate keeps only the signatures that cover its members:
+per author, those that no later signature by the same author in the item
+already reaches. Signatures by keys that author no member cover nothing and
+are dropped, whether they arrived on a received item or were made locally.
+Admitting a fragment retires the standalone certificates and smaller fragments
+it fully covers from the export inventory. Evidence is used for verification
+and export only; it is not a viewpoint frontier or a participation predicate.
 
 ### Creating Local Commits
 

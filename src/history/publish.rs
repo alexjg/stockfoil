@@ -119,13 +119,15 @@ impl History {
             members.push(delivered);
         }
         let evidence = verified
-            .meta
             .evidence
             .iter()
-            .map(|e| SignatureEvidence {
-                author: e.author,
-                commit: verified.hashes[e.member],
-                signature: e.signature,
+            .map(|&row| {
+                let e = &verified.meta.evidence[row];
+                SignatureEvidence {
+                    author: e.author,
+                    commit: verified.hashes[e.member],
+                    signature: e.signature,
+                }
             })
             .collect();
         self.add_certificate(verified.meta.id.clone(), evidence, &indices);

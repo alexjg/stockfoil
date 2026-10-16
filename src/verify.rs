@@ -19,6 +19,8 @@ pub(crate) struct Verified {
     pub hashes: Vec<CommitHash>,
     /// Parent references leaving the bundle, sorted and distinct.
     pub external: BTreeSet<CommitHash>,
+    /// The rows of `meta.evidence` that cover the bundle (see [`coverage`]).
+    pub evidence: Vec<usize>,
 }
 
 impl Verified {
@@ -202,8 +204,9 @@ impl Verifier {
                     )?;
                 }
                 if end == self.meta.evidence.len() {
-                    self.check_coverage()?;
-                    self.complete();
+                    let evidence = coverage(&self.meta)
+                        .map_err(|(author, member)| Error::MissingSignature { author, member })?;
+                    self.complete(evidence);
                 } else {
                     self.phase = Phase::Signatures(end);
                 }
@@ -239,17 +242,14 @@ impl Verifier {
             }
         }
         // Every member must be an ancestor of (or equal to) the head.
-        if reach(&self.meta, [head_index], |_| ()) != self.meta.len() {
+        let mut visited = vec![false; self.meta.len()];
+        if reach(&self.meta, &mut visited, [head_index], |_| ()) != self.meta.len() {
             return invalid("member unreachable from head");
         }
         Ok(())
     }
 
-    fn check_coverage(&self) -> Result<(), Error> {
-        coverage(&self.meta).map_err(|(author, member)| Error::MissingSignature { author, member })
-    }
-
-    fn complete(&mut self) {
+    fn complete(&mut self, evidence: Vec<usize>) {
         let external = self
             .meta
             .shape
@@ -265,6 +265,7 @@ impl Verifier {
             meta: Arc::clone(&self.meta),
             hashes: std::mem::take(&mut self.hashes),
             external,
+            evidence,
         }));
         self.by_hash = BTreeMap::new();
         self.phase = Phase::Done;

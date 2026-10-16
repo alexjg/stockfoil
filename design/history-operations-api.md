@@ -58,15 +58,18 @@ draft whose certificate is complete, in topological order until nothing changes:
   the depth-`d` stops below it, members = its ancestry minus the boundaries'.
   Boundaries and external parents must be admitted, and every member must be
   covered by a signature of its author on itself or a member descendant (the same
-  rule as received items). A head signature supersedes older signatures by the same
-  author. Other authors' drafts inside the range block assembly until they sign.
+  rule as received items). Other authors' drafts inside the range block assembly
+  until they sign.
 - If the fragment cannot be certified only because an already admitted member's
   covering signature lies outside it (that member was admitted when its author
   signed a descendant), a draft signed by its own author with admitted parents is
   certified as a standalone commit instead, which any depth allows.
 
-Signing an admitted commit is `Error::NotDraft`. Signatures by other authors on a
-draft are kept as co-signing evidence.
+Signing an admitted commit is `Error::NotDraft`. A signature by another author on
+a draft counts toward that author's own commits below it. A certificate keeps only
+the signatures that cover its members: per author, those that no later signature
+by the same author already reaches. Signatures that cover nothing, such as a
+co-signature by a key with no commit in the item, are not kept or exported.
 
 ## 3. Admission (receiving)
 
@@ -123,7 +126,8 @@ simply retry every waiting operation after any publication — there is no waite
 registry.
 
 **Publication** inserts undelivered members, admits delivered drafts among them,
-records the certificate and evidence, and admits any local drafts this completes,
+records the certificate with only the evidence that covers it (as for local
+certificates), and admits any local drafts this completes,
 in one `advance` call (cost proportional to the item). The first publication of
 a hash fixes its payload ID; `Receipt.members[i].newly_delivered` is relative to
 the history, not to any materializer.

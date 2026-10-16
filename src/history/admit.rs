@@ -132,17 +132,9 @@ impl History {
                 parents,
             });
         }
-        // The head's signers supersede older signatures by the same author.
-        let head_signers = self.signatures.get(&head);
         let mut evidence = Vec::new();
         for (i, &m) in members.iter().enumerate() {
-            let Some(signatures) = self.signatures.get(&m) else {
-                continue;
-            };
-            for (author, signature) in signatures {
-                if m != head && head_signers.is_some_and(|s| s.contains_key(author)) {
-                    continue;
-                }
+            for (author, signature) in self.signatures.get(&m).into_iter().flatten() {
                 evidence.push(Evidence {
                     author: *author,
                     member: i,
@@ -155,16 +147,18 @@ impl History {
             shape: FragmentShape { members: shape },
             evidence,
         };
-        if coverage(&meta).is_err() {
+        let Ok(rows) = coverage(&meta) else {
             return self.assemble_standalone(head);
-        }
-        let evidence = meta
-            .evidence
-            .iter()
-            .map(|e| SignatureEvidence {
-                author: e.author,
-                commit: self.node(members[e.member]).hash,
-                signature: e.signature,
+        };
+        let evidence = rows
+            .into_iter()
+            .map(|row| {
+                let e = &meta.evidence[row];
+                SignatureEvidence {
+                    author: e.author,
+                    commit: self.node(members[e.member]).hash,
+                    signature: e.signature,
+                }
             })
             .collect();
         Some((meta.id, members, evidence))
@@ -180,20 +174,20 @@ impl History {
         head: NodeIdx,
     ) -> Option<(ItemId, Vec<NodeIdx>, Vec<SignatureEvidence>)> {
         let node = self.node(head);
-        let signatures = self.signatures.get(&head)?;
-        if !signatures.contains_key(&self.author_of(head))
-            || self.parent_nodes(head).iter().any(|&p| !self.node(p).admitted)
+        let author = self.author_of(head);
+        let signature = *self.signatures.get(&head)?.get(&author)?;
+        if self
+            .parent_nodes(head)
+            .iter()
+            .any(|&p| !self.node(p).admitted)
         {
             return None;
         }
-        let evidence = signatures
-            .iter()
-            .map(|(author, signature)| SignatureEvidence {
-                author: *author,
-                commit: node.hash,
-                signature: *signature,
-            })
-            .collect();
+        let evidence = vec![SignatureEvidence {
+            author,
+            commit: node.hash,
+            signature,
+        }];
         Some((ItemId::Commit(node.hash), vec![head], evidence))
     }
 }

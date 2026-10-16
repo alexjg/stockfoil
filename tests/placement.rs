@@ -288,3 +288,55 @@ fn received_fragments_retire_covered_standalone_items() {
         cursor
     );
 }
+
+#[test]
+fn signatures_that_cover_nothing_are_not_kept() {
+    let (alice, bob, carol) = (key(1), key(2), key(3));
+    let c_payload = b"c".to_vec();
+    let c = commit_hash(&[], &author(&alice), &c_payload);
+    let row = |k: &SigningKey| Evidence {
+        author: author(k),
+        member: 0,
+        signature: sign(k, &c),
+    };
+    // Alice's signature twice, and co-signatures by keys that author nothing.
+    let mut evidence = vec![row(&alice), row(&alice)];
+    evidence.extend((10..15).map(|i| row(&key(i))));
+    let meta = BundleMeta {
+        id: ItemId::Commit(c),
+        shape: FragmentShape {
+            members: vec![MemberShape {
+                author: author(&alice),
+                parents: vec![],
+            }],
+        },
+        evidence,
+    };
+    let mut g = graph();
+    g.receive(encode_item(&meta, &[&c_payload]).as_slice())
+        .unwrap();
+    let signers = |g: &TestGraph| {
+        let plan = g.export(&ExportCursor::new());
+        assert_eq!(plan.len(), 1);
+        let item = g.history().export_item(&plan, 0).unwrap();
+        let mut signers: Vec<_> = item.meta.evidence.iter().map(|e| e.author).collect();
+        signers.sort();
+        signers
+    };
+    assert_eq!(signers(&g), vec![author(&alice)]);
+
+    // Nor do they reach a local fragment over it, or a local co-signature by
+    // an author with no commit in it.
+    let h = g
+        .commit(author(&bob), vec![c], &at_level(&bob, &[c], 1, "h")[..])
+        .unwrap()
+        .hash;
+    g.sign(author(&carol), h, sign(&carol, &h)).unwrap();
+    g.sign(author(&bob), h, sign(&bob, &h)).unwrap();
+    let mut expected = vec![author(&alice), author(&bob)];
+    expected.sort();
+    assert_eq!(signers(&g), expected);
+    let mut other = graph();
+    sync(&mut g, &mut other, &ExportCursor::new());
+    assert!(other.history().is_admitted(&h));
+}
