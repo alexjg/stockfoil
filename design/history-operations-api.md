@@ -151,8 +151,9 @@ parents and its boundary.
 ## 4. Export
 
 The inventory holds one certificate per admitted item (received or assembled),
-minus those a later fragment covers: a fragment retires the standalone
-certificates of its members and any smaller fragment entirely inside it.
+minus those fragments cover, whatever the order of arrival: a fragment retires
+the standalone certificates of its members and any smaller fragment entirely
+inside it, and an item whose members all lie in admitted fragments is not added.
 
 ```rust,ignore
 let mut plan = history.export(&cursor);       // items the destination lacks

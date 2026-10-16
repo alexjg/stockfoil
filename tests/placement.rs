@@ -340,3 +340,25 @@ fn signatures_that_cover_nothing_are_not_kept() {
     sync(&mut g, &mut other, &ExportCursor::new());
     assert!(other.history().is_admitted(&h));
 }
+
+#[test]
+fn fragments_inside_admitted_fragments_are_not_added() {
+    let alice = key(1);
+    let mut a = graph();
+    let c0 = signed(&mut a, &alice, vec![], b"c0");
+    let h1 = signed(&mut a, &alice, vec![c0], &at_level(&alice, &[c0], 1, "h1"));
+    // `c` keeps the depth-1 fragment {c0, h1}; `a` goes on to a depth-2
+    // fragment that covers it.
+    let mut c = graph();
+    sync(&mut a, &mut c, &ExportCursor::new());
+    let x = signed(&mut a, &alice, vec![h1], b"x");
+    let h2 = signed(&mut a, &alice, vec![x], &at_level(&alice, &[x], 2, "h2"));
+    let mut b = graph();
+    sync(&mut a, &mut b, &ExportCursor::new());
+    // The smaller fragment arriving afterwards adds nothing to export.
+    sync(&mut c, &mut b, &ExportCursor::new());
+    let plan = b.export(&ExportCursor::new());
+    assert_eq!(plan.len(), 1);
+    let item = b.history().export_item(&plan, 0).unwrap();
+    assert!(matches!(&item.meta.id, ItemId::Fragment(range) if range.head == h2));
+}

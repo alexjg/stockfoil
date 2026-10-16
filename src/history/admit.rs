@@ -8,8 +8,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 impl History {
-    /// Record a certificate and its evidence. Fragments retire standalone
-    /// certificates and smaller fragments that they fully cover.
+    /// Record a certificate and its evidence. An item whose members all lie in
+    /// admitted fragments adds nothing; otherwise a fragment retires standalone
+    /// certificates and smaller fragments that it fully covers.
     pub(super) fn add_certificate(
         &mut self,
         id: ItemId,
@@ -24,39 +25,32 @@ impl History {
                 .insert(e.author, e.signature);
         }
         let key = Key::of(&id);
-        match &id {
-            ItemId::Commit(hash) => {
-                if self.node(self.by_hash[hash]).in_fragment || self.inventory.contains_key(&key) {
-                    return;
+        if self.inventory.contains_key(&key) || members.iter().all(|&m| self.node(m).in_fragment) {
+            return;
+        }
+        if let ItemId::Fragment(range) = &id {
+            let covering: HashSet<NodeIdx> = members.iter().copied().collect();
+            for &m in members {
+                self.nodes[m.index()].in_fragment = true;
+                let hash = self.node(m).hash;
+                self.inventory.remove(&Key::Commit(hash));
+                if hash == range.head || self.node(m).depth == 0 {
+                    continue;
                 }
-            }
-            ItemId::Fragment(range) => {
-                if self.inventory.contains_key(&key) {
-                    return;
-                }
-                let covering: HashSet<NodeIdx> = members.iter().copied().collect();
-                for &m in members {
-                    self.nodes[m.index()].in_fragment = true;
-                    let hash = self.node(m).hash;
-                    self.inventory.remove(&Key::Commit(hash));
-                    if hash == range.head || self.node(m).depth == 0 {
-                        continue;
-                    }
-                    if let Some(inner) = self.inventory.get(&Key::Fragment(hash))
-                        && let ItemId::Fragment(inner_range) = &inner.id
+                if let Some(inner) = self.inventory.get(&Key::Fragment(hash))
+                    && let ItemId::Fragment(inner_range) = &inner.id
+                {
+                    let boundary: Vec<_> = inner_range
+                        .boundary
+                        .iter()
+                        .map(|b| self.by_hash[b])
+                        .collect();
+                    if self
+                        .fragment_members(m, &boundary)
+                        .iter()
+                        .all(|n| covering.contains(n))
                     {
-                        let boundary: Vec<_> = inner_range
-                            .boundary
-                            .iter()
-                            .map(|b| self.by_hash[b])
-                            .collect();
-                        if self
-                            .fragment_members(m, &boundary)
-                            .iter()
-                            .all(|n| covering.contains(n))
-                        {
-                            self.inventory.remove(&Key::Fragment(hash));
-                        }
+                        self.inventory.remove(&Key::Fragment(hash));
                     }
                 }
             }
