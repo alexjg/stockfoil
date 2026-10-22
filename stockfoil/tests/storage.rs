@@ -178,3 +178,97 @@ fn decoded_members_must_be_the_wanted_commits() {
     );
     assert_eq!(b.payload(&unknown), Err(Error::UnknownCommit(unknown)));
 }
+
+#[test]
+fn decode_item_state_machine_streams_and_stops_at_last_wanted_member() {
+    let (mut a, hashes) = fragment_source();
+    let plan = a.export(&ExportCursor::new());
+    let mut item = Vec::new();
+    a.write_item(&plan, 0, &mut item).unwrap();
+
+    // Drive DecodeItem directly with 1-byte reads and 1-byte decode capacity.
+    let mut options = ReceiveOptions::new(format());
+    options.read_size = 1;
+    options.decode_capacity = 1;
+    let mut op = a
+        .history()
+        .decode_item(options, [(1, hashes[1])])
+        .unwrap();
+
+    // Stale and wrong-kind replies are rejected without disturbing the operation.
+    let DecodeNext::Request(ticket, Request::Read { offset, max }) = op.next() else {
+        panic!("expected initial read request")
+    };
+    assert!(matches!(op.next(), DecodeNext::AwaitReply));
+    assert_eq!(
+        op.reply(Ticket::from_raw(ticket.get() + 1), Reply::Read { bytes: &item[..1], eof: false }),
+        Err(ReplyError::Stale)
+    );
+    assert_eq!(
+        op.reply(ticket, Reply::Bound(&[0])),
+        Err(ReplyError::WrongKind)
+    );
+    op.reply(
+        ticket,
+        Reply::Read {
+            bytes: &item[offset as usize..(offset as usize + max).min(item.len())],
+            eof: offset as usize + max >= item.len(),
+        },
+    )
+    .unwrap();
+
+    let mut decoder: Option<ChunkDecoder> = None;
+    let mut collected = Vec::new();
+    loop {
+        match op.next() {
+            DecodeNext::Chunk { member, bytes } => {
+                assert_eq!(member, 1);
+                collected.extend_from_slice(bytes);
+            }
+            DecodeNext::Done => break,
+            DecodeNext::Request(ticket, Request::Read { offset, max }) => {
+                let start = (offset as usize).min(item.len());
+                let end = (start + max).min(item.len());
+                op.reply(
+                    ticket,
+                    Reply::Read {
+                        bytes: &item[start..end],
+                        eof: end == item.len(),
+                    },
+                )
+                .unwrap();
+            }
+            DecodeNext::Request(
+                ticket,
+                Request::Decode {
+                    meta,
+                    input,
+                    eof,
+                    capacity,
+                },
+            ) => {
+                let d = decoder.get_or_insert_with(|| ChunkDecoder::new(meta.len()));
+                let mut out = vec![0u8; capacity];
+                let p = d.step(input, eof, &mut out).unwrap();
+                op.reply(
+                    ticket,
+                    Reply::Decoded {
+                        consumed: p.consumed,
+                        output: &out[..p.produced],
+                        status: p.status,
+                    },
+                )
+                .unwrap();
+            }
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+    assert_eq!(collected, b"member 0");
+    // Stopped right after member 1 without reading the rest of the 5-member item.
+    assert!(
+        (op.counts().bytes_read as usize) < item.len(),
+        "read {} of {} bytes",
+        op.counts().bytes_read,
+        item.len()
+    );
+}

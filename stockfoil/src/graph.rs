@@ -2,9 +2,9 @@
 //! driven synchronously. It executes the same host requests a foreign binding
 //! would; it has no receive, publication, or export logic of its own.
 use crate::{
-    Admission, Author, BlobHash, BundleMeta, CommitHash, DecodeStatus, Error, ExportItem,
-    ExportPlan, FormatId, History, ItemId, Limits, Next, PayloadCheck, PayloadId, Prepared,
-    Receipt, ReceiveOptions, Reply, Request, Signature,
+    Admission, Author, BlobHash, BundleMeta, CommitHash, DecodeNext, DecodeStatus, Error,
+    ExportItem, ExportPlan, FormatId, History, ItemId, Limits, Next, PayloadId, Prepared, Receipt,
+    ReceiveOptions, Reply, Request, Signature,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
@@ -401,104 +401,46 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
         wanted: &BTreeMap<usize, CommitHash>,
         mut visit: impl FnMut(usize, &[u8]) -> io::Result<()>,
     ) -> Result<(), Error> {
-        let Some(&last) = wanted.keys().next_back() else {
-            return Ok(());
-        };
-        let mut prefix = Vec::new();
-        let mut chunk = vec![0u8; CHUNK];
-        let mut offset = 0u64;
-        let header_len = loop {
-            if let Some(len) = crate::wire::header_len(&prefix, &self.options.limits)?
-                && prefix.len() >= len
-            {
-                break len;
-            }
-            let n = self
-                .storage
-                .read_at(item, offset, &mut chunk)
-                .map_err(storage_error)?;
-            if n == 0 {
-                return Err(Error::Malformed("truncated header"));
-            }
-            prefix.extend_from_slice(&chunk[..n]);
-            offset += n as u64;
-        };
-        let mut input = prefix.split_off(header_len);
-        let meta = Arc::new(crate::wire::decode_header(
-            &prefix,
-            self.codec.format(),
-            &self.options.limits,
-        )?);
-        let mut decoder = self
-            .codec
-            .decoder(&meta)
-            .map_err(|e| Error::Codec(e.to_string()))?;
-        let mut output = vec![0u8; CHUNK];
-        let mut member = 0usize;
-        let mut check = self.member_check(wanted, member)?;
-        let mut eof = false;
-        let mut start = 0usize;
+        let mut op = self
+            .history
+            .decode_item(self.options.clone(), wanted.iter().map(|(&i, &h)| (i, h)))?;
+        let mut decoder: Option<C::Decoder> = None;
+        let mut buffer = vec![
+            0u8;
+            CHUNK
+                .max(self.options.read_size)
+                .max(self.options.decode_capacity)
+        ];
         loop {
-            if start == input.len() && !eof {
-                input.clear();
-                start = 0;
-                let n = self
-                    .storage
-                    .read_at(item, offset, &mut chunk)
-                    .map_err(storage_error)?;
-                offset += n as u64;
-                eof = n == 0;
-                input.extend_from_slice(&chunk[..n]);
-            }
-            let p = decoder
-                .step(&input[start..], eof, &mut output)
-                .map_err(|e| Error::Codec(e.to_string()))?;
-            if p.consumed > input.len() - start || p.produced > output.len() {
-                return Err(Error::Protocol("decoder reported impossible counts"));
-            }
-            if p.status == DecodeStatus::Working && p.consumed == 0 && p.produced == 0 {
-                return Err(Error::Protocol("decoder made no progress"));
-            }
-            start += p.consumed;
-            if let Some(check) = &mut check
-                && p.produced > 0
-            {
-                check.update(&output[..p.produced]);
-                visit(member, &output[..p.produced]).map_err(storage_error)?;
-            }
-            match p.status {
-                DecodeStatus::EndMember => {
-                    if let Some(check) = check.take() {
-                        check.finish()?;
-                    }
-                    member += 1;
-                    if member > last {
-                        return Ok(());
-                    }
-                    check = self.member_check(wanted, member)?;
+            match op.next() {
+                DecodeNext::Chunk { member, bytes } => {
+                    visit(member, bytes).map_err(storage_error)?;
                 }
-                DecodeStatus::Finished => {
-                    // The stored item has fewer members than the wanted ones.
-                    let (_, missing) = wanted.range(member..).next().unwrap();
-                    return Err(Error::CorruptPayload(*missing));
-                }
-                DecodeStatus::NeedInput if eof => {
-                    return Err(Error::Codec("decoder needs input after end of body".into()));
-                }
-                _ => {}
+                DecodeNext::Done => return Ok(()),
+                DecodeNext::Failed(e) => return Err(e.clone()),
+                DecodeNext::Request(..) | DecodeNext::AwaitReply => {}
+            }
+            let Some((ticket, request)) = op.request() else {
+                continue;
+            };
+            let outcome = self.execute(item, request, &mut decoder, &mut buffer);
+            let reply = match &outcome {
+                Ok(Executed::Read { len, eof }) => Reply::Read {
+                    bytes: &buffer[..*len],
+                    eof: *eof,
+                },
+                Ok(Executed::Decoded(p)) => Reply::Decoded {
+                    consumed: p.consumed,
+                    output: &buffer[..p.produced],
+                    status: p.status,
+                },
+                Ok(Executed::Bound(ids)) => Reply::Bound(ids),
+                Err(message) => Reply::Failed(message),
+            };
+            if let Err(crate::ReplyError::Invalid(e)) = op.reply(ticket, reply) {
+                return Err(e);
             }
         }
-    }
-
-    fn member_check(
-        &self,
-        wanted: &BTreeMap<usize, CommitHash>,
-        member: usize,
-    ) -> Result<Option<PayloadCheck>, Error> {
-        wanted
-            .get(&member)
-            .map(|commit| self.history.check_payload(commit))
-            .transpose()
     }
 }
 

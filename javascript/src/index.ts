@@ -7,12 +7,12 @@
  * flight at once, interleaved with local commits on the same `History`.
  */
 import {
-  Admission, Changes, CommitBuilder, ExportCursor, ExportPlan, History,
+  Admission, Changes, CommitBuilder, DecodeItem, ExportCursor, ExportPlan, History,
   MaterializationCursor, PayloadCheck, Prepared, ViewPoint, blobHash, readHeader,
 } from "#wasm-bodge/bindings";
 
 export {
-  Admission, Changes, CommitBuilder, ExportCursor, ExportPlan, History,
+  Admission, Changes, CommitBuilder, DecodeItem, ExportCursor, ExportPlan, History,
   MaterializationCursor, PayloadCheck, Prepared, ViewPoint, blobHash, readHeader,
 };
 
@@ -52,6 +52,13 @@ export type Next =
   | { type: "needHistory" }
   | { type: "waiting"; hash: Bytes }
   | { type: "done"; receipt: Receipt }
+  | { type: "failed"; error: StockfoilError };
+
+export type DecodeNext =
+  | { type: "request"; ticket: bigint; request: Request }
+  | { type: "awaitReply" }
+  | { type: "chunk"; member: number; bytes: Uint8Array }
+  | { type: "done" }
   | { type: "failed"; error: StockfoilError };
 
 export type Reply =
@@ -198,6 +205,73 @@ export async function drive(
       }
       case "bind":
         return { kind: "bound", ids: await host.bind(request.memberCount) };
+    }
+  }
+}
+
+/**
+ * Drive one `DecodeItem` operation to completion: execute its `Read` and
+ * `Decode` requests against `host` and pass each verified canonical member
+ * chunk to `visit`.
+ */
+export async function driveDecode(
+  decode: DecodeItem,
+  host: Pick<Host, "read" | "decoder">,
+  visit: (member: number, bytes: Uint8Array) => MaybePromise<void>,
+  options: DriveOptions = {},
+): Promise<void> {
+  const { signal } = options;
+  let decoder: Decoder | undefined;
+  let hostError: unknown;
+  for (;;) {
+    signal?.throwIfAborted();
+    let next = decode.next() as DecodeNext;
+    switch (next.type) {
+      case "chunk":
+        await visit(next.member, next.bytes);
+        break;
+      case "awaitReply":
+        next = { type: "request", ...decode.request() } as DecodeNext;
+      // falls through
+      case "request": {
+        const { ticket, request } = next as Extract<DecodeNext, { type: "request" }>;
+        let reply: Reply;
+        try {
+          reply = await execute(request);
+        } catch (error) {
+          hostError = error;
+          reply = { kind: "failed", message: String((error as Error)?.message ?? error) };
+        }
+        try {
+          decode.reply(ticket, reply);
+        } catch (error) {
+          if ((error as StockfoilError).code !== "InvalidInput") break;
+          hostError = error;
+          decode.reply(ticket, { kind: "failed", message: (error as Error).message });
+        }
+        break;
+      }
+      case "done":
+        return;
+      case "failed":
+        if (hostError !== undefined) next.error.cause = hostError;
+        throw next.error;
+    }
+  }
+
+  async function execute(request: Request): Promise<Reply> {
+    switch (request.kind) {
+      case "read": {
+        const bytes = await host.read(request.offset, request.max);
+        return { kind: "read", bytes, eof: bytes.length === 0 };
+      }
+      case "decode": {
+        decoder ??= await host.decoder(decode.meta() as BundleMeta);
+        const step = await decoder.step(request.input, request.eof, request.capacity);
+        return { kind: "decoded", ...step };
+      }
+      case "bind":
+        throw new Error("DecodeItem never requests bind");
     }
   }
 }
@@ -349,6 +423,26 @@ export class Graph {
   }
 
   /**
+   * Decode a stored item once, passing the canonical bytes of each `wanted`
+   * `[memberIndex, commitHash]` pair to `visit`, in member order. Decoding
+   * stops after the last wanted member, and each wanted member is checked
+   * against its commit when it ends.
+   */
+  async decodeItem(
+    item: Key,
+    wanted: Iterable<readonly [number, Bytes]>,
+    visit: (member: number, bytes: Uint8Array) => MaybePromise<void>,
+    options?: DriveOptions,
+  ): Promise<void> {
+    const decode = this.history.decodeItem(wanted, { ...this.options, format: this.codec.format });
+    try {
+      await driveDecode(decode, this.host(item), visit, options);
+    } finally {
+      decode.free();
+    }
+  }
+
+  /**
    * A delivered commit's canonical payload, checked against the commit.
    * Rejects with a `CorruptPayload` error if storage returns anything else.
    */
@@ -358,52 +452,65 @@ export class Graph {
 
   /** Checked payloads of several commits, decoding each stored item once. */
   async payloads(commits: readonly Bytes[]): Promise<Uint8Array[]> {
-    const items = new Map<Key, Promise<Uint8Array[]>>();
-    return Promise.all(commits.map(async commit => {
+    const results = new Array<Uint8Array>(commits.length);
+    const byItem = new Map<Key, { wanted: Map<number, Bytes>; slots: Map<number, number[]> }>();
+    const canonical: Promise<void>[] = [];
+
+    await Promise.all(commits.map(async (commit, i) => {
       const info = this.history.lookup(commit) as { payload: PayloadId } | undefined;
-      if (!info) throw new Error(`unknown commit ${hex(commit)}`);
-      const location = await this.storage.location(info.payload);
-      let bytes: Uint8Array | undefined;
-      if (location.kind === "canonical") {
-        bytes = await this.readAll(location.blob);
-      } else {
-        if (!items.has(location.item)) items.set(location.item, this.decodeItem(location.item));
-        bytes = (await items.get(location.item)!)[location.index] ?? new Uint8Array();
+      if (!info) {
+        // Trigger the core `UnknownCommit` error.
+        this.history.checkPayload(commit).free();
+        return;
       }
-      const check = this.history.checkPayload(commit);
-      check.update(bytes);
-      check.finish();
-      return bytes;
+      const location = await this.storage.location(info.payload);
+      if (location.kind === "canonical") {
+        canonical.push((async () => {
+          results[i] = await this.readCanonical(location.blob, commit);
+        })());
+      } else {
+        let group = byItem.get(location.item);
+        if (!group) {
+          group = { wanted: new Map(), slots: new Map() };
+          byItem.set(location.item, group);
+        }
+        group.wanted.set(location.index, commit);
+        const list = group.slots.get(location.index) ?? [];
+        list.push(i);
+        group.slots.set(location.index, list);
+      }
     }));
+
+    const decoded = Array.from(byItem.entries(), async ([item, { wanted, slots }]) => {
+      const chunks = new Map<number, Uint8Array[]>();
+      await this.decodeItem(item, wanted, (member, bytes) => {
+        let list = chunks.get(member);
+        if (!list) { list = []; chunks.set(member, list); }
+        list.push(bytes);
+      });
+      for (const [member, indices] of slots) {
+        const payload = concat(chunks.get(member) ?? []);
+        for (const idx of indices) results[idx] = payload;
+      }
+    });
+
+    await Promise.all([...canonical, ...decoded]);
+    return results;
   }
 
-  private async readAll(blob: Key): Promise<Uint8Array> {
+  private async readCanonical(blob: Key, commit: Bytes): Promise<Uint8Array> {
+    const check = this.history.checkPayload(commit);
     const parts: Uint8Array[] = [];
+    const max = this.options.readSize ?? CHUNK;
     for (let offset = 0; ;) {
-      const part = await this.storage.read(blob, offset, CHUNK);
-      if (part.length === 0) return concat(parts);
+      const part = await this.storage.read(blob, offset, max);
+      if (part.length === 0) {
+        check.finish();
+        return concat(parts);
+      }
+      check.update(part);
       parts.push(part);
       offset += part.length;
-    }
-  }
-
-  /** Every member's canonical bytes from a stored item, unchecked. */
-  private async decodeItem(item: Key): Promise<Uint8Array[]> {
-    const bytes = await this.readAll(item);
-    const header = readHeader(bytes, this.codec.format, this.options.limits) as
-      { length: number; meta: BundleMeta } | undefined;
-    if (!header) throw new Error("truncated item header");
-    const decoder = await this.codec.decoder(header.meta);
-    const members: Uint8Array[] = [];
-    let current: Uint8Array[] = [];
-    let input = bytes.subarray(header.length);
-    for (;;) {
-      const step = await decoder.step(input, true, CHUNK);
-      input = input.subarray(step.consumed);
-      current.push(step.output);
-      if (step.status === "endMember") { members.push(concat(current)); current = []; }
-      if (step.status === "finished") return members;
-      if (step.status === "needInput") throw new Error("decoder needs input after the body");
     }
   }
 }

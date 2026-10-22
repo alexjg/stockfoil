@@ -275,3 +275,53 @@ test('storage keys are opaque and payloads read back are checked', async () => {
   await assert.rejects(a.payload(tip), { code: 'CorruptPayload' });
   await assert.rejects(b.payload(tip), (e) => e.code === 'CorruptPayload' && e.hash.length === 32);
 });
+
+test('decodeItem streams wanted members and stops early', async () => {
+  const a = graph();
+  let tip = await signed(a, alice, [], text('root'));
+  const hashes = [tip];
+  for (let i = 0; i < 3; i++) {
+    tip = await signed(a, alice, [tip], text(`member ${i}`));
+    hashes.push(tip);
+  }
+  tip = await signed(a, alice, [tip], payloadAtDepth(a.history, alice, [tip], 'head'));
+  hashes.push(tip);
+
+  const storage = new SlowStorage();
+  const b = new Graph(chunkCodec, storage, { readSize: 7, decodeCapacity: 3 });
+  await sync(a, b);
+  const [itemKey] = storage.blobs.keys();
+  const itemLen = storage.blobs.get(itemKey).length;
+
+  const decode = b.history.decodeItem([[1, hashes[1]]], {
+    format: chunkCodec.format,
+    readSize: 1,
+    decodeCapacity: 2,
+  });
+  const chunks = [];
+  let decoder;
+  for (;;) {
+    const next = decode.next();
+    if (next.type === 'chunk') {
+      assert.equal(next.member, 1);
+      chunks.push(next.bytes);
+    } else if (next.type === 'done') {
+      break;
+    } else if (next.type === 'request') {
+      const { ticket, request } = next;
+      if (request.kind === 'read') {
+        const bytes = await storage.read(itemKey, request.offset, request.max);
+        decode.reply(ticket, { kind: 'read', bytes, eof: bytes.length === 0 });
+      } else if (request.kind === 'decode') {
+        decoder ??= await chunkCodec.decoder(decode.meta());
+        const step = await decoder.step(request.input, request.eof, request.capacity);
+        decode.reply(ticket, { kind: 'decoded', ...step });
+      }
+    } else {
+      assert.fail(`unexpected decode state: ${next.type}`);
+    }
+  }
+  assert.deepEqual(new Uint8Array(Buffer.concat(chunks)), text('member 0'));
+  assert.ok(decode.counts().bytesRead < itemLen, 'stopped before reading trailing members');
+  decode.free();
+});

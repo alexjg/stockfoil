@@ -294,6 +294,12 @@ impl History {
 static WRONG_HISTORY: Error = Error::WrongHistory;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn next_ticket() -> Option<u64> {
+    NEXT_TICKET
+        .fetch_update(Relaxed, Relaxed, |t| t.checked_add(1))
+        .ok()
+}
+
 impl Admission {
     pub fn counts(&self) -> Counts {
         self.counts
@@ -338,7 +344,7 @@ impl Admission {
     fn issue(&mut self, kind: Kind, max: usize, eof: bool) -> Next<'_> {
         // Tickets are unique across operations, so a reply meant for another
         // operation is always stale.
-        let Ok(ticket) = NEXT_TICKET.fetch_update(Relaxed, Relaxed, |t| t.checked_add(1)) else {
+        let Some(ticket) = next_ticket() else {
             self.fail(Error::Exhausted("request tickets"));
             return self.next();
         };

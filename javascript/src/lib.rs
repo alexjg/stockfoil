@@ -7,9 +7,9 @@
 //! The host loop, codecs, and storage live in the TypeScript wrapper.
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use stockfoil_core::{
-    Author, BlobHash, BundleMeta, Change, CommitHash, DecodeStatus, Delivered, Error, FormatId,
-    Heads, ItemId, Limits, Next, ParentRef, PayloadId, Receipt, ReceiveOptions, Reply, ReplyError,
-    Request, Signature, Ticket, Vis, WritePermission, WritePermissions,
+    Author, BlobHash, BundleMeta, Change, CommitHash, Counts, DecodeNext, DecodeStatus, Delivered,
+    Error, FormatId, Heads, ItemId, Limits, Next, ParentRef, PayloadId, Receipt, ReceiveOptions,
+    Reply, ReplyError, Request, Signature, Ticket, Vis, WritePermission, WritePermissions,
 };
 use wasm_bindgen::prelude::*;
 
@@ -249,6 +249,113 @@ fn next(next: Next<'_>) -> JsValue {
         }
     }
     o.into()
+}
+
+fn decode_next(next: DecodeNext<'_>) -> JsValue {
+    let o = Object::new();
+    match next {
+        DecodeNext::Request(t, r) => return request(t, r),
+        DecodeNext::AwaitReply => set(&o, "type", "awaitReply"),
+        DecodeNext::Chunk { member, bytes: b } => {
+            set(&o, "type", "chunk");
+            set(&o, "member", member as f64);
+            set(&o, "bytes", bytes(b));
+        }
+        DecodeNext::Done => set(&o, "type", "done"),
+        DecodeNext::Failed(e) => {
+            set(&o, "type", "failed");
+            set(&o, "error", core_error(e));
+        }
+    }
+    o.into()
+}
+
+fn receive_options(options: &JsValue) -> Result<ReceiveOptions> {
+    let format = get(options, "format")
+        .as_string()
+        .ok_or_else(|| invalid("options.format must be a string"))?;
+    let mut o = ReceiveOptions::new(format_id(&format)?);
+    o.limits = limits(&get(options, "limits"))?;
+    for (name, slot) in [
+        ("readSize", &mut o.read_size),
+        ("decodeCapacity", &mut o.decode_capacity),
+        ("quantum", &mut o.quantum),
+    ] {
+        let v = get(options, name);
+        if !v.is_undefined() {
+            *slot = number(&v, name)?.max(1);
+        }
+    }
+    Ok(o)
+}
+
+fn counts_js(c: Counts) -> JsValue {
+    let o = Object::new();
+    set(&o, "bytesRead", c.bytes_read as f64);
+    set(&o, "encodedBytesDecoded", c.encoded_bytes_decoded as f64);
+    set(&o, "canonicalBytes", c.canonical_bytes as f64);
+    set(&o, "requests", c.requests as f64);
+    o.into()
+}
+
+fn accept_reply(
+    ticket: u64,
+    reply: JsValue,
+    f: impl FnOnce(Ticket, Reply<'_>) -> std::result::Result<(), ReplyError>,
+) -> Result<()> {
+    let ticket = Ticket::from_raw(ticket);
+    let kind = get(&reply, "kind").as_string().unwrap_or_default();
+    let result = match kind.as_str() {
+        "read" => {
+            let data = byte_value(&get(&reply, "bytes"), "reply.bytes")?;
+            let eof = get(&reply, "eof").is_truthy();
+            f(ticket, Reply::Read { bytes: &data, eof })
+        }
+        "decoded" => {
+            let consumed = number(&get(&reply, "consumed"), "reply.consumed")?;
+            let output = byte_value(&get(&reply, "output"), "reply.output")?;
+            let status = match get(&reply, "status").as_string().as_deref() {
+                Some("working") => DecodeStatus::Working,
+                Some("needInput") => DecodeStatus::NeedInput,
+                Some("endMember") => DecodeStatus::EndMember,
+                Some("finished") => DecodeStatus::Finished,
+                _ => return Err(invalid("reply.status must be a decode status")),
+            };
+            f(
+                ticket,
+                Reply::Decoded {
+                    consumed,
+                    output: &output,
+                    status,
+                },
+            )
+        }
+        "bound" => {
+            let ids = each(&get(&reply, "ids"), "reply.ids")?
+                .iter()
+                .map(payload_id)
+                .collect::<Result<Vec<_>>>()?;
+            f(ticket, Reply::Bound(&ids))
+        }
+        "failed" => {
+            let message = get(&reply, "message")
+                .as_string()
+                .unwrap_or_else(|| "host request failed".into());
+            f(ticket, Reply::Failed(&message))
+        }
+        _ => {
+            return Err(invalid(
+                "reply.kind must be read, decoded, bound, or failed",
+            ));
+        }
+    };
+    result.map_err(|e| match e {
+        ReplyError::Stale => js_error("StaleReply", "stale or unknown reply ticket").into(),
+        ReplyError::WrongKind => {
+            js_error("WrongKindReply", "reply kind does not match the request").into()
+        }
+        ReplyError::Invalid(e) => core_error(&e),
+    })
 }
 
 fn permissions(value: &JsValue) -> Result<WritePermissions> {
@@ -516,22 +623,27 @@ impl JsHistory {
     /// knows which. `options`: `{ format, readSize?, decodeCapacity?, quantum?,
     /// limits? }`.
     pub fn receive(&self, options: JsValue) -> Result<Admission> {
-        let format = get(&options, "format")
-            .as_string()
-            .ok_or_else(|| invalid("options.format must be a string"))?;
-        let mut o = ReceiveOptions::new(format_id(&format)?);
-        o.limits = limits(&get(&options, "limits"))?;
-        for (name, slot) in [
-            ("readSize", &mut o.read_size),
-            ("decodeCapacity", &mut o.decode_capacity),
-            ("quantum", &mut o.quantum),
-        ] {
-            let v = get(&options, name);
-            if !v.is_undefined() {
-                *slot = number(&v, name)?.max(1);
-            }
+        Ok(Admission(self.inner.receive(receive_options(&options)?)))
+    }
+
+    /// Start decoding and checking wanted members (`Iterable<[index, commitHash]>`)
+    /// from one stored item. `options`: `{ format, readSize?, decodeCapacity?, limits? }`.
+    #[wasm_bindgen(js_name = decodeItem)]
+    pub fn decode_item(&self, wanted: JsValue, options: JsValue) -> Result<DecodeItem> {
+        let mut pairs = Vec::new();
+        for entry in each(&wanted, "wanted")? {
+            let pair = each(&entry, "a wanted member entry")?;
+            let [index, hash] = pair.as_slice() else {
+                return Err(invalid("a wanted member entry must be [index, commitHash]"));
+            };
+            pairs.push((
+                number(index, "member index")?,
+                commit_hash(&byte_value(hash, "a commit hash")?)?,
+            ));
         }
-        Ok(Admission(self.inner.receive(o)))
+        Ok(DecodeItem(
+            core(self.inner.decode_item(receive_options(&options)?, pairs))?,
+        ))
     }
 
     /// Dependency checks, placement, and atomic publication. Returns a `Next`.
@@ -720,59 +832,7 @@ impl Admission {
     /// operation is unaffected), or with the core error if the reply broke the
     /// protocol (the operation has then failed).
     pub fn reply(&mut self, ticket: u64, reply: JsValue) -> Result<()> {
-        let ticket = Ticket::from_raw(ticket);
-        let kind = get(&reply, "kind").as_string().unwrap_or_default();
-        let result = match kind.as_str() {
-            "read" => {
-                let data = byte_value(&get(&reply, "bytes"), "reply.bytes")?;
-                let eof = get(&reply, "eof").is_truthy();
-                self.0.reply(ticket, Reply::Read { bytes: &data, eof })
-            }
-            "decoded" => {
-                let consumed = number(&get(&reply, "consumed"), "reply.consumed")?;
-                let output = byte_value(&get(&reply, "output"), "reply.output")?;
-                let status = match get(&reply, "status").as_string().as_deref() {
-                    Some("working") => DecodeStatus::Working,
-                    Some("needInput") => DecodeStatus::NeedInput,
-                    Some("endMember") => DecodeStatus::EndMember,
-                    Some("finished") => DecodeStatus::Finished,
-                    _ => return Err(invalid("reply.status must be a decode status")),
-                };
-                self.0.reply(
-                    ticket,
-                    Reply::Decoded {
-                        consumed,
-                        output: &output,
-                        status,
-                    },
-                )
-            }
-            "bound" => {
-                let ids = each(&get(&reply, "ids"), "reply.ids")?
-                    .iter()
-                    .map(payload_id)
-                    .collect::<Result<Vec<_>>>()?;
-                self.0.reply(ticket, Reply::Bound(&ids))
-            }
-            "failed" => {
-                let message = get(&reply, "message")
-                    .as_string()
-                    .unwrap_or_else(|| "host request failed".into());
-                self.0.reply(ticket, Reply::Failed(&message))
-            }
-            _ => {
-                return Err(invalid(
-                    "reply.kind must be read, decoded, bound, or failed",
-                ));
-            }
-        };
-        result.map_err(|e| match e {
-            ReplyError::Stale => js_error("StaleReply", "stale or unknown reply ticket").into(),
-            ReplyError::WrongKind => {
-                js_error("WrongKindReply", "reply kind does not match the request").into()
-            }
-            ReplyError::Invalid(e) => core_error(&e),
-        })
+        accept_reply(ticket, reply, |t, r| self.0.reply(t, r))
     }
 
     /// `{ ticket, request }` for the outstanding request, or `undefined`.
@@ -784,16 +844,45 @@ impl Admission {
 
     /// `{ bytesRead, encodedBytesDecoded, canonicalBytes, requests }`.
     pub fn counts(&self) -> JsValue {
-        let c = self.0.counts();
-        let o = Object::new();
-        set(&o, "bytesRead", c.bytes_read as f64);
-        set(&o, "encodedBytesDecoded", c.encoded_bytes_decoded as f64);
-        set(&o, "canonicalBytes", c.canonical_bytes as f64);
-        set(&o, "requests", c.requests as f64);
-        o.into()
+        counts_js(self.0.counts())
     }
 
     /// The parsed (untrusted) header metadata once read, else `undefined`.
+    pub fn meta(&self) -> JsValue {
+        self.0.meta().map_or(JsValue::UNDEFINED, |m| meta(m))
+    }
+}
+
+/// Decoding and checking wanted members of one stored item through host requests.
+#[wasm_bindgen]
+pub struct DecodeItem(stockfoil_core::DecodeItem);
+
+#[wasm_bindgen]
+impl DecodeItem {
+    /// Advance the operation and return an owned `DecodeNext`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> JsValue {
+        decode_next(self.0.next())
+    }
+
+    /// Answer the outstanding request.
+    pub fn reply(&mut self, ticket: u64, reply: JsValue) -> Result<()> {
+        accept_reply(ticket, reply, |t, r| self.0.reply(t, r))
+    }
+
+    /// `{ ticket, request }` for the outstanding request, or `undefined`.
+    pub fn request(&self) -> JsValue {
+        self.0
+            .request()
+            .map_or(JsValue::UNDEFINED, |(t, r)| request(t, r))
+    }
+
+    /// `{ bytesRead, encodedBytesDecoded, canonicalBytes, requests }`.
+    pub fn counts(&self) -> JsValue {
+        counts_js(self.0.counts())
+    }
+
+    /// The parsed header metadata once read, else `undefined`.
     pub fn meta(&self) -> JsValue {
         self.0.meta().map_or(JsValue::UNDEFINED, |m| meta(m))
     }

@@ -17,6 +17,7 @@ mod admission;
 mod author;
 mod blob_hash;
 mod commit_hash;
+mod decode;
 mod error;
 mod evidence;
 mod history;
@@ -33,6 +34,7 @@ pub use admission::{
 pub use author::{Author, InvalidAuthor};
 pub use blob_hash::{BlobHash, BlobHasher};
 pub use commit_hash::{CommitHash, InvalidCommitHash};
+pub use decode::{DecodeItem, DecodeNext};
 pub use error::Error;
 pub use history::{
     Batch, Change, Changes, CommitBuilder, CommitDiff, CommitInfo, Delivered, ExportCursor,
