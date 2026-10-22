@@ -1,0 +1,18 @@
+[package]
+name = "stockfoil"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+
+[dependencies]
+stockfoil-core = { path = "../stockfoil-core" }
+
+[dev-dependencies]
+blake3 = "1.8.7"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.10.2"
+
+[[bench]]
+name = "history"
+harness = false

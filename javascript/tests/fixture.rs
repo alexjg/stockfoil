@@ -3,7 +3,7 @@
 //!
 //! The content is deterministic. The test fails if the checked-in fixture is
 //! stale; regenerate it with `STOCKFOIL_UPDATE_FIXTURES=1 cargo test -p stockfoil-wasm`.
-#[path = "../../tests/support/mod.rs"]
+#[path = "../../stockfoil/tests/support/mod.rs"]
 mod support;
 
 use std::fmt::Write as _;

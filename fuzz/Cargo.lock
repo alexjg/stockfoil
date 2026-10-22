@@ -407,6 +407,13 @@ dependencies = [
 name = "stockfoil"
 version = "0.1.0"
 dependencies = [
+ "stockfoil-core",
+]
+
+[[package]]
+name = "stockfoil-core"
+version = "0.1.0"
+dependencies = [
  "bijoux",
  "blake3",
  "ed25519-dalek",

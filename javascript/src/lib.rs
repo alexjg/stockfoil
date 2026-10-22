@@ -6,7 +6,7 @@
 //! are `Uint8Array`s (32/32/64 bytes); payload IDs and tickets are `BigInt`s.
 //! The host loop, codecs, and storage live in the TypeScript wrapper.
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
-use stockfoil::{
+use stockfoil_core::{
     Author, BlobHash, BundleMeta, Change, CommitHash, DecodeStatus, Delivered, Error, FormatId,
     Heads, ItemId, Limits, Next, ParentRef, PayloadId, Receipt, ReceiveOptions, Reply, ReplyError,
     Request, Signature, Ticket, Vis, WritePermission, WritePermissions,
@@ -348,13 +348,13 @@ pub fn blob_hash_of(data: &[u8]) -> Uint8Array {
 #[wasm_bindgen(js_name = readHeader)]
 pub fn read_header(prefix: &[u8], format: &str, limits_js: JsValue) -> Result<JsValue> {
     let limits = limits(&limits_js)?;
-    let Some(length) = core(stockfoil::wire::header_len(prefix, &limits))? else {
+    let Some(length) = core(stockfoil_core::wire::header_len(prefix, &limits))? else {
         return Ok(JsValue::UNDEFINED);
     };
     if prefix.len() < length {
         return Ok(JsValue::UNDEFINED);
     }
-    let decoded = core(stockfoil::wire::decode_header(
+    let decoded = core(stockfoil_core::wire::decode_header(
         &prefix[..length],
         &format_id(format)?,
         &limits,
@@ -370,7 +370,7 @@ pub fn read_header(prefix: &[u8], format: &str, limits_js: JsValue) -> Result<Js
 /// Authenticated commit history. See the core `History` docs.
 #[wasm_bindgen(js_name = History)]
 pub struct JsHistory {
-    inner: stockfoil::History,
+    inner: stockfoil_core::History,
     waiters: Vec<Function>,
 }
 
@@ -396,7 +396,7 @@ impl JsHistory {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: stockfoil::History::new(),
+            inner: stockfoil_core::History::new(),
             waiters: Vec::new(),
         }
     }
@@ -553,7 +553,7 @@ impl JsHistory {
     #[wasm_bindgen(js_name = exportItem)]
     pub fn export_item(&self, plan: &ExportPlan, index: usize, format: &str) -> Result<JsValue> {
         let item = core(self.inner.export_item(&plan.0, index))?;
-        let header = stockfoil::wire::encode_header(&item.meta, &format_id(format)?);
+        let header = stockfoil_core::wire::encode_header(&item.meta, &format_id(format)?);
         let o = Object::new();
         set(&o, "id", item_id(&item.meta.id));
         set(&o, "header", bytes(&header));
@@ -603,11 +603,11 @@ impl JsHistory {
         let o = Object::new();
         set(&o, "records", out.iter().map(change).collect::<Array>());
         match batch {
-            stockfoil::Batch::More => {
+            stockfoil_core::Batch::More => {
                 set(&o, "complete", false);
                 set(&o, "cursor", JsValue::UNDEFINED);
             }
-            stockfoil::Batch::Complete(cursor) => {
+            stockfoil_core::Batch::Complete(cursor) => {
                 set(&o, "complete", true);
                 set(&o, "cursor", MaterializationCursor(cursor));
             }
@@ -637,7 +637,7 @@ fn change(c: &Change) -> JsValue {
 // ---- local commits ----
 
 #[wasm_bindgen]
-pub struct CommitBuilder(stockfoil::CommitBuilder);
+pub struct CommitBuilder(stockfoil_core::CommitBuilder);
 
 #[wasm_bindgen]
 impl CommitBuilder {
@@ -653,7 +653,7 @@ impl CommitBuilder {
 
 /// Checks one payload read back from storage.
 #[wasm_bindgen]
-pub struct PayloadCheck(stockfoil::PayloadCheck);
+pub struct PayloadCheck(stockfoil_core::PayloadCheck);
 
 #[wasm_bindgen]
 impl PayloadCheck {
@@ -669,7 +669,7 @@ impl PayloadCheck {
 }
 
 #[wasm_bindgen]
-pub struct Prepared(stockfoil::Prepared);
+pub struct Prepared(stockfoil_core::Prepared);
 
 #[wasm_bindgen]
 impl Prepared {
@@ -705,7 +705,7 @@ impl Prepared {
 
 /// Receiving one stored item through host requests.
 #[wasm_bindgen]
-pub struct Admission(stockfoil::Admission);
+pub struct Admission(stockfoil_core::Admission);
 
 #[wasm_bindgen]
 impl Admission {
@@ -802,7 +802,7 @@ impl Admission {
 // ---- export ----
 
 #[wasm_bindgen]
-pub struct ExportPlan(stockfoil::ExportPlan);
+pub struct ExportPlan(stockfoil_core::ExportPlan);
 
 #[wasm_bindgen]
 impl ExportPlan {
@@ -829,14 +829,14 @@ impl ExportPlan {
 }
 
 #[wasm_bindgen]
-pub struct ExportCursor(stockfoil::ExportCursor);
+pub struct ExportCursor(stockfoil_core::ExportCursor);
 
 #[wasm_bindgen]
 impl ExportCursor {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self(stockfoil::ExportCursor::new())
+        Self(stockfoil_core::ExportCursor::new())
     }
     #[wasm_bindgen(getter)]
     pub fn length(&self) -> usize {
@@ -851,21 +851,21 @@ impl ExportCursor {
     }
     #[wasm_bindgen(js_name = fromBytes)]
     pub fn from_bytes(data: &[u8]) -> Result<ExportCursor> {
-        core(stockfoil::ExportCursor::from_bytes(data)).map(Self)
+        core(stockfoil_core::ExportCursor::from_bytes(data)).map(Self)
     }
 }
 
 // ---- views and changes ----
 
 #[wasm_bindgen]
-pub struct ViewPoint(stockfoil::ViewPoint);
+pub struct ViewPoint(stockfoil_core::ViewPoint);
 
 #[wasm_bindgen]
 impl ViewPoint {
     /// A view from explicit heads and permissions (see `History.viewPoint`).
     #[wasm_bindgen(constructor)]
     pub fn new(heads: JsValue, permissions_js: JsValue) -> Result<ViewPoint> {
-        Ok(Self(stockfoil::ViewPoint::from_parts(
+        Ok(Self(stockfoil_core::ViewPoint::from_parts(
             hash_list(&heads, "heads")?,
             permissions(&permissions_js)?,
         )))
@@ -880,14 +880,14 @@ impl ViewPoint {
 }
 
 #[wasm_bindgen]
-pub struct MaterializationCursor(stockfoil::MaterializationCursor);
+pub struct MaterializationCursor(stockfoil_core::MaterializationCursor);
 
 #[wasm_bindgen]
 impl MaterializationCursor {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self(stockfoil::MaterializationCursor::new())
+        Self(stockfoil_core::MaterializationCursor::new())
     }
     #[wasm_bindgen(js_name = deliveryHeads)]
     pub fn delivery_heads(&self) -> Array {
@@ -903,13 +903,13 @@ impl MaterializationCursor {
     }
     #[wasm_bindgen(js_name = fromBytes)]
     pub fn from_bytes(data: &[u8]) -> Result<MaterializationCursor> {
-        core(stockfoil::MaterializationCursor::from_bytes(data)).map(Self)
+        core(stockfoil_core::MaterializationCursor::from_bytes(data)).map(Self)
     }
 }
 
 /// A captured change traversal.
 #[wasm_bindgen]
-pub struct Changes(stockfoil::Changes);
+pub struct Changes(stockfoil_core::Changes);
 
 #[wasm_bindgen]
 impl Changes {

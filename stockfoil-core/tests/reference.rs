@@ -2,7 +2,7 @@
 use ed25519_dalek::{Signer, SigningKey};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use stockfoil::*;
+use stockfoil_core::*;
 
 fn key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])

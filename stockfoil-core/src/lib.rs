@@ -13,15 +13,12 @@
 //!   item headers.
 //! - [`History::changes`] tells a materializer which commits were delivered or
 //!   changed participation, without reading payloads.
-//! - [`Graph`] bundles a history with a native codec and storage for
-//!   synchronous Rust use.
 mod admission;
 mod author;
 mod blob_hash;
 mod commit_hash;
 mod error;
 mod evidence;
-mod graph;
 mod history;
 mod meta;
 mod reader;
@@ -37,10 +34,6 @@ pub use author::{Author, InvalidAuthor};
 pub use blob_hash::{BlobHash, BlobHasher};
 pub use commit_hash::{CommitHash, InvalidCommitHash};
 pub use error::Error;
-pub use graph::{
-    Codec, DecodeProgress, Decoder, Driven, EncodeProgress, Encoder, Graph, MemoryStorage,
-    PayloadLocation, Storage,
-};
 pub use history::{
     Batch, Change, Changes, CommitBuilder, CommitDiff, CommitInfo, Delivered, ExportCursor,
     ExportItem, ExportPlan, Heads, History, MaterializationCursor, PayloadCheck, Prepared, Receipt,

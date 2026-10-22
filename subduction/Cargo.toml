@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-stockfoil = { path = ".." }
+stockfoil = { path = "../stockfoil" }
 # The sibling checkout, for unreleased Subduction APIs.
 sedimentree_core = { path = "../../subduction/sedimentree_core", features = ["std"] }
 
