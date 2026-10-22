@@ -3,7 +3,7 @@
 //! [`Verified`], and history admits nothing else from received data.
 use crate::evidence::{Coverage, reach, verify_signature};
 use crate::meta::{CommitHasher, depth};
-use crate::{BlobHash, BundleMeta, CommitHash, Error, ItemId, Limits, ParentRef};
+use crate::{BundleMeta, CommitHash, Error, ItemId, Limits, ParentRef};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ impl Verified {
     }
 
     pub fn parents(&self, member: usize) -> impl ExactSizeIterator<Item = CommitHash> + '_ {
-        self.meta.shape.members[member]
+        self.meta.members[member]
             .parents
             .iter()
             .map(|p| match *p {
@@ -69,7 +69,7 @@ fn invalid<T>(why: &'static str) -> Result<T, Error> {
 impl Verifier {
     /// Check everything that does not need member contents.
     pub fn new(meta: Arc<BundleMeta>, limits: &Limits) -> Result<Self, Error> {
-        let n = meta.shape.members.len();
+        let n = meta.members.len();
         if n > limits.max_members {
             return Err(Error::Limit("members"));
         }
@@ -93,7 +93,7 @@ impl Verifier {
             _ => {}
         }
         let mut parents = 0usize;
-        for (i, member) in meta.shape.members.iter().enumerate() {
+        for (i, member) in meta.members.iter().enumerate() {
             parents = parents.saturating_add(member.parents.len());
             if parents > limits.max_parents {
                 return Err(Error::Limit("parents"));
@@ -154,9 +154,9 @@ impl Verifier {
         if !matches!(self.phase, Phase::Members) || index == self.meta.len() {
             return Err(Error::Protocol("more member boundaries than members"));
         }
-        let payload = BlobHash::from(<[u8; 32]>::from(self.payload.finalize()));
+        let payload: [u8; 32] = self.payload.finalize().into();
         self.payload.reset();
-        let member = &self.meta.shape.members[index];
+        let member = &self.meta.members[index];
         let mut hasher = CommitHasher::new(member.parents.len());
         for parent in &member.parents {
             hasher.parent(match parent {
@@ -234,7 +234,7 @@ impl Verifier {
             ItemId::Fragment(range) => Some(&range.boundary),
             ItemId::Commit(_) => None,
         };
-        for member in &self.meta.shape.members {
+        for member in &self.meta.members {
             for parent in &member.parents {
                 if let ParentRef::External(h) = parent {
                     if self.by_hash.contains_key(h) {
@@ -259,7 +259,6 @@ impl Verifier {
     fn complete(&mut self, evidence: Vec<usize>) {
         let external = self
             .meta
-            .shape
             .members
             .iter()
             .flat_map(|m| &m.parents)

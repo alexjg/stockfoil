@@ -2,7 +2,7 @@
 //! draft) and checking payloads read back from storage.
 use super::History;
 use crate::meta::{CommitHasher, commit_hash};
-use crate::{Author, BlobHash, CommitHash, Error};
+use crate::{Author, CommitHash, Error};
 
 /// Hashes one local commit's canonical payload. Created by
 /// [`History::begin_commit`] after its parents have been checked, so invalid
@@ -12,24 +12,20 @@ pub struct CommitBuilder {
     author: Author,
     parents: Vec<CommitHash>,
     payload: blake3::Hasher,
-    len: u64,
 }
 
 impl CommitBuilder {
     /// Append canonical payload bytes. The caller chooses the chunking.
     pub fn update(&mut self, canonical: &[u8]) {
         self.payload.update(canonical);
-        self.len += canonical.len() as u64;
     }
 
     pub fn finish(self) -> Prepared {
-        let payload_hash = BlobHash::from(<[u8; 32]>::from(self.payload.finalize()));
+        let payload_hash: [u8; 32] = self.payload.finalize().into();
         Prepared {
             hash: commit_hash(self.parents.iter(), &self.author, &payload_hash),
             author: self.author,
             parents: self.parents,
-            payload_hash,
-            len: self.len,
         }
     }
 }
@@ -38,12 +34,8 @@ impl CommitBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     pub hash: CommitHash,
-    pub author: Author,
-    /// Ordered parents, repeats preserved.
-    pub parents: Vec<CommitHash>,
-    pub payload_hash: BlobHash,
-    /// Canonical payload length in bytes.
-    pub len: u64,
+    pub(crate) author: Author,
+    pub(crate) parents: Vec<CommitHash>,
 }
 
 impl Prepared {
@@ -68,7 +60,6 @@ impl History {
             author,
             parents,
             payload: blake3::Hasher::new(),
-            len: 0,
         })
     }
 }
@@ -83,7 +74,7 @@ pub struct PayloadCheck {
 }
 
 impl PayloadCheck {
-    pub fn commit(&self) -> CommitHash {
+    pub(crate) fn commit(&self) -> CommitHash {
         self.commit
     }
 
@@ -94,7 +85,7 @@ impl PayloadCheck {
 
     /// [`Error::CorruptPayload`] unless the bytes reproduce the commit hash.
     pub fn finish(self) -> Result<(), Error> {
-        let payload = BlobHash::from(<[u8; 32]>::from(self.payload.finalize()));
+        let payload: [u8; 32] = self.payload.finalize().into();
         if self.hasher.finish(&self.author, &payload) == self.commit {
             Ok(())
         } else {

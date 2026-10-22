@@ -37,7 +37,7 @@ pub(crate) fn reach(
         count += 1;
         visit(i);
         stack.extend(
-            meta.shape.members[i]
+            meta.members[i]
                 .parents
                 .iter()
                 .filter_map(|p| match p {
@@ -89,7 +89,6 @@ pub(crate) struct Coverage {
 impl Coverage {
     pub fn new(meta: &BundleMeta) -> Self {
         let authors: Vec<Author> = meta
-            .shape
             .members
             .iter()
             .map(|m| m.author)
@@ -98,7 +97,6 @@ impl Coverage {
             .collect();
         let index = |author: &Author| authors.binary_search(author).ok();
         let author_of = meta
-            .shape
             .members
             .iter()
             .map(|m| index(&m.author).unwrap())
@@ -153,7 +151,7 @@ impl Coverage {
                 if author / 64 == self.pass && mask & (1 << (author % 64)) == 0 {
                     return Err((self.authors[author], member));
                 }
-                let parents = &meta.shape.members[member].parents;
+                let parents = &meta.members[member].parents;
                 for parent in parents {
                     if let ParentRef::Member(j) = parent {
                         self.masks[*j] |= mask;
@@ -183,7 +181,8 @@ impl Coverage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Evidence, FragmentShape, ItemId, MemberShape, Signature};
+    use crate::meta::Evidence;
+    use crate::{ItemId, MemberShape, Signature};
 
     #[test]
     fn coverage_keeps_only_rows_that_cover_something() {
@@ -202,9 +201,7 @@ mod tests {
         ];
         let rows = |rows: &[(Author, usize)]| BundleMeta {
             id: ItemId::Commit(CommitHash::from([0; 32])),
-            shape: FragmentShape {
-                members: members.clone(),
-            },
+            members: members.clone(),
             evidence: rows
                 .iter()
                 .map(|&(author, member)| Evidence {
@@ -261,7 +258,7 @@ mod tests {
             .collect();
         let meta = BundleMeta {
             id: ItemId::Commit(CommitHash::from([0; 32])),
-            shape: FragmentShape { members },
+            members,
             evidence,
         };
         let expected: Vec<usize> = last
@@ -285,7 +282,7 @@ mod tests {
 
         // Without the last author's signatures, the last member is uncovered.
         let mut meta = meta;
-        let author = meta.shape.members[n - 1].author;
+        let author = meta.members[n - 1].author;
         meta.evidence.retain(|e| e.author != author);
         assert_eq!(coverage(&meta), Err((author, n - 1)));
     }

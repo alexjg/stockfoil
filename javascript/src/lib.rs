@@ -7,9 +7,9 @@
 //! The host loop, codecs, and storage live in the TypeScript wrapper.
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use stockfoil_core::{
-    Author, BlobHash, BundleMeta, Change, CommitHash, Counts, DecodeNext, DecodeStatus, Delivered,
-    Error, FormatId, Heads, ItemId, Limits, Next, ParentRef, PayloadId, Receipt, ReceiveOptions,
-    Reply, ReplyError, Request, Signature, Ticket, Vis, WritePermission, WritePermissions,
+    Author, BundleMeta, Change, CommitHash, Counts, DecodeNext, DecodeStatus, Delivered, Error,
+    FormatId, Heads, ItemId, Limits, Next, ParentRef, PayloadId, Receipt, ReceiveOptions, Reply,
+    ReplyError, Request, Signature, Ticket, Vis, WritePermission, WritePermissions,
 };
 use wasm_bindgen::prelude::*;
 
@@ -136,13 +136,12 @@ fn item_ids<'a>(ids: impl IntoIterator<Item = &'a ItemId>) -> Array {
     ids.into_iter().map(item_id).collect()
 }
 
-/// `{ id, members: [{ author, parents: (number | Uint8Array)[] }], evidence }`.
+/// `{ id, members: [{ author, parents: (number | Uint8Array)[] }] }`.
 /// A numeric parent is an earlier member's index; bytes are an external hash.
 fn meta(meta: &BundleMeta) -> JsValue {
     let o = Object::new();
     set(&o, "id", item_id(&meta.id));
     let members: Array = meta
-        .shape
         .members
         .iter()
         .map(|m| {
@@ -161,18 +160,6 @@ fn meta(meta: &BundleMeta) -> JsValue {
         })
         .collect();
     set(&o, "members", members);
-    let evidence: Array = meta
-        .evidence
-        .iter()
-        .map(|e| {
-            let ev = Object::new();
-            set(&ev, "author", bytes(e.author.as_slice()));
-            set(&ev, "member", e.member as f64);
-            set(&ev, "signature", bytes(e.signature.as_slice()));
-            JsValue::from(ev)
-        })
-        .collect();
-    set(&o, "evidence", evidence);
     o.into()
 }
 
@@ -441,37 +428,6 @@ fn limits(value: &JsValue) -> Result<Limits> {
     Ok(limits)
 }
 
-// ---- free functions ----
-
-/// BLAKE3 of `data`: the content address of a stored blob.
-#[wasm_bindgen(js_name = blobHash)]
-pub fn blob_hash_of(data: &[u8]) -> Uint8Array {
-    Uint8Array::from(BlobHash::of_contents(data).as_slice())
-}
-
-/// Parse a stored item's header from its first bytes. Returns `undefined`
-/// until `prefix` holds the whole header, then `{ length, meta }`, where
-/// `length` is where the encoded body starts.
-#[wasm_bindgen(js_name = readHeader)]
-pub fn read_header(prefix: &[u8], format: &str, limits_js: JsValue) -> Result<JsValue> {
-    let limits = limits(&limits_js)?;
-    let Some(length) = core(stockfoil_core::wire::header_len(prefix, &limits))? else {
-        return Ok(JsValue::UNDEFINED);
-    };
-    if prefix.len() < length {
-        return Ok(JsValue::UNDEFINED);
-    }
-    let decoded = core(stockfoil_core::wire::decode_header(
-        &prefix[..length],
-        &format_id(format)?,
-        &limits,
-    ))?;
-    let o = Object::new();
-    set(&o, "length", length as f64);
-    set(&o, "meta", meta(&decoded));
-    Ok(o.into())
-}
-
 // ---- History ----
 
 /// Authenticated commit history. See the core `History` docs.
@@ -665,7 +621,7 @@ impl JsHistory {
     #[wasm_bindgen(js_name = exportItem)]
     pub fn export_item(&self, plan: &ExportPlan, index: usize, format: &str) -> Result<JsValue> {
         let item = core(self.inner.export_item(&plan.0, index))?;
-        let header = stockfoil_core::wire::encode_header(&item.meta, &format_id(format)?);
+        let header = item.encode_header(&format_id(format)?);
         let o = Object::new();
         set(&o, "id", item_id(&item.meta.id));
         set(&o, "header", bytes(&header));
@@ -793,23 +749,6 @@ impl Prepared {
     #[wasm_bindgen(getter, js_name = signingBytes)]
     pub fn signing_bytes(&self) -> Uint8Array {
         Uint8Array::from(self.0.signing_bytes().as_slice())
-    }
-    #[wasm_bindgen(getter)]
-    pub fn author(&self) -> Uint8Array {
-        Uint8Array::from(self.0.author.as_slice())
-    }
-    #[wasm_bindgen(getter)]
-    pub fn parents(&self) -> Array {
-        hash_array(self.0.parents.iter().copied())
-    }
-    #[wasm_bindgen(getter, js_name = payloadHash)]
-    pub fn payload_hash(&self) -> Uint8Array {
-        Uint8Array::from(self.0.payload_hash.as_slice())
-    }
-    /// Canonical payload length in bytes.
-    #[wasm_bindgen(getter)]
-    pub fn length(&self) -> f64 {
-        self.0.len as f64
     }
 }
 

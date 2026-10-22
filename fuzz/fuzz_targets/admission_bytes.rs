@@ -16,6 +16,7 @@ use libfuzzer_sys::fuzz_target;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use stockfoil::*;
+use stockfoil_core::wire;
 use stockfoil_fuzz::codec::*;
 use stockfoil_fuzz::host::*;
 use stockfoil_fuzz::model::Dag;
@@ -203,7 +204,7 @@ fn craft(u: &mut Unstructured, t: &Templates) -> Result<Crafted> {
         let (i, k) = (u.choose_index(n)?, u.choose_index(3)?);
         evidence.push(Evidence { author: author(&keys[k]), member: i, signature: sign(&keys[k], &hashes[i]) });
     }
-    let meta = BundleMeta { id, shape: FragmentShape { members: shape }, evidence };
+    let meta = BundleMeta { id, members: shape, evidence };
     let mut bytes = wire::encode_header(&meta, &format());
     bytes.extend(chunk_body(payloads.iter().map(|p| p.as_slice())));
     let mut intact = true;
@@ -270,7 +271,7 @@ fn invalid_reason(c: &Crafted) -> Option<&'static str> {
             if std::mem::replace(&mut seen[i], true) {
                 continue;
             }
-            for p in &meta.shape.members[i].parents {
+            for p in &meta.members[i].parents {
                 if let ParentRef::Member(j) = p {
                     stack.push(*j);
                 }
@@ -280,7 +281,7 @@ fn invalid_reason(c: &Crafted) -> Option<&'static str> {
     };
     for i in 0..n {
         let covered = meta.evidence.iter().any(|e| {
-            e.author == meta.shape.members[i].author && reach(e.member)[i]
+            e.author == meta.members[i].author && reach(e.member)[i]
         });
         if !covered {
             return Some("uncovered member");
@@ -310,7 +311,7 @@ fn invalid_reason(c: &Crafted) -> Option<&'static str> {
             if c.hashes.iter().any(|m| *m != head && depth(m) >= level) {
                 return Some("deep member");
             }
-            for p in meta.shape.members.iter().flat_map(|m| &m.parents) {
+            for p in meta.members.iter().flat_map(|m| &m.parents) {
                 if let ParentRef::External(x) = p {
                     if members.contains(x) {
                         return Some("external is a member");
@@ -322,7 +323,7 @@ fn invalid_reason(c: &Crafted) -> Option<&'static str> {
             }
         }
     }
-    for p in meta.shape.members.iter().flat_map(|m| &m.parents) {
+    for p in meta.members.iter().flat_map(|m| &m.parents) {
         if let ParentRef::External(x) = p
             && members.contains(x)
         {
@@ -336,7 +337,6 @@ fn invalid_reason(c: &Crafted) -> Option<&'static str> {
 fn placeable(c: &Crafted, dag: &Dag) -> bool {
     let externals: BTreeSet<CommitHash> = c
         .meta
-        .shape
         .members
         .iter()
         .flat_map(|m| &m.parents)

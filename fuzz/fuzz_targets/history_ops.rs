@@ -13,7 +13,8 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 use stockfoil::*;
 use stockfoil_fuzz::codec::*;
-use stockfoil_fuzz::model::{Dag, check_changes, check_diff};
+use stockfoil_core::wire;
+use stockfoil_fuzz::model::{Dag, check_changes};
 
 #[derive(Arbitrary, Debug)]
 enum HeadSel {
@@ -38,7 +39,6 @@ enum Op {
     Send { from: bool, order: Vec<u8>, take: u8 },
     Retry { r: bool },
     Changes { r: bool, mat: bool, heads: HeadSel, perms: [Perm; 3], batch: u8 },
-    Diff { r: bool, a: HeadSel, pa: [Perm; 3], b: HeadSel, pb: [Perm; 3] },
     SyncAll,
 }
 
@@ -130,7 +130,7 @@ impl World {
                 let existed = rep.g.history().lookup(&commit_hash(&parents, &author(key), &bytes));
                 let p = rep.g.commit(author(key), parents.clone(), bytes.as_slice()).expect("local commit failed");
                 assert_eq!(p.hash, commit_hash(&parents, &author(key), &bytes), "commit identity rule");
-                assert_eq!(p.parents, parents);
+                assert_eq!(rep.g.history().parents(&p.hash).unwrap().collect::<Vec<_>>(), parents);
                 let info = rep.g.history().lookup(&p.hash).expect("commit not delivered");
                 assert_eq!(info.author, author(key));
                 match existed {
@@ -202,18 +202,7 @@ impl World {
                 let next = check_changes(h, &dag, &cursor, &target, (*batch as usize % 9).max(1));
                 let bytes = next.to_bytes();
                 assert_eq!(MaterializationCursor::from_bytes(&bytes).as_ref(), Ok(&next));
-                // traverse_since agrees with the model.
-                let excluded = dag.ancestry_of_hashes(target.heads());
-                let expected: Vec<_> = (0..dag.len()).filter(|&i| !excluded.contains(i)).map(|i| dag.hashes[i]).collect();
-                let mut since = target.heads().to_vec();
-                since.push(CommitHash::from([0xcd; 32]));
-                assert_eq!(h.traverse_since(&since), expected, "traverse_since");
                 self.reps[*r as usize].mats[*mat as usize] = next;
-            }
-            Op::Diff { r, a, pa, b, pb } => {
-                let (va, vb) = (self.view(*r as usize, a, pa), self.view(*r as usize, b, pb));
-                let h = self.reps[*r as usize].g.history();
-                check_diff(h, &Dag::of(h), &va, &vb);
             }
             Op::SyncAll => self.sync_all(),
         }

@@ -309,7 +309,7 @@ impl<C: Codec<S>, S: Storage> Graph<C, S> {
         mut out: impl Write,
     ) -> Result<u64, Error> {
         let item = self.history.export_item(plan, index)?;
-        let header = crate::wire::encode_header(&item.meta, self.codec.format());
+        let header = item.encode_header(self.codec.format());
         out.write_all(&header).map_err(storage_error)?;
         let mut encoder = self
             .codec

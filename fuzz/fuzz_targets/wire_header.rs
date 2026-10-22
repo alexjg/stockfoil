@@ -9,6 +9,7 @@
 use arbitrary::{Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use stockfoil::*;
+use stockfoil_core::wire;
 use stockfoil_fuzz::codec::format;
 
 fn limits(sel: &[u8]) -> Limits {
@@ -48,9 +49,9 @@ fn round_trip(meta: &BundleMeta, fmt: &FormatId, limits: &Limits) {
 }
 
 fn check_limits(meta: &BundleMeta, limits: &Limits) {
-    let n = meta.shape.members.len();
+    let n = meta.members.len();
     assert!(n >= 1 && n <= limits.max_members, "decoded member count outside limits");
-    let parents: usize = meta.shape.members.iter().map(|m| m.parents.len()).sum();
+    let parents: usize = meta.members.iter().map(|m| m.parents.len()).sum();
     assert!(parents <= limits.max_parents, "decoded parent count outside limits");
     assert!(meta.evidence.len() <= limits.max_signatures);
     if let ItemId::Fragment(r) = &meta.id {
@@ -58,7 +59,7 @@ fn check_limits(meta: &BundleMeta, limits: &Limits) {
     } else {
         assert_eq!(n, 1, "decoded commit with several members");
     }
-    for (i, m) in meta.shape.members.iter().enumerate() {
+    for (i, m) in meta.members.iter().enumerate() {
         for p in &m.parents {
             if let ParentRef::Member(j) = p {
                 assert!(*j < i, "decoded member parent is not earlier");
@@ -145,7 +146,7 @@ fn meta_mode(u: &mut Unstructured) -> Result<()> {
     };
     let name: String = u.arbitrary()?;
     let fmt = FormatId::new(&name).unwrap_or_else(|_| format());
-    let meta = BundleMeta { id, shape: FragmentShape { members }, evidence };
+    let meta = BundleMeta { id, members, evidence };
     round_trip(&meta, &fmt, &Limits::default());
     // A different expected format is rejected.
     if fmt != format() {

@@ -2,9 +2,10 @@
 //! minus those a later fragment fully covers. An export cursor records which
 //! inventory items a destination has acknowledged.
 use super::{History, NodeIdx, SignatureEvidence};
+use crate::meta::Evidence;
 use crate::{
-    BundleMeta, CommitHash, Error, Evidence, FragmentRange, FragmentShape, ItemId, MemberShape,
-    ParentRef, PayloadId,
+    BundleMeta, CommitHash, Error, FormatId, FragmentRange, ItemId, MemberShape, ParentRef,
+    PayloadId,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -161,6 +162,13 @@ pub struct ExportItem {
     pub members: Vec<(CommitHash, PayloadId)>,
 }
 
+impl ExportItem {
+    /// Serialize the wire v2 header for this item under `format`.
+    pub fn encode_header(&self, format: &FormatId) -> Vec<u8> {
+        crate::wire::encode_header(&self.meta, format)
+    }
+}
+
 impl History {
     /// Plan an export relative to what a destination has acknowledged.
     pub fn export(&self, cursor: &ExportCursor) -> ExportPlan {
@@ -236,7 +244,7 @@ impl History {
         Ok(ExportItem {
             meta: Arc::new(BundleMeta {
                 id: certificate.id.clone(),
-                shape: FragmentShape { members: shape },
+                members: shape,
                 evidence,
             }),
             members: members

@@ -70,7 +70,6 @@ fn build() -> Templates {
                     let hashes: Vec<_> = item.members.iter().map(|(h, _)| *h).collect();
                     let mut deps: BTreeSet<_> = item
                         .meta
-                        .shape
                         .members
                         .iter()
                         .flat_map(|m| &m.parents)

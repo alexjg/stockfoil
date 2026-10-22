@@ -295,24 +295,3 @@ pub fn check_changes(
     next
 }
 
-/// Check a participation diff against the model.
-pub fn check_diff(h: &History, dag: &Dag, before: &ViewPoint, after: &ViewPoint) {
-    let diff = h.diff(before, after).expect("diff with delivered heads failed");
-    let (b, a) = (dag.participation(before), dag.participation(after));
-    let mut expected = Vec::new();
-    for i in 0..dag.len() {
-        let vis = match (b.contains(i), a.contains(i)) {
-            (true, true) => Vis::Both,
-            (true, false) => Vis::Before,
-            (false, true) => Vis::After,
-            (false, false) => Vis::Neither,
-        };
-        assert_eq!(diff.visibility(&dag.hashes[i]).unwrap(), vis, "ViewDiff::visibility differs");
-        match vis {
-            Vis::Before => expected.push(CommitDiff { commit: dag.hashes[i], change: VisDiff::Before }),
-            Vis::After => expected.push(CommitDiff { commit: dag.hashes[i], change: VisDiff::After }),
-            _ => {}
-        }
-    }
-    assert_eq!(diff.changed_commits(), expected, "ViewDiff::changed_commits differs");
-}

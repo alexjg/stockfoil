@@ -154,25 +154,6 @@ fn topology_queries_match_the_model() {
             let expected = a != b && model.ancestry(&[b]).contains(&a);
             assert_eq!(history.is_ancestor(&a, &b), expected, "seed {seed}");
         }
-        for _ in 0..20 {
-            let since: Vec<_> = (0..rng.random_range(0..3usize))
-                .map(|_| model.order[rng.random_range(0..model.order.len())])
-                .chain([CommitHash::from([9; 32])])
-                .collect();
-            let excluded = model.ancestry(&since);
-            let expected: Vec<_> = model
-                .order
-                .iter()
-                .filter(|h| !excluded.contains(*h))
-                .copied()
-                .collect();
-            let got = history.traverse_since(&since);
-            assert_eq!(
-                got.iter().collect::<HashSet<_>>(),
-                expected.iter().collect::<HashSet<_>>()
-            );
-            assert_topological(&model, &got);
-        }
     }
 }
 
@@ -246,39 +227,6 @@ fn change_batches_match_the_model() {
                 next
             );
             cursor = next;
-        }
-    }
-}
-
-#[test]
-fn diff_matches_the_model() {
-    for seed in 0..10 {
-        let (history, model, keys) = random_history(seed, 80);
-        let mut rng = StdRng::seed_from_u64(seed + 3000);
-        for _ in 0..20 {
-            let a = random_view(&mut rng, &model, &keys);
-            let b = random_view(&mut rng, &model, &keys);
-            let diff = history.diff(&a, &b).unwrap();
-            let (pa, pb) = (model.participation(&a), model.participation(&b));
-            let changed: BTreeSet<_> = diff
-                .changed_commits()
-                .iter()
-                .map(|d| (d.commit, d.change == VisDiff::After))
-                .collect();
-            let expected: BTreeSet<_> = pa
-                .symmetric_difference(&pb)
-                .map(|h| (*h, pb.contains(h)))
-                .collect();
-            assert_eq!(changed, expected);
-            for h in model.order.iter().take(10) {
-                let expected = match (pa.contains(h), pb.contains(h)) {
-                    (true, false) => Vis::Before,
-                    (false, true) => Vis::After,
-                    (true, true) => Vis::Both,
-                    (false, false) => Vis::Neither,
-                };
-                assert_eq!(diff.visibility(h).unwrap(), expected);
-            }
         }
     }
 }

@@ -19,10 +19,7 @@ pub use export::{ExportCursor, ExportItem, ExportPlan};
 pub use local::{CommitBuilder, PayloadCheck, Prepared};
 pub(crate) use publish::Readiness;
 pub use publish::Receipt;
-pub use view::{
-    Batch, Change, Changes, CommitDiff, MaterializationCursor, ViewDiff, ViewPoint, Vis, VisDiff,
-    WritePermissions,
-};
+pub use view::{Batch, Change, Changes, MaterializationCursor, ViewPoint, Vis, WritePermissions};
 
 use crate::meta::depth;
 use crate::{Author, CommitHash, Error, ItemId, PayloadId, Signature};
@@ -285,7 +282,6 @@ impl History {
         idx
     }
 
-    /// Admission is parent-closed, so a newly admitted node has no admitted children.
     fn mark_admitted(&mut self, idx: NodeIdx) {
         if self.node(idx).admitted {
             return;
@@ -448,15 +444,6 @@ impl History {
             .find(|p| !self.by_hash.contains_key(*p))
         {
             return Err(Error::MissingParent(*missing));
-        }
-        // `Prepared` is plain data; its hash must still bind its contents.
-        let hash = crate::meta::commit_hash(
-            prepared.parents.iter(),
-            &prepared.author,
-            &prepared.payload_hash,
-        );
-        if hash != prepared.hash {
-            return Err(Error::InvalidItem("prepared hash does not match its contents"));
         }
         self.insert(
             prepared.hash,

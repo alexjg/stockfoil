@@ -15,8 +15,7 @@ fn meta() -> BundleMeta {
             head: CommitHash::from([0; 32]),
             boundary: [x].into_iter().collect(),
         }),
-        shape: FragmentShape {
-            members: vec![
+        members: vec![
                 MemberShape {
                     author: a,
                     parents: vec![ParentRef::External(x), ParentRef::External(y)],
@@ -33,8 +32,7 @@ fn meta() -> BundleMeta {
                     author: a,
                     parents: vec![],
                 },
-            ],
-        },
+        ],
         evidence: vec![
             Evidence {
                 author: b,
@@ -139,12 +137,10 @@ fn standalone_commits_have_one_member_and_no_boundary() {
     let a = Author::try_from(&[1u8; 32][..]).unwrap();
     let m = BundleMeta {
         id: ItemId::Commit(CommitHash::from([3; 32])),
-        shape: FragmentShape {
-            members: vec![MemberShape {
-                author: a,
-                parents: vec![],
-            }],
-        },
+        members: vec![MemberShape {
+            author: a,
+            parents: vec![],
+        }],
         evidence: vec![],
     };
     let bytes = encode_header(&m, &format());
@@ -153,7 +149,7 @@ fn standalone_commits_have_one_member_and_no_boundary() {
         m
     );
     let mut two = m.clone();
-    two.shape.members.push(two.shape.members[0].clone());
+    two.members.push(two.members[0].clone());
     let bytes = encode_header(&two, &format());
     assert!(decode_header(&bytes, &format(), &Limits::default()).is_err());
 }

@@ -7,9 +7,10 @@
 //! The header is wire v1's columnar metadata layout without the body field.
 //! Items are delimited by their storage or transport, not by this format.
 use crate::reader::Reader;
+use crate::meta::Evidence;
 use crate::{
-    Author, BundleMeta, CommitHash, Error, Evidence, FormatId, FragmentRange, FragmentShape,
-    ItemId, Limits, MemberShape, ParentRef, Signature,
+    Author, BundleMeta, CommitHash, Error, FormatId, FragmentRange, ItemId, Limits, MemberShape,
+    ParentRef, Signature,
 };
 use hexane::{Codec as _, Leb128};
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,7 +172,7 @@ pub fn encode_header(meta: &BundleMeta, format: &FormatId) -> Vec<u8> {
     for b in &boundary {
         h.extend(b.as_bytes());
     }
-    let members = &meta.shape.members;
+    let members = &meta.members;
     put(&mut h, members.len());
     let authors: BTreeMap<Author, usize> = members
         .iter()
@@ -396,7 +397,7 @@ pub fn decode_header(
         } else {
             ItemId::Commit(head)
         },
-        shape: FragmentShape { members },
+        members,
         evidence,
     })
 }

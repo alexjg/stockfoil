@@ -15,7 +15,7 @@ fn main() {
     let t = templates();
     for (i, item) in t.items.iter().enumerate() {
         let stage = t.stages.iter().position(|s| s.contains(&i)).unwrap();
-        let n = wire::header_len(&item.bytes, &Limits::default()).unwrap().unwrap();
+        let n = header_len(&item.bytes, &Limits::default()).unwrap().unwrap();
         // wire_header: decode mode with roomy limits, header alone and whole item.
         let mut seed = vec![0, 8, 240, 240, 240, 240];
         seed.extend(&item.bytes[..n]);

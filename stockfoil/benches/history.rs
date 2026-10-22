@@ -124,13 +124,6 @@ fn main() {
     });
     println!("    {count} records");
 
-    let since: Vec<_> = history.heads(Heads::Delivered).collect();
-    grow(&mut history, 100, 11);
-    let found = time("traverse_since(previous heads) after 100 commits", || {
-        history.traverse_since(&since)
-    });
-    assert_eq!(found.len(), 100);
-
     let heads: Vec<_> = history.heads(Heads::Delivered).collect();
     let old = history.traverse().nth(n / 2).unwrap();
     time("1000 is_ancestor queries (old vs head)", || {
@@ -138,17 +131,6 @@ fn main() {
             assert!(history.is_ancestor(&old, &heads[0]));
         }
     });
-
-    let historical = ViewPoint::from_parts(vec![old], permissions.clone());
-    let current = history.view_point(&permissions);
-    let diff = time("diff(historical midpoint, current)", || {
-        history
-            .diff(&historical, &current)
-            .unwrap()
-            .changed_commits()
-            .len()
-    });
-    println!("    {diff} changed");
 
     signing_and_admission();
 }

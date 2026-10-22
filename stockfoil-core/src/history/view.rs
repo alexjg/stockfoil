@@ -45,57 +45,6 @@ pub enum Vis {
     Neither,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VisDiff {
-    Before,
-    After,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommitDiff {
-    pub commit: CommitHash,
-    pub change: VisDiff,
-}
-
-/// Participation changes between two views of one history.
-#[derive(Debug)]
-pub struct ViewDiff<'h> {
-    history: &'h History,
-    before: Clock,
-    after: Clock,
-}
-
-impl ViewDiff<'_> {
-    pub fn visibility(&self, commit: &CommitHash) -> Result<Vis, Error> {
-        let idx = *self
-            .history
-            .by_hash
-            .get(commit)
-            .ok_or(Error::UnknownCommit(*commit))?;
-        Ok(self.history.visibility(&self.before, &self.after, idx))
-    }
-
-    /// Commits whose participation differs, parents first.
-    pub fn changed_commits(&self) -> Vec<CommitDiff> {
-        let mut changed = Vec::new();
-        clock::symmetric_difference(&self.history.chain_nodes, &self.before, &self.after, |i| {
-            changed.push(i)
-        });
-        changed.sort_unstable();
-        changed
-            .into_iter()
-            .map(|idx| CommitDiff {
-                commit: self.history.node(idx).hash,
-                change: if self.history.contains(&self.before, idx) {
-                    VisDiff::Before
-                } else {
-                    VisDiff::After
-                },
-            })
-            .collect()
-    }
-}
-
 /// A materializer's completed progress: the history it has been told about and
 /// the view it materialized. Persist it atomically with the materialized state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -230,17 +179,8 @@ impl History {
         self.view(Heads::Admitted, permissions)
     }
 
-    pub fn view(&self, heads: Heads, permissions: &WritePermissions) -> ViewPoint {
+    fn view(&self, heads: Heads, permissions: &WritePermissions) -> ViewPoint {
         ViewPoint::from_parts(self.heads(heads).collect(), permissions.clone())
-    }
-
-    /// Participation-only comparison. Every head of both views must be delivered.
-    pub fn diff(&self, before: &ViewPoint, after: &ViewPoint) -> Result<ViewDiff<'_>, Error> {
-        Ok(ViewDiff {
-            history: self,
-            before: self.participation(before)?,
-            after: self.participation(after)?,
-        })
     }
 
     /// Start a change traversal from a materializer's cursor to `target`.
@@ -311,25 +251,6 @@ impl History {
     /// Every delivered commit, parents first, drafts included.
     pub fn traverse(&self) -> impl Iterator<Item = CommitHash> + '_ {
         self.nodes.iter().map(|n| n.hash)
-    }
-
-    /// Delivered commits outside the ancestry of `since`, parents first.
-    /// Hashes in `since` that are not delivered are ignored.
-    pub fn traverse_since(&self, since: &[CommitHash]) -> Vec<CommitHash> {
-        let known: Vec<_> = since
-            .iter()
-            .filter_map(|h| self.by_hash.get(h).copied())
-            .collect();
-        let excluded = self.clock_for_heads(&known);
-        let mut found = Vec::new();
-        clock::difference(
-            &self.chain_nodes,
-            &Clock::from_tips(&self.chain_tips),
-            &excluded,
-            |i| found.push(i),
-        );
-        found.sort_unstable();
-        found.into_iter().map(|i| self.node(i).hash).collect()
     }
 
     fn visibility(&self, before: &Clock, after: &Clock, idx: NodeIdx) -> Vis {

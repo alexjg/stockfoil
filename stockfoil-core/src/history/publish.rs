@@ -107,7 +107,7 @@ impl History {
                 }
             } else {
                 let parents: Vec<_> = verified.parents(i).collect();
-                let author = verified.meta.shape.members[i].author;
+                let author = verified.meta.members[i].author;
                 let payload = payloads[i];
                 indices.push(self.insert(hash, author, &parents, payload, true));
                 Delivered {

@@ -407,6 +407,7 @@ dependencies = [
 name = "stockfoil"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "stockfoil-core",
 ]
 
@@ -429,6 +430,7 @@ dependencies = [
  "ed25519-dalek",
  "libfuzzer-sys",
  "stockfoil",
+ "stockfoil-core",
 ]
 
 [[package]]

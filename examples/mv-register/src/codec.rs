@@ -23,7 +23,7 @@ use std::io;
 use std::sync::Arc;
 use stockfoil::{
     BlobHash, BundleMeta, Codec, DecodeProgress, DecodeStatus, Decoder, EncodeProgress, Encoder,
-    ExportItem, FormatId, Limits, PayloadId, PayloadLocation, Storage, wire,
+    ExportItem, FormatId, Limits, PayloadId, PayloadLocation, Storage, header_len,
 };
 
 /// Longest key an assignment may have.
@@ -377,7 +377,7 @@ impl MemberReader {
                 // The magic and header length fit in 16 bytes; skip the header.
                 let mut prefix = [0u8; 16];
                 let n = storage.read_at(&self.item, 0, &mut prefix)?;
-                let len = wire::header_len(&prefix[..n], &Limits::default())
+                let len = header_len(&prefix[..n], &Limits::default())
                     .map_err(io::Error::other)?
                     .ok_or_else(|| invalid("truncated item"))?;
                 *self.offset.insert(len as u64)
@@ -739,12 +739,7 @@ mod tests {
         let mut storage = MemoryStorage::new();
         let body = encode(&mut storage, &members, 4096);
         // A stored item is a wire header followed by the body.
-        let meta = BundleMeta {
-            id: stockfoil::ItemId::Commit(stockfoil::CommitHash::from([1; 32])),
-            shape: stockfoil::FragmentShape { members: vec![] },
-            evidence: vec![],
-        };
-        let mut item = wire::encode_header(&meta, &FormatId::new(FORMAT).unwrap());
+        let mut item = b"STKF\x02\x00".to_vec();
         item.extend_from_slice(&body);
         let item = storage.insert(item);
         let mut reader: Option<PayloadReader> = None;

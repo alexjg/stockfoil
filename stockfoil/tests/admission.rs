@@ -357,7 +357,7 @@ fn dropping_an_operation_leaves_history_untouched() {
 fn tampered_items_are_rejected() {
     let (items, _) = items();
     let bytes = fragment(&items);
-    let header = wire::header_len(&bytes, &Limits::default())
+    let header = header_len(&bytes, &Limits::default())
         .unwrap()
         .unwrap();
 

@@ -8,12 +8,12 @@
  */
 import {
   Admission, Changes, CommitBuilder, DecodeItem, ExportCursor, ExportPlan, History,
-  MaterializationCursor, PayloadCheck, Prepared, ViewPoint, blobHash, readHeader,
+  MaterializationCursor, PayloadCheck, Prepared, ViewPoint,
 } from "#wasm-bodge/bindings";
 
 export {
   Admission, Changes, CommitBuilder, DecodeItem, ExportCursor, ExportPlan, History,
-  MaterializationCursor, PayloadCheck, Prepared, ViewPoint, blobHash, readHeader,
+  MaterializationCursor, PayloadCheck, Prepared, ViewPoint,
 };
 
 // ---- shapes of the owned values the core returns ----
@@ -31,7 +31,6 @@ export type ItemId =
 export interface BundleMeta {
   id: ItemId;
   members: { author: Bytes; parents: (number | Bytes)[] }[];
-  evidence: { author: Bytes; member: number; signature: Bytes }[];
 }
 
 export interface Delivered { hash: Bytes; payload: PayloadId; newlyDelivered: boolean }
@@ -309,18 +308,18 @@ export const hex = (bytes: Uint8Array): string =>
   Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 
 /**
- * In-memory `Storage`, keyed by the hex BLAKE3 hash of each blob. `firstId`
- * sets the first payload ID handed out.
+ * In-memory `Storage`. `firstId` sets the first payload ID handed out.
  */
 export class MemoryStorage implements Storage {
   readonly blobs = new Map<Key, Uint8Array>();
   readonly locations = new Map<PayloadId, PayloadLocation>();
+  private nextKey = 0;
   private nextId: PayloadId;
   constructor(options: { firstId?: PayloadId } = {}) {
     this.nextId = options.firstId ?? 0n;
   }
   put(bytes: Uint8Array): Key {
-    const key = hex(blobHash(bytes));
+    const key = `blob-${this.nextKey++}`;
     this.blobs.set(key, bytes.slice());
     return key;
   }

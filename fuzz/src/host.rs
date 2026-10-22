@@ -207,7 +207,7 @@ impl Host {
                 let item = history
                     .export_item(&plan, i)
                     .expect("planned item cannot be exported");
-                let mut bytes = wire::encode_header(&item.meta, &format());
+                let mut bytes = item.encode_header(&format());
                 let payloads: Vec<&[u8]> = item
                     .members
                     .iter()

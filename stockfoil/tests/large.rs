@@ -119,7 +119,8 @@ fn peak_rss_kib() -> Option<u64> {
 fn payload_over_four_gib_streams_with_bounded_memory() {
     let alice = key(1);
     // Commit identity requires the payload hash: stream it once.
-    let mut builder = History::new().begin_commit(author(&alice), vec![]).unwrap();
+    let mut sender = History::new();
+    let mut builder = sender.begin_commit(author(&alice), vec![]).unwrap();
     let mut buf = vec![0u8; CHUNK as usize];
     let mut offset = 0;
     while offset < payload_len() {
@@ -129,23 +130,18 @@ fn payload_over_four_gib_streams_with_bounded_memory() {
         offset += n as u64;
     }
     let prepared = builder.finish();
-    assert_eq!(prepared.len, payload_len());
-    let meta = BundleMeta {
-        id: ItemId::Commit(prepared.hash),
-        shape: FragmentShape {
-            members: vec![MemberShape {
-                author: author(&alice),
-                parents: vec![],
-            }],
-        },
-        evidence: vec![Evidence {
-            author: author(&alice),
-            member: 0,
-            signature: sign(&alice, &prepared.hash),
-        }],
-    };
+    let hash = prepared.hash;
+    sender.publish_commit(prepared, 0).unwrap();
+    sender
+        .sign(author(&alice), hash, sign(&alice, &hash))
+        .unwrap();
+    let plan = sender.export(&ExportCursor::new());
+    let header = sender
+        .export_item(&plan, 0)
+        .unwrap()
+        .encode_header(&format());
     let storage = Synthetic {
-        header: wire::encode_header(&meta, &format()),
+        header,
         bound: vec![],
     };
     drop(buf);
@@ -154,13 +150,13 @@ fn payload_over_four_gib_streams_with_bounded_memory() {
     let mut graph = Graph::new(ChunkCodec::default(), storage);
     let receipt = graph.admit(&()).unwrap();
     assert_eq!(receipt.members.len(), 1);
-    assert!(graph.history().is_admitted(&prepared.hash));
+    assert!(graph.history().is_admitted(&hash));
     assert_eq!(
         graph
             .history()
             .heads(Heads::Admitted)
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([prepared.hash])
+        BTreeSet::from([hash])
     );
     if let (Some(before), Some(after)) = (before, peak_rss_kib()) {
         println!("peak RSS before {before} KiB, after {after} KiB");

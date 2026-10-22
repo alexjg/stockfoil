@@ -1,5 +1,5 @@
 //! Structural metadata shared by the wire format, verification, history, and codecs.
-use crate::{Author, BlobHash, CommitHash, Error, Signature};
+use crate::{Author, CommitHash, Error, Signature};
 use std::collections::BTreeSet;
 
 /// Application logical payload ID. Stockfoil only stores and returns it.
@@ -29,12 +29,6 @@ impl ItemId {
     }
 }
 
-/// Ancestors-first member structure, as supplied to application codecs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FragmentShape {
-    pub members: Vec<MemberShape>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberShape {
     pub author: Author,
@@ -52,7 +46,17 @@ pub enum ParentRef {
 
 /// A signature by `author` over the hash of member `member`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "fuzzing")]
 pub struct Evidence {
+    pub author: Author,
+    pub member: usize,
+    pub signature: Signature,
+}
+
+/// A signature by `author` over the hash of member `member`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) struct Evidence {
     pub author: Author,
     pub member: usize,
     pub signature: Signature,
@@ -63,16 +67,20 @@ pub struct Evidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BundleMeta {
     pub id: ItemId,
-    pub shape: FragmentShape,
+    /// Ancestors-first member structure.
+    pub members: Vec<MemberShape>,
+    #[cfg(feature = "fuzzing")]
     pub evidence: Vec<Evidence>,
+    #[cfg(not(feature = "fuzzing"))]
+    pub(crate) evidence: Vec<Evidence>,
 }
 
 impl BundleMeta {
     pub fn len(&self) -> usize {
-        self.shape.members.len()
+        self.members.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.shape.members.is_empty()
+        self.members.is_empty()
     }
     pub fn head(&self) -> CommitHash {
         self.id.head()
@@ -148,9 +156,9 @@ impl CommitHasher {
     pub fn parent(&mut self, parent: &CommitHash) {
         self.0.update(parent.as_bytes());
     }
-    pub fn finish(mut self, author: &Author, payload: &BlobHash) -> CommitHash {
+    pub fn finish(mut self, author: &Author, payload: &[u8; 32]) -> CommitHash {
         self.0.update(author.as_slice());
-        self.0.update(payload.as_slice());
+        self.0.update(payload);
         CommitHash::from(self.0.finalize())
     }
 }
@@ -158,7 +166,7 @@ impl CommitHasher {
 pub(crate) fn commit_hash<'a>(
     parents: impl ExactSizeIterator<Item = &'a CommitHash>,
     author: &Author,
-    payload: &BlobHash,
+    payload: &[u8; 32],
 ) -> CommitHash {
     let mut hasher = CommitHasher::new(parents.len());
     for parent in parents {

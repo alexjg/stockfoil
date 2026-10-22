@@ -3,7 +3,8 @@
 use super::export::{Certificate, Key};
 use super::{History, NodeIdx, SignatureEvidence};
 use crate::evidence::coverage;
-use crate::{BundleMeta, Evidence, FragmentRange, FragmentShape, ItemId, MemberShape, ParentRef};
+use crate::meta::Evidence;
+use crate::{BundleMeta, FragmentRange, ItemId, MemberShape, ParentRef};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -138,7 +139,7 @@ impl History {
         }
         let meta = BundleMeta {
             id,
-            shape: FragmentShape { members: shape },
+            members: shape,
             evidence,
         };
         let Ok(rows) = coverage(&meta) else {

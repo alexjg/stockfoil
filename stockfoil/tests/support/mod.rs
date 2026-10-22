@@ -182,7 +182,7 @@ impl<K: Clone> PayloadSource<K> {
                     let mut prefix = Vec::new();
                     let mut buf = [0u8; 4096];
                     let len = loop {
-                        if let Some(len) = wire::header_len(&prefix, &Limits::default())
+                        if let Some(len) = header_len(&prefix, &Limits::default())
                             .map_err(io::Error::other)?
                             && prefix.len() >= len
                         {
@@ -194,10 +194,8 @@ impl<K: Clone> PayloadSource<K> {
                         }
                         prefix.extend_from_slice(&buf[..n]);
                     };
-                    let meta = wire::decode_header(&prefix[..len], &format(), &Limits::default())
-                        .map_err(io::Error::other)?;
                     self.offset = len as u64;
-                    self.decoder = Some((ChunkDecoder::new(meta.len()), 0));
+                    self.decoder = Some((ChunkDecoder::new(index + 1), 0));
                 }
                 let mut input = [0u8; 4096];
                 let n = storage.read_at(&item, self.offset, &mut input)?;
@@ -400,9 +398,4 @@ pub fn encode_body(payloads: &[&[u8]]) -> Vec<u8> {
     body
 }
 
-/// A complete stored item.
-pub fn encode_item(meta: &BundleMeta, payloads: &[&[u8]]) -> Vec<u8> {
-    let mut item = wire::encode_header(meta, &format());
-    item.extend(encode_body(payloads));
-    item
-}
+
