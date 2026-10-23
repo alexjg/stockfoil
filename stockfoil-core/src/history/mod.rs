@@ -17,12 +17,15 @@ mod view;
 
 pub use export::{ExportCursor, ExportItem, ExportPlan};
 pub use local::{CommitBuilder, PayloadCheck, Prepared};
-pub(crate) use publish::Readiness;
 pub use publish::Receipt;
+pub(crate) use publish::{Readiness, publish_verified, readiness};
 pub use view::{Batch, Change, Changes, MaterializationCursor, ViewPoint, Vis, WritePermissions};
 
 use crate::meta::depth;
-use crate::{Author, CommitHash, Error, ItemId, PayloadId, Signature};
+use crate::{
+    Admission, Author, CommitHash, DecodeItem, Error, ItemId, Next, PayloadId, ReceiveOptions,
+    Signature,
+};
 use clock::{ChainId, Clock, ClockBuilder};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -140,9 +143,7 @@ impl History {
         }
     }
 
-    pub(crate) fn id(&self) -> u64 {
-        self.id
-    }
+    // ---- topology queries ----
 
     /// Number of delivered commits, drafts included.
     pub fn len(&self) -> usize {
@@ -212,7 +213,180 @@ impl History {
         chain == self.nodes[d.index()].chain || self.clock(d).contains(chain, a)
     }
 
+    /// Every delivered commit, parents first, drafts included.
+    pub fn traverse(&self) -> impl Iterator<Item = CommitHash> + '_ {
+        self.nodes.iter().map(|n| n.hash)
+    }
+
+    // ---- local commits, signing, and payload checks ----
+
+    /// Start a local commit. Every parent must already be delivered (drafts
+    /// included). Parent order and repeats are preserved in the identity.
+    pub fn begin_commit(
+        &self,
+        author: Author,
+        parents: Vec<CommitHash>,
+    ) -> Result<CommitBuilder, Error> {
+        if let Some(missing) = parents.iter().find(|p| !self.by_hash.contains_key(*p)) {
+            return Err(Error::MissingParent(*missing));
+        }
+        Ok(CommitBuilder::new(author, parents))
+    }
+
+    /// Deliver an unadmitted local commit (see [`CommitBuilder`]).
+    pub fn publish_commit(
+        &mut self,
+        prepared: Prepared,
+        payload: PayloadId,
+    ) -> Result<Delivered, Error> {
+        if let Some(info) = self.lookup(&prepared.hash) {
+            return Ok(Delivered {
+                hash: prepared.hash,
+                payload: info.payload,
+                newly_delivered: false,
+            });
+        }
+        if let Some(missing) = prepared
+            .parents
+            .iter()
+            .find(|p| !self.by_hash.contains_key(*p))
+        {
+            return Err(Error::MissingParent(*missing));
+        }
+        self.insert(
+            prepared.hash,
+            prepared.author,
+            &prepared.parents,
+            payload,
+            false,
+        );
+        self.bump_epoch();
+        Ok(Delivered {
+            hash: prepared.hash,
+            payload,
+            newly_delivered: true,
+        })
+    }
+
+    /// Attach `author`'s signature to an unadmitted local commit, then admit
+    /// every signed draft whose certificate is now complete. Returns what was
+    /// admitted, possibly nothing (for example while a parent is still a draft).
+    pub fn sign(
+        &mut self,
+        author: Author,
+        hash: CommitHash,
+        signature: Signature,
+    ) -> Result<Vec<ItemId>, Error> {
+        let idx = *self.by_hash.get(&hash).ok_or(Error::UnknownCommit(hash))?;
+        if self.node(idx).admitted {
+            return Err(Error::NotDraft(hash));
+        }
+        crate::evidence::verify_signature(&author, &hash, &signature)?;
+        self.signatures
+            .entry(idx)
+            .or_default()
+            .insert(author, signature);
+        self.signed_drafts.insert(idx);
+        let admitted = admit::admit_ready_drafts(self);
+        if !admitted.is_empty() {
+            self.bump_epoch();
+        }
+        Ok(admitted)
+    }
+
+    /// Start checking a delivered commit's payload, using the parents and
+    /// author recorded in history. Storage needs no integrity guarantees of its
+    /// own: whatever it returns is checked here before it is trusted.
+    pub fn check_payload(&self, commit: &CommitHash) -> Result<PayloadCheck, Error> {
+        let info = self.lookup(commit).ok_or(Error::UnknownCommit(*commit))?;
+        let parents = self.parents(commit).ok_or(Error::UnknownCommit(*commit))?;
+        Ok(PayloadCheck::new(*commit, info.author, parents))
+    }
+
+    // ---- receiving and decoding stored items ----
+
+    /// Start receiving one stored item (header and body, as one blob). The
+    /// host that answers the operation's requests decides which item that is.
+    pub fn receive(&self, options: ReceiveOptions) -> Admission {
+        Admission::new(self.id, options)
+    }
+
+    /// Do the history-dependent work of an admission: check dependencies and
+    /// placement, or publish atomically once payloads are bound. No application
+    /// code runs here.
+    pub fn advance<'a>(&mut self, op: &'a mut Admission) -> Next<'a> {
+        op.advance(self)
+    }
+
+    /// Start decoding the canonical payloads of `wanted` members (member
+    /// index to expected commit hash) from a stored wire item.
+    ///
+    /// Fails immediately with [`Error::UnknownCommit`] if any wanted commit
+    /// has not been delivered to this history. Once created, the operation
+    /// owns its [`PayloadCheck`]s and buffers and never borrows or needs
+    /// [`History`] again.
+    pub fn decode_item(
+        &self,
+        options: ReceiveOptions,
+        wanted: impl IntoIterator<Item = (usize, CommitHash)>,
+    ) -> Result<DecodeItem, Error> {
+        DecodeItem::new(self, options, wanted)
+    }
+
+    // ---- export ----
+
+    /// Plan an export relative to what a destination has acknowledged.
+    pub fn export(&self, cursor: &ExportCursor) -> ExportPlan {
+        export::plan_export(self, cursor)
+    }
+
+    /// Build the metadata and member list for one planned item.
+    pub fn export_item(&self, plan: &ExportPlan, index: usize) -> Result<ExportItem, Error> {
+        export::build_export_item(self, plan, index)
+    }
+
+    // ---- views and changes ----
+
+    /// The working view: every delivered commit, drafts included.
+    pub fn view_point(&self, permissions: &WritePermissions) -> ViewPoint {
+        view::view(self, Heads::Delivered, permissions)
+    }
+
+    /// Authenticated history only.
+    pub fn signed_view_point(&self, permissions: &WritePermissions) -> ViewPoint {
+        view::view(self, Heads::Admitted, permissions)
+    }
+
+    /// Start a change traversal from a materializer's cursor to `target`.
+    ///
+    /// It captures the currently delivered history. A commit produces one record
+    /// if it was not delivered to this materializer before, or if its
+    /// participation differs between the cursor's view and `target`. Records
+    /// come parents first. All heads named by the cursor and target must be
+    /// delivered; this is checked before any record is produced.
+    pub fn changes(
+        &self,
+        cursor: &MaterializationCursor,
+        target: &ViewPoint,
+    ) -> Result<Changes, Error> {
+        view::plan_changes(self, cursor, target)
+    }
+
+    /// Append up to `max` records to `out`.
+    pub fn next_changes(
+        &self,
+        changes: &mut Changes,
+        out: &mut Vec<Change>,
+        max: usize,
+    ) -> Result<Batch, Error> {
+        view::emit_next_changes(self, changes, out, max)
+    }
+
     // ---- internal topology ----
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
 
     fn node(&self, idx: NodeIdx) -> &Node {
         &self.nodes[idx.index()]
@@ -423,67 +597,6 @@ impl History {
         });
         members.sort_unstable();
         members
-    }
-
-    /// Deliver an unadmitted local commit (see [`CommitBuilder`]).
-    pub fn publish_commit(
-        &mut self,
-        prepared: Prepared,
-        payload: PayloadId,
-    ) -> Result<Delivered, Error> {
-        if let Some(info) = self.lookup(&prepared.hash) {
-            return Ok(Delivered {
-                hash: prepared.hash,
-                payload: info.payload,
-                newly_delivered: false,
-            });
-        }
-        if let Some(missing) = prepared
-            .parents
-            .iter()
-            .find(|p| !self.by_hash.contains_key(*p))
-        {
-            return Err(Error::MissingParent(*missing));
-        }
-        self.insert(
-            prepared.hash,
-            prepared.author,
-            &prepared.parents,
-            payload,
-            false,
-        );
-        self.bump_epoch();
-        Ok(Delivered {
-            hash: prepared.hash,
-            payload,
-            newly_delivered: true,
-        })
-    }
-
-    /// Attach `author`'s signature to an unadmitted local commit, then admit
-    /// every signed draft whose certificate is now complete. Returns what was
-    /// admitted, possibly nothing (for example while a parent is still a draft).
-    pub fn sign(
-        &mut self,
-        author: Author,
-        hash: CommitHash,
-        signature: Signature,
-    ) -> Result<Vec<ItemId>, Error> {
-        let idx = *self.by_hash.get(&hash).ok_or(Error::UnknownCommit(hash))?;
-        if self.node(idx).admitted {
-            return Err(Error::NotDraft(hash));
-        }
-        crate::evidence::verify_signature(&author, &hash, &signature)?;
-        self.signatures
-            .entry(idx)
-            .or_default()
-            .insert(author, signature);
-        self.signed_drafts.insert(idx);
-        let admitted = self.admit_ready_drafts();
-        if !admitted.is_empty() {
-            self.bump_epoch();
-        }
-        Ok(admitted)
     }
 }
 

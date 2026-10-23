@@ -22,41 +22,40 @@ pub(crate) enum Readiness {
     Ready { undelivered: bool },
 }
 
-impl History {
     /// Check dependencies and canonical fragment placement. Does not mutate.
-    pub(crate) fn readiness(&self, verified: &Verified) -> Result<Readiness, Error> {
+pub(crate) fn readiness(history: &History, verified: &Verified) -> Result<Readiness, Error> {
         if let Some(missing) = verified
             .dependencies()
             .into_iter()
-            .find(|d| !self.is_admitted(d))
+            .find(|d| !history.is_admitted(d))
         {
             return Ok(Readiness::Waiting(missing));
         }
         if let ItemId::Fragment(range) = &verified.meta.id {
-            self.check_placement(range, &verified.hashes, &verified.external)?;
+            check_placement(history, range, &verified.hashes, &verified.external)?;
         }
         Ok(Readiness::Ready {
             undelivered: verified
                 .hashes
                 .iter()
-                .any(|h| !self.by_hash.contains_key(h)),
+                .any(|h| !history.by_hash.contains_key(h)),
         })
     }
 
     /// A fragment's members lie above its boundary history, its external parents
     /// inside it, and walking down from those parents stops exactly at the boundary.
-    fn check_placement(
-        &self,
+fn check_placement(
+    history: &History,
         range: &FragmentRange,
         members: &[CommitHash],
         external: &BTreeSet<CommitHash>,
     ) -> Result<(), Error> {
-        let boundary: Vec<_> = range.boundary.iter().map(|h| self.by_hash[h]).collect();
-        let excluded = self.clock_for_heads(&boundary);
+        let boundary: Vec<_> = range.boundary.iter().map(|h| history.by_hash[h]).collect();
+        let excluded = history.clock_for_heads(&boundary);
         let below = |hash: &CommitHash| {
-            self.by_hash
+            history.by_hash
                 .get(hash)
-                .is_some_and(|&idx| self.contains(&excluded, idx))
+                .is_some_and(|&idx| history.contains(&excluded, idx))
         };
         if members.iter().any(below) {
             return Err(Error::InvalidPlacement);
@@ -66,7 +65,7 @@ impl History {
             if !below(hash) {
                 return Err(Error::InvalidPlacement);
             }
-            stack.push(self.by_hash[hash]);
+            stack.push(history.by_hash[hash]);
         }
         let level = depth(&range.head);
         let mut stops = BTreeSet::new();
@@ -75,10 +74,10 @@ impl History {
             if !visited.insert(idx) {
                 continue;
             }
-            if self.node(idx).depth as usize >= level {
-                stops.insert(self.node(idx).hash);
+            if history.node(idx).depth as usize >= level {
+                stops.insert(history.node(idx).hash);
             } else {
-                stack.extend(self.parent_nodes(idx));
+                stack.extend(history.parent_nodes(idx));
             }
         }
         if stops != range.boundary {
@@ -89,27 +88,27 @@ impl History {
 
     /// Atomically deliver and admit a ready bundle. `payloads` holds one ID per
     /// member (only consulted for members not already delivered).
-    pub(crate) fn publish_verified(
-        &mut self,
+pub(crate) fn publish_verified(
+    history: &mut History,
         verified: &Verified,
         payloads: &[PayloadId],
     ) -> Receipt {
         let mut members = Vec::with_capacity(verified.hashes.len());
         let mut indices = Vec::with_capacity(verified.hashes.len());
         for (i, &hash) in verified.hashes.iter().enumerate() {
-            let delivered = if let Some(&idx) = self.by_hash.get(&hash) {
-                self.mark_admitted(idx);
+            let delivered = if let Some(&idx) = history.by_hash.get(&hash) {
+                history.mark_admitted(idx);
                 indices.push(idx);
                 Delivered {
                     hash,
-                    payload: self.node(idx).payload,
+                    payload: history.node(idx).payload,
                     newly_delivered: false,
                 }
             } else {
                 let parents: Vec<_> = verified.parents(i).collect();
                 let author = verified.meta.members[i].author;
                 let payload = payloads[i];
-                indices.push(self.insert(hash, author, &parents, payload, true));
+                indices.push(history.insert(hash, author, &parents, payload, true));
                 Delivered {
                     hash,
                     payload,
@@ -130,13 +129,12 @@ impl History {
                 }
             })
             .collect();
-        self.add_certificate(verified.meta.id.clone(), evidence, &indices);
-        let drafts_admitted = self.admit_ready_drafts();
-        self.bump_epoch();
+        super::admit::add_certificate(history, verified.meta.id.clone(), evidence, &indices);
+        let drafts_admitted = super::admit::admit_ready_drafts(history);
+        history.bump_epoch();
         Receipt {
             id: verified.meta.id.clone(),
             members,
             drafts_admitted,
         }
     }
-}

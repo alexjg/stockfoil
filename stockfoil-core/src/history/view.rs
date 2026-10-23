@@ -168,123 +168,98 @@ pub enum Batch {
     Complete(MaterializationCursor),
 }
 
-impl History {
-    /// The working view: every delivered commit, drafts included.
-    pub fn view_point(&self, permissions: &WritePermissions) -> ViewPoint {
-        self.view(Heads::Delivered, permissions)
-    }
+pub(super) fn view(history: &History, heads: Heads, permissions: &WritePermissions) -> ViewPoint {
+    ViewPoint::from_parts(history.heads(heads).collect(), permissions.clone())
+}
 
-    /// Authenticated history only.
-    pub fn signed_view_point(&self, permissions: &WritePermissions) -> ViewPoint {
-        self.view(Heads::Admitted, permissions)
-    }
+pub(super) fn plan_changes(
+    history: &History,
+    cursor: &MaterializationCursor,
+    target: &ViewPoint,
+) -> Result<Changes, Error> {
+    let delivered_before = history.history_clock(&cursor.delivery_heads)?;
+    let before = participation(history, &cursor.view_point)?;
+    let after = participation(history, target)?;
+    let delivered_now = Clock::from_tips(&history.chain_tips);
+    let mut pending = Vec::new();
+    clock::difference(&history.chain_nodes, &delivered_now, &delivered_before, |i| {
+        pending.push(i)
+    });
+    clock::symmetric_difference(&history.chain_nodes, &before, &after, |i| pending.push(i));
+    pending.sort_unstable();
+    pending.dedup();
+    Ok(Changes {
+        history: history.id,
+        pending,
+        next: 0,
+        delivered_before,
+        before,
+        after,
+        delivery_heads: history.heads.iter().copied().collect(),
+        target: target.clone(),
+    })
+}
 
-    fn view(&self, heads: Heads, permissions: &WritePermissions) -> ViewPoint {
-        ViewPoint::from_parts(self.heads(heads).collect(), permissions.clone())
+pub(super) fn emit_next_changes(
+    history: &History,
+    changes: &mut Changes,
+    out: &mut Vec<Change>,
+    max: usize,
+) -> Result<Batch, Error> {
+    if changes.history != history.id {
+        return Err(Error::WrongHistory);
     }
-
-    /// Start a change traversal from a materializer's cursor to `target`.
-    ///
-    /// It captures the currently delivered history. A commit produces one record
-    /// if it was not delivered to this materializer before, or if its
-    /// participation differs between the cursor's view and `target`. Records
-    /// come parents first. All heads named by the cursor and target must be
-    /// delivered; this is checked before any record is produced.
-    pub fn changes(
-        &self,
-        cursor: &MaterializationCursor,
-        target: &ViewPoint,
-    ) -> Result<Changes, Error> {
-        let delivered_before = self.history_clock(&cursor.delivery_heads)?;
-        let before = self.participation(&cursor.view_point)?;
-        let after = self.participation(target)?;
-        let delivered_now = Clock::from_tips(&self.chain_tips);
-        let mut pending = Vec::new();
-        clock::difference(&self.chain_nodes, &delivered_now, &delivered_before, |i| {
-            pending.push(i)
+    let end = changes.pending.len().min(changes.next.saturating_add(max));
+    for &idx in &changes.pending[changes.next..end] {
+        let node = history.node(idx);
+        out.push(Change {
+            hash: node.hash,
+            payload: node.payload,
+            newly_delivered: !history.contains(&changes.delivered_before, idx),
+            visibility: visibility(history, &changes.before, &changes.after, idx),
         });
-        clock::symmetric_difference(&self.chain_nodes, &before, &after, |i| pending.push(i));
-        pending.sort_unstable();
-        pending.dedup();
-        Ok(Changes {
-            history: self.id,
-            pending,
-            next: 0,
-            delivered_before,
-            before,
-            after,
-            delivery_heads: self.heads.iter().copied().collect(),
-            target: target.clone(),
-        })
     }
+    changes.next = end;
+    if end < changes.pending.len() {
+        return Ok(Batch::More);
+    }
+    Ok(Batch::Complete(MaterializationCursor {
+        delivery_heads: changes.delivery_heads.clone(),
+        view_point: changes.target.clone(),
+    }))
+}
 
-    /// Append up to `max` records to `out`.
-    pub fn next_changes(
-        &self,
-        changes: &mut Changes,
-        out: &mut Vec<Change>,
-        max: usize,
-    ) -> Result<Batch, Error> {
-        if changes.history != self.id {
-            return Err(Error::WrongHistory);
-        }
-        let end = changes.pending.len().min(changes.next.saturating_add(max));
-        for &idx in &changes.pending[changes.next..end] {
-            let node = self.node(idx);
-            out.push(Change {
-                hash: node.hash,
-                payload: node.payload,
-                newly_delivered: !self.contains(&changes.delivered_before, idx),
-                visibility: self.visibility(&changes.before, &changes.after, idx),
-            });
-        }
-        changes.next = end;
-        if end < changes.pending.len() {
-            return Ok(Batch::More);
-        }
-        Ok(Batch::Complete(MaterializationCursor {
-            delivery_heads: changes.delivery_heads.clone(),
-            view_point: changes.target.clone(),
-        }))
+fn visibility(history: &History, before: &Clock, after: &Clock, idx: NodeIdx) -> Vis {
+    match (history.contains(before, idx), history.contains(after, idx)) {
+        (true, false) => Vis::Before,
+        (false, true) => Vis::After,
+        (true, true) => Vis::Both,
+        (false, false) => Vis::Neither,
     }
+}
 
-    /// Every delivered commit, parents first, drafts included.
-    pub fn traverse(&self) -> impl Iterator<Item = CommitHash> + '_ {
-        self.nodes.iter().map(|n| n.hash)
-    }
-
-    fn visibility(&self, before: &Clock, after: &Clock, idx: NodeIdx) -> Vis {
-        match (self.contains(before, idx), self.contains(after, idx)) {
-            (true, false) => Vis::Before,
-            (false, true) => Vis::After,
-            (true, true) => Vis::Both,
-            (false, false) => Vis::Neither,
+/// The view's ancestry, with each chain capped by its author's permission.
+fn participation(history: &History, view: &ViewPoint) -> Result<Clock, Error> {
+    let reached = history.history_clock(&view.heads)?;
+    let mut bounded: HashMap<Author, Arc<Clock>> = HashMap::new();
+    Ok(reached.mask(|chain, tip| {
+        let author = history.chain_authors[chain as usize];
+        match view.write_permissions.get(&author) {
+            Some(WritePermission::Unbounded) => Some(tip),
+            Some(WritePermission::Bounded(frontier)) => bounded
+                .entry(author)
+                .or_insert_with(|| {
+                    let available: Vec<_> = frontier
+                        .iter()
+                        .filter_map(|h| history.by_hash.get(h).copied())
+                        .filter(|&idx| history.contains(&reached, idx))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    history.clock_for_heads(&available)
+                })
+                .position(chain),
+            Some(WritePermission::Denied) | None => None,
         }
-    }
-
-    /// The view's ancestry, with each chain capped by its author's permission.
-    fn participation(&self, view: &ViewPoint) -> Result<Clock, Error> {
-        let history = self.history_clock(&view.heads)?;
-        let mut bounded: HashMap<Author, Arc<Clock>> = HashMap::new();
-        Ok(history.mask(|chain, tip| {
-            let author = self.chain_authors[chain as usize];
-            match view.write_permissions.get(&author) {
-                Some(WritePermission::Unbounded) => Some(tip),
-                Some(WritePermission::Bounded(frontier)) => bounded
-                    .entry(author)
-                    .or_insert_with(|| {
-                        let available: Vec<_> = frontier
-                            .iter()
-                            .filter_map(|h| self.by_hash.get(h).copied())
-                            .filter(|&idx| self.contains(&history, idx))
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect();
-                        self.clock_for_heads(&available)
-                    })
-                    .position(chain),
-                Some(WritePermission::Denied) | None => None,
-            }
-        }))
-    }
+    }))
 }

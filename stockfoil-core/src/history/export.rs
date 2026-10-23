@@ -169,13 +169,11 @@ impl ExportItem {
     }
 }
 
-impl History {
-    /// Plan an export relative to what a destination has acknowledged.
-    pub fn export(&self, cursor: &ExportCursor) -> ExportPlan {
+pub(super) fn plan_export(history: &History, cursor: &ExportCursor) -> ExportPlan {
         let mut added = Vec::new();
         let mut kept = BTreeSet::new();
         let mut retired = Vec::new();
-        for certificate in self.inventory.values() {
+        for certificate in history.inventory.values() {
             if cursor.items.contains(&certificate.id) {
                 kept.insert(certificate.id.clone());
             } else {
@@ -189,9 +187,9 @@ impl History {
         }
         // Heads in delivery order put most dependencies first. A receiver must
         // still tolerate waiting: a dependency's covering item can come later.
-        added.sort_by_key(|c| self.by_hash[&c.id.head()]);
+        added.sort_by_key(|c| history.by_hash[&c.id.head()]);
         ExportPlan {
-            history: self.id,
+            history: history.id,
             acknowledged: vec![false; added.len()],
             added,
             retired,
@@ -199,9 +197,8 @@ impl History {
         }
     }
 
-    /// Build the metadata and member list for one planned item.
-    pub fn export_item(&self, plan: &ExportPlan, index: usize) -> Result<ExportItem, Error> {
-        if plan.history != self.id {
+pub(super) fn build_export_item(history: &History, plan: &ExportPlan, index: usize) -> Result<ExportItem, Error> {
+        if plan.history != history.id {
             return Err(Error::WrongHistory);
         }
         let certificate = plan
@@ -209,11 +206,11 @@ impl History {
             .get(index)
             .ok_or(Error::OutOfRange("export item"))?;
         let members = match &certificate.id {
-            ItemId::Commit(h) => vec![self.by_hash[h]],
+            ItemId::Commit(h) => vec![history.by_hash[h]],
             ItemId::Fragment(range) => {
-                let head = self.by_hash[&range.head];
-                let boundary: Vec<_> = range.boundary.iter().map(|b| self.by_hash[b]).collect();
-                self.canonical_order(&self.fragment_members(head, &boundary))
+                let head = history.by_hash[&range.head];
+                let boundary: Vec<_> = range.boundary.iter().map(|b| history.by_hash[b]).collect();
+                canonical_order(history, &history.fragment_members(head, &boundary))
             }
         };
         let position: HashMap<NodeIdx, usize> =
@@ -221,13 +218,13 @@ impl History {
         let shape = members
             .iter()
             .map(|&m| MemberShape {
-                author: self.author_of(m),
-                parents: self
+                author: history.author_of(m),
+                parents: history
                     .parent_nodes(m)
                     .iter()
                     .map(|p| match position.get(p) {
                         Some(&i) => ParentRef::Member(i),
-                        None => ParentRef::External(self.node(*p).hash),
+                        None => ParentRef::External(history.node(*p).hash),
                     })
                     .collect(),
             })
@@ -237,7 +234,7 @@ impl History {
             .iter()
             .map(|e| Evidence {
                 author: e.author,
-                member: position[&self.by_hash[&e.commit]],
+                member: position[&history.by_hash[&e.commit]],
                 signature: e.signature,
             })
             .collect();
@@ -249,20 +246,20 @@ impl History {
             }),
             members: members
                 .iter()
-                .map(|&m| (self.node(m).hash, self.node(m).payload))
+                .map(|&m| (history.node(m).hash, history.node(m).payload))
                 .collect(),
         })
     }
 
-    /// Parents first; among ready members the smallest hash goes first. This
-    /// order depends only on the members, not on local delivery order.
-    fn canonical_order(&self, members: &[NodeIdx]) -> Vec<NodeIdx> {
+/// Parents first; among ready members the smallest hash goes first. This
+/// order depends only on the members, not on local delivery order.
+fn canonical_order(history: &History, members: &[NodeIdx]) -> Vec<NodeIdx> {
         let set: std::collections::HashSet<_> = members.iter().copied().collect();
         let mut remaining = HashMap::new();
         let mut children: HashMap<NodeIdx, Vec<NodeIdx>> = HashMap::new();
         let mut ready = BTreeSet::new();
         for &m in members {
-            let parents: BTreeSet<_> = self
+            let parents: BTreeSet<_> = history
                 .parent_nodes(m)
                 .iter()
                 .copied()
@@ -270,7 +267,7 @@ impl History {
                 .collect();
             remaining.insert(m, parents.len());
             if parents.is_empty() {
-                ready.insert((self.node(m).hash, m));
+                ready.insert((history.node(m).hash, m));
             }
             for p in parents {
                 children.entry(p).or_default().push(m);
@@ -283,10 +280,9 @@ impl History {
                 let count = remaining.get_mut(&c).unwrap();
                 *count -= 1;
                 if *count == 0 {
-                    ready.insert((self.node(c).hash, c));
+                    ready.insert((history.node(c).hash, c));
                 }
             }
         }
         order
     }
-}

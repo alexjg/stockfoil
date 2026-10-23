@@ -212,18 +212,16 @@ impl std::fmt::Debug for Admission {
     }
 }
 
-impl History {
-    /// Start receiving one stored item (header and body, as one blob). The
-    /// host that answers the operation's requests decides which item that is.
-    pub fn receive(&self, mut options: ReceiveOptions) -> Admission {
+impl Admission {
+    pub(crate) fn new(history: u64, mut options: ReceiveOptions) -> Self {
         // Zero sizes could never make progress; huge ones are capped so that
         // buffer arithmetic cannot overflow.
         const MAX_BUFFER: usize = 1 << 30;
         options.read_size = options.read_size.clamp(1, MAX_BUFFER);
         options.decode_capacity = options.decode_capacity.clamp(1, MAX_BUFFER);
         options.quantum = options.quantum.max(1);
-        Admission {
-            history: self.id(),
+        Self {
+            history,
             options,
             stage: Stage::Header { buffer: Vec::new() },
             meta: None,
@@ -246,48 +244,45 @@ impl History {
         }
     }
 
-    /// Do the history-dependent work of an admission: check dependencies and
-    /// placement, or publish atomically once payloads are bound. No application
-    /// code runs here.
-    pub fn advance<'a>(&mut self, op: &'a mut Admission) -> Next<'a> {
-        if op.history != self.id() {
+    pub(crate) fn advance(&mut self, history: &mut History) -> Next<'_> {
+        if self.history != history.id() {
             return Next::Failed(&WRONG_HISTORY);
         }
-        match op.stage {
+        match self.stage {
             Stage::Place => {
-                if let Some((hash, epoch)) = op.waiting
-                    && epoch == self.epoch()
+                if let Some((hash, epoch)) = self.waiting
+                    && epoch == history.epoch()
                 {
                     return Next::Waiting(hash);
                 }
-                let verified = Arc::clone(op.verified.as_ref().unwrap());
-                match self.readiness(&verified) {
-                    Err(e) => op.fail(e),
+                let verified = Arc::clone(self.verified.as_ref().unwrap());
+                match crate::history::readiness(history, &verified) {
+                    Err(e) => self.fail(e),
                     Ok(Readiness::Waiting(hash)) => {
-                        op.waiting = Some((hash, self.epoch()));
+                        self.waiting = Some((hash, history.epoch()));
                         return Next::Waiting(hash);
                     }
                     Ok(Readiness::Ready { undelivered: true }) => {
-                        op.waiting = None;
-                        op.stage = Stage::Bind;
+                        self.waiting = None;
+                        self.stage = Stage::Bind;
                     }
                     Ok(Readiness::Ready { undelivered: false }) => {
-                        op.waiting = None;
-                        let receipt = self.publish_verified(&verified, &[]);
-                        op.stage = Stage::Done(receipt);
+                        self.waiting = None;
+                        let receipt = crate::history::publish_verified(history, &verified, &[]);
+                        self.stage = Stage::Done(receipt);
                     }
                 }
             }
             Stage::Publish => {
-                let verified = Arc::clone(op.verified.as_ref().unwrap());
+                let verified = Arc::clone(self.verified.as_ref().unwrap());
                 // Dependencies only accumulate and placement depends only on
                 // existing ancestry, so readiness established earlier still holds.
-                let receipt = self.publish_verified(&verified, &op.payloads);
-                op.stage = Stage::Done(receipt);
+                let receipt = crate::history::publish_verified(history, &verified, &self.payloads);
+                self.stage = Stage::Done(receipt);
             }
             _ => {}
         }
-        op.next()
+        self.next()
     }
 }
 

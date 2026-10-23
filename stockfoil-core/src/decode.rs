@@ -83,26 +83,19 @@ impl std::fmt::Debug for DecodeItem {
     }
 }
 
-impl History {
-    /// Start decoding the canonical payloads of `wanted` members (member
-    /// index to expected commit hash) from a stored wire item.
-    ///
-    /// Fails immediately with [`Error::UnknownCommit`] if any wanted commit
-    /// has not been delivered to this history. Once created, the operation
-    /// owns its [`PayloadCheck`]s and buffers and never borrows or needs
-    /// [`History`] again.
-    pub fn decode_item(
-        &self,
+impl DecodeItem {
+    pub(crate) fn new(
+        history: &History,
         mut options: ReceiveOptions,
         wanted: impl IntoIterator<Item = (usize, CommitHash)>,
-    ) -> Result<DecodeItem, Error> {
+    ) -> Result<Self, Error> {
         const MAX_BUFFER: usize = 1 << 30;
         options.read_size = options.read_size.clamp(1, MAX_BUFFER);
         options.decode_capacity = options.decode_capacity.clamp(1, MAX_BUFFER);
         options.quantum = options.quantum.max(1);
         let mut checks = BTreeMap::new();
         for (index, commit) in wanted {
-            let check = self.check_payload(&commit)?;
+            let check = history.check_payload(&commit)?;
             if let Some(prev) = checks.insert(index, check)
                 && prev.commit() != commit
             {
@@ -113,7 +106,7 @@ impl History {
             Some(&last) => (Stage::Header { buffer: Vec::new() }, last),
             None => (Stage::Done, 0),
         };
-        Ok(DecodeItem {
+        Ok(Self {
             options,
             stage,
             meta: None,

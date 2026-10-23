@@ -1,12 +1,11 @@
 //! Local commit creation (validate parents, hash canonical bytes, publish a
 //! draft) and checking payloads read back from storage.
-use super::History;
 use crate::meta::{CommitHasher, commit_hash};
 use crate::{Author, CommitHash, Error};
 
 /// Hashes one local commit's canonical payload. Created by
-/// [`History::begin_commit`] after its parents have been checked, so invalid
-/// parents are reported before any payload is read.
+/// [`History::begin_commit`](crate::History::begin_commit) after its parents
+/// have been checked, so invalid parents are reported before any payload is read.
 #[derive(Debug, Clone)]
 pub struct CommitBuilder {
     author: Author,
@@ -15,6 +14,14 @@ pub struct CommitBuilder {
 }
 
 impl CommitBuilder {
+    pub(super) fn new(author: Author, parents: Vec<CommitHash>) -> Self {
+        Self {
+            author,
+            parents,
+            payload: blake3::Hasher::new(),
+        }
+    }
+
     /// Append canonical payload bytes. The caller chooses the chunking.
     pub fn update(&mut self, canonical: &[u8]) {
         self.payload.update(canonical);
@@ -45,27 +52,8 @@ impl Prepared {
     }
 }
 
-impl History {
-    /// Start a local commit. Every parent must already be delivered (drafts
-    /// included). Parent order and repeats are preserved in the identity.
-    pub fn begin_commit(
-        &self,
-        author: Author,
-        parents: Vec<CommitHash>,
-    ) -> Result<CommitBuilder, Error> {
-        if let Some(missing) = parents.iter().find(|p| !self.by_hash.contains_key(*p)) {
-            return Err(Error::MissingParent(*missing));
-        }
-        Ok(CommitBuilder {
-            author,
-            parents,
-            payload: blake3::Hasher::new(),
-        })
-    }
-}
-
 /// Checks that canonical bytes read back from storage are a delivered
-/// commit's payload. Created by [`History::check_payload`].
+/// commit's payload. Created by [`History::check_payload`](crate::History::check_payload).
 pub struct PayloadCheck {
     commit: CommitHash,
     author: Author,
@@ -74,6 +62,23 @@ pub struct PayloadCheck {
 }
 
 impl PayloadCheck {
+    pub(super) fn new(
+        commit: CommitHash,
+        author: Author,
+        parents: impl ExactSizeIterator<Item = CommitHash>,
+    ) -> Self {
+        let mut hasher = CommitHasher::new(parents.len());
+        for parent in parents {
+            hasher.parent(&parent);
+        }
+        Self {
+            commit,
+            author,
+            hasher,
+            payload: blake3::Hasher::new(),
+        }
+    }
+
     pub(crate) fn commit(&self) -> CommitHash {
         self.commit
     }
@@ -91,25 +96,5 @@ impl PayloadCheck {
         } else {
             Err(Error::CorruptPayload(self.commit))
         }
-    }
-}
-
-impl History {
-    /// Start checking a delivered commit's payload, using the parents and
-    /// author recorded in history. Storage needs no integrity guarantees of its
-    /// own: whatever it returns is checked here before it is trusted.
-    pub fn check_payload(&self, commit: &CommitHash) -> Result<PayloadCheck, Error> {
-        let info = self.lookup(commit).ok_or(Error::UnknownCommit(*commit))?;
-        let parents = self.parents(commit).ok_or(Error::UnknownCommit(*commit))?;
-        let mut hasher = CommitHasher::new(parents.len());
-        for parent in parents {
-            hasher.parent(&parent);
-        }
-        Ok(PayloadCheck {
-            commit: *commit,
-            author: info.author,
-            hasher,
-            payload: blake3::Hasher::new(),
-        })
     }
 }
