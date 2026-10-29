@@ -1,3 +1,5 @@
+use alloc::string::{String, ToString};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Author([u8; 32]);
 
@@ -23,9 +25,9 @@ impl TryFrom<&[u8]> for Author {
 #[derive(Debug)]
 pub struct InvalidAuthor(String);
 
-impl std::error::Error for InvalidAuthor {}
-impl std::fmt::Display for InvalidAuthor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::error::Error for InvalidAuthor {}
+impl core::fmt::Display for InvalidAuthor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }

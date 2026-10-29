@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use crate::CommitHash;
 
 /// Which commits an author may contribute. Missing authors are denied.

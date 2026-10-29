@@ -1,8 +1,8 @@
 //! Delivery and participation updates through one materialization callback.
 mod support;
 
+use stockfoil::collections::{HashMap, HashSet};
 use std::{
-    collections::{HashMap, HashSet},
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
 };

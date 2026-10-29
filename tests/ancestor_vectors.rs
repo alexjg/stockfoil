@@ -2,7 +2,7 @@
 //! The oracle follows fixture parent edges only; it never asks a graph for reachability.
 mod support;
 
-use std::collections::{HashMap, HashSet};
+use stockfoil::collections::{HashMap, HashSet};
 
 use stockfoil::{
     Author, BlobHash, CommitContents, CommitGraph, CommitHash, CommitMeta, DiffError, QueryError,

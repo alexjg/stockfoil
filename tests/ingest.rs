@@ -1,7 +1,8 @@
 //! Contracts for stateless verification, atomic admission, and minimal-cover relay.
 mod support;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use stockfoil::collections::HashMap;
 
 use stockfoil::{
     CommitGraph, CommitHash, ExportError, FragmentRange, IngestError, IngestReport, ItemId,

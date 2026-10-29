@@ -2,7 +2,7 @@
 //! Ancestry is parent-closed; permission masks preserve chain prefixes but need not
 //! preserve parent closure. Positions are topological NodeIdx values, not counters.
 
-use std::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use crate::NodeIdx;
 

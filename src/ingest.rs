@@ -4,7 +4,7 @@
 //! author's causal frontier among all supplied members.
 //! Payload bytes and application-specific decoding remain separate.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::{collections::{BTreeMap, BTreeSet}, vec::Vec};
 
 use crate::{
     Author, CommitHash, CommitMeta, FragmentRange, Signature, SignatureError, VerificationError,
@@ -99,7 +99,7 @@ impl UnverifiedItem {
             Self::Commit { meta, signatures } => verify_metadata(
                 ItemId::Commit(*meta.hash()),
                 signatures,
-                std::iter::once(Ok(meta)),
+                core::iter::once(Ok(meta)),
             ),
             Self::Fragment {
                 range,

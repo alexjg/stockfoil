@@ -1,5 +1,6 @@
 //! Received items wait here, outside delivered graph history.
-use std::collections::{HashMap, VecDeque};
+use alloc::{collections::VecDeque, vec::Vec};
+use crate::collections::HashMap;
 
 use crate::{Author, CommitHash, ItemId, VerifiedItem};
 

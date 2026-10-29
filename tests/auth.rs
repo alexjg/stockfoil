@@ -5,8 +5,9 @@ mod support;
 
 use support::{author, key, sign, signature};
 
+use stockfoil::collections::HashMap;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
 };

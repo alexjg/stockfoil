@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use alloc::vec::Vec;
+use crate::collections::HashMap;
 
 use crate::{
     Author, CommitGraph, CommitHash, QueryError, WritePermission,
@@ -84,8 +85,8 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
     }
 }
 
-impl<'a, P: Clone> std::fmt::Debug for ViewPointDiff<'a, P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a, P: Clone> core::fmt::Debug for ViewPointDiff<'a, P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ViewPointDiff")
             .field("before", &self.before)
             .field("after", &self.after)

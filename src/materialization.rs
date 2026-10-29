@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use alloc::vec::Vec;
+use crate::collections::HashMap;
 
 use crate::{CommitHash, CommitMeta, ViewPoint, Vis};
 

@@ -5,8 +5,9 @@
 //! payloads then wait in the graph's received queue, separately from local edits.
 mod support;
 
+use stockfoil::collections::HashMap;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     ops::ControlFlow,
     sync::OnceLock,
 };

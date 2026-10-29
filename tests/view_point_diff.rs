@@ -2,7 +2,8 @@
 
 mod support;
 
-use std::{collections::HashMap, ops::ControlFlow};
+use std::ops::ControlFlow;
+use stockfoil::collections::HashMap;
 use support::{author, key, sign, signature};
 
 use ed25519_dalek::SigningKey;

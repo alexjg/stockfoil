@@ -1,10 +1,19 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    ops::{ControlFlow, Index, IndexMut, Range},
-    sync::{Arc, OnceLock},
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    vec,
+    vec::Vec,
 };
+use core::ops::{ControlFlow, Index, IndexMut, Range};
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use once_cell::race::OnceBox as OnceLock;
+#[cfg(feature = "std")]
+use std::sync::OnceLock;
 
 use crate::{
+    collections::{HashMap, HashSet},
     Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
     FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId,
     MaterializationChange, MaterializationCursor, SedimentreeView, Signature, SignatureError,
@@ -1153,7 +1162,12 @@ impl NodeStore {
             }
             // Do not prune a walk merely because builder contains a node's chain
             // time: its cross-chain parents may not have been visited yet.
-            Arc::new(builder.finish())
+            let clock = Arc::new(builder.finish());
+            // No-std caches use a nonblocking, atomics-only once cell. Racing
+            // readers may compute twice, but always observe the winning clock.
+            #[cfg(not(feature = "std"))]
+            let clock = Box::new(clock);
+            clock
         })
     }
 
@@ -1219,7 +1233,7 @@ impl<'a> IntoIterator for &'a NodeStore {
     }
 }
 
-pub(crate) struct NodeIter<'a>(std::iter::Enumerate<std::slice::Iter<'a, Node>>);
+pub(crate) struct NodeIter<'a>(core::iter::Enumerate<core::slice::Iter<'a, Node>>);
 
 impl<'a> Iterator for NodeIter<'a> {
     type Item = (NodeIdx, &'a Node);

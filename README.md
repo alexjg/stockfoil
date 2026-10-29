@@ -2,6 +2,33 @@
 
 A library for building CRDTs on top of authenticated commit DAGs.
 
+## `no_std`
+
+The default `std` feature preserves the standard-library API. Disable it for
+`no_std` + `alloc` environments:
+
+```toml
+stockfoil = { version = "0.1.0", default-features = false }
+```
+
+A global allocator and pointer-width atomics are required. All graph operations,
+including signature verification, remain available. Use
+`stockfoil::collections::HashMap` for permission maps: it re-exports
+`std::collections::HashMap` with `std`, and `hashbrown::HashMap` without it. The
+no-std default hasher is not HashDoS-resistant; applications accepting untrusted
+input should bound resource usage. No OS randomness is required. Ancestry caches
+remain thread-safe; without `std`, concurrent readers may redundantly compute a
+cache entry before one result wins publication.
+
+Test the library in both configurations (selecting the package avoids enabling
+`std` through the example workspace members):
+
+```sh
+cargo test -p stockfoil
+cargo test -p stockfoil --no-default-features
+cargo check -p stockfoil --no-default-features --lib --target thumbv7em-none-eabi
+```
+
 ## Materializing a CRDT
 
 Use `CommitGraph::visit_changes` as the standard update path. Keep a

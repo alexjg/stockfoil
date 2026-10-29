@@ -1,7 +1,8 @@
 //! Contract tests for incremental publication of the certified export cover.
 mod support;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use stockfoil::collections::HashMap;
 
 use stockfoil::{
     CommitGraph, ExportChanges, ExportCursor, FragmentRange, ItemId, UnverifiedItem,

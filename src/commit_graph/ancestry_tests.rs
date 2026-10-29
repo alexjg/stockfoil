@@ -371,7 +371,7 @@ fn benchmark_ancestry() {
         };
         assert!(black_box(found));
     }
-    eprintln!(
+    std::eprintln!(
         "{} nodes, {} queries, {} chains: clocks {indexed:?}, parent walks {:?}",
         graph.nodes.entries.len(),
         targets.len(),

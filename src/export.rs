@@ -1,6 +1,6 @@
 //! Incremental publication of the certified export inventory.
 
-use std::collections::BTreeSet;
+use alloc::{collections::BTreeSet, vec::Vec};
 
 use crate::{ItemId, UnverifiedItem};
 

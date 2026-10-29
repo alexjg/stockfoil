@@ -1,6 +1,6 @@
-use eyre::{Context, eyre};
+use alloc::{string::String, vec::Vec};
 
-use crate::{Author, BlobHash, CommitHash};
+use crate::{Author, BlobHash, CommitHash, parsing::ParseError};
 
 #[derive(Debug, Clone)]
 pub struct CommitMeta {
@@ -62,26 +62,20 @@ impl CommitContents {
         bytes
     }
 
-    fn decode(data: &[u8]) -> eyre::Result<Self> {
+    fn decode(data: &[u8]) -> Result<Self, ParseError> {
         let mut input = crate::parsing::Input::new(data);
-        let num_parents =
-            usize::try_from(input.u64().wrap_err("failed to decode number of parents")?)
-                .wrap_err("parent count is too large")?;
+        let num_parents = usize::try_from(input.u64()?)
+            .map_err(|_| ParseError::InvalidParentCount)?;
         if num_parents > data.len() / 32 {
-            return Err(eyre!("parent count exceeds envelope length"));
+            return Err(ParseError::InvalidParentCount);
         }
         let mut parents = Vec::with_capacity(num_parents);
         for _ in 0..num_parents {
-            let parent_bytes = input.bytes(32).wrap_err("failed to read parent hash")?;
-            let parent_hash =
-                CommitHash::try_from(parent_bytes).wrap_err("failed to parse parent hash")?;
-            parents.push(parent_hash);
+            parents.push(CommitHash::from(input.array::<32>()?));
         }
-        let author_bytes = input.bytes(32).wrap_err("failed to read author bytes")?;
-        let author = Author::try_from(author_bytes).wrap_err("failed to parse author")?;
-        let payload_bytes = input
-            .array::<32>()
-            .wrap_err("failed to read payload hash")?;
+        let author_bytes = input.bytes(32)?;
+        let author = Author::try_from(author_bytes).map_err(|_| ParseError::InvalidAuthor)?;
+        let payload_bytes = input.array::<32>()?;
         let payload_hash = BlobHash::from(payload_bytes);
         input.finish()?;
         Ok(Self {
@@ -137,9 +131,9 @@ mod tests {
 #[derive(Debug)]
 pub struct ParseCommitError(String);
 
-impl std::error::Error for ParseCommitError {}
-impl std::fmt::Display for ParseCommitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::error::Error for ParseCommitError {}
+impl core::fmt::Display for ParseCommitError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "ParseCommitError: {}", self.0)
     }
 }

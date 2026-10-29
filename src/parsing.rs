@@ -1,4 +1,12 @@
-use eyre::{Context, eyre};
+#[derive(Debug)]
+pub(crate) enum ParseError {
+    InvalidInteger,
+    UnexpectedEnd,
+    TrailingBytes,
+    InvalidUtf8,
+    InvalidParentCount,
+    InvalidAuthor,
+}
 
 pub(crate) struct Input<'a> {
     data: &'a [u8],
@@ -10,49 +18,43 @@ impl<'a> Input<'a> {
         Input { data, offset: 0 }
     }
 
-    pub(crate) fn u64(&mut self) -> eyre::Result<u64> {
+    pub(crate) fn u64(&mut self) -> Result<u64, ParseError> {
         let (value, num_bytes) =
-            bijoux::u64::decode(&self.data[self.offset..]).wrap_err("failed to decode u64")?;
+            bijoux::u64::decode(&self.data[self.offset..]).map_err(|_| ParseError::InvalidInteger)?;
         self.offset += num_bytes;
         Ok(value)
     }
 
-    pub(crate) fn bytes(&mut self, len: usize) -> eyre::Result<&'a [u8]> {
-        if self.offset + len > self.data.len() {
-            return Err(eyre!("not enough bytes to read"));
+    pub(crate) fn bytes(&mut self, len: usize) -> Result<&'a [u8], ParseError> {
+        if len > self.data.len() - self.offset {
+            return Err(ParseError::UnexpectedEnd);
         }
         let bytes = &self.data[self.offset..self.offset + len];
         self.offset += len;
         Ok(bytes)
     }
 
-    pub(crate) fn array<const N: usize>(&mut self) -> eyre::Result<[u8; N]> {
-        let bytes = self.bytes(N)?;
-        let array = <[u8; N]>::try_from(bytes)
-            .map_err(|e| eyre!("failed to convert bytes to array: {}", e))?;
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], ParseError> {
+        let mut array = [0; N];
+        array.copy_from_slice(self.bytes(N)?);
         Ok(array)
     }
 
-    pub(crate) fn finish(self) -> eyre::Result<()> {
+    pub(crate) fn finish(self) -> Result<(), ParseError> {
         if self.offset == self.data.len() {
             Ok(())
         } else {
-            Err(eyre!("trailing bytes after encoded value"))
+            Err(ParseError::TrailingBytes)
         }
     }
 
-    pub(crate) fn str(&mut self, len: usize) -> eyre::Result<&'a str> {
+    pub(crate) fn str(&mut self, len: usize) -> Result<&'a str, ParseError> {
         let bytes = self.bytes(len)?;
-        let s = std::str::from_utf8(bytes).wrap_err("failed to parse string")?;
+        let s = core::str::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
         Ok(s)
     }
 
-    pub(crate) fn byte(&mut self) -> eyre::Result<u8> {
-        let byte = self
-            .bytes(1)?
-            .first()
-            .copied()
-            .ok_or_else(|| eyre!("not enough bytes to read"))?;
-        Ok(byte)
+    pub(crate) fn byte(&mut self) -> Result<u8, ParseError> {
+        Ok(self.bytes(1)?[0])
     }
 }

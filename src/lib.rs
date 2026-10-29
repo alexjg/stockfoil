@@ -28,6 +28,30 @@
 //! [`CommitGraph::diff`], [`CommitGraph::traverse`], and
 //! [`CommitGraph::traverse_since`] are lower-level tools for specialized queries
 //! and graph inspection.
+//!
+//! # `no_std`
+//!
+//! Disable the default `std` feature to use this library with `alloc`. Targets
+//! must support pointer-width atomics (the graph shares ancestry caches via `Arc`).
+//! Use [`collections::HashMap`] for permission maps in feature-independent code.
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+#[cfg(all(test, not(feature = "std")))]
+extern crate std;
+
+/// Collection types used by the graph's permission-map API.
+///
+/// With `std` (the default), these are the standard library collections, keeping
+/// existing callers compatible. Without it, these are `hashbrown` collections.
+/// The no-std default hasher is not intended to resist HashDoS attacks.
+pub mod collections {
+    #[cfg(not(feature = "std"))]
+    pub use hashbrown::{HashMap, HashSet};
+    #[cfg(feature = "std")]
+    pub use std::collections::{HashMap, HashSet};
+}
+
 mod ancestor_clock;
 mod author;
 pub use author::Author;

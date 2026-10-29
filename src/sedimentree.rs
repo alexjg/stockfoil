@@ -2,7 +2,7 @@
 //!
 //! Encoding, blob metadata, sealing, and reconciliation are out of scope.
 
-use std::collections::BTreeSet;
+use alloc::{collections::BTreeSet, vec::Vec};
 
 use crate::CommitHash;
 

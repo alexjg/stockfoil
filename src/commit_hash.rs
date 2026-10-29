@@ -1,3 +1,5 @@
+use alloc::string::{String, ToString};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CommitHash([u8; 32]);
 
@@ -41,10 +43,10 @@ impl From<blake3::Hash> for CommitHash {
 #[derive(Debug)]
 pub struct InvalidCommitHash(String);
 
-impl std::error::Error for InvalidCommitHash {}
+impl core::error::Error for InvalidCommitHash {}
 
-impl std::fmt::Display for InvalidCommitHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for InvalidCommitHash {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
