@@ -1,7 +1,9 @@
 //! Stateless verification of received history. Dependencies are assumed
 //! authenticated; admission establishes that premise and checks canonical fragment
 //! placement against their history before mutation. Signatures cover each
-//! author's causal frontier among all supplied members.
+//! author's causal frontier among the supplied members, except within a fragment's
+//! declared borrowed region, whose uncovered members must be authenticated by
+//! other items before admission.
 //! Payload bytes and application-specific decoding remain separate.
 
 use alloc::{collections::{BTreeMap, BTreeSet}, vec::Vec};
@@ -69,6 +71,15 @@ pub enum UnverifiedItem {
         /// all boundary ancestry. Admission checks this canonical placement.
         commits: Vec<CommitMeta>,
         signatures: Vec<SignatureEvidence>,
+        /// Tips of the borrowed region: these members and their ancestry within
+        /// the fragment need not be covered by `signatures`. Members of the region
+        /// left uncovered must be authenticated by other items (or admitted)
+        /// before this fragment is admitted. Usually empty. Never the head.
+        ///
+        /// Signatures discarded after compression cannot be recovered, so a
+        /// fragment branching from inside an older fragment may be unable to
+        /// authenticate the shared history itself.
+        borrowed: BTreeSet<CommitHash>,
     },
 }
 
@@ -99,13 +110,15 @@ impl UnverifiedItem {
             Self::Commit { meta, signatures } => verify_metadata(
                 ItemId::Commit(*meta.hash()),
                 signatures,
+                BTreeSet::new(),
                 core::iter::once(Ok(meta)),
             ),
             Self::Fragment {
                 range,
                 commits,
                 signatures,
-            } => Self::verify_fragment(range, signatures, commits.into_iter().map(Ok)),
+                borrowed,
+            } => Self::verify_fragment(range, signatures, borrowed, commits.into_iter().map(Ok)),
         }
     }
 
@@ -115,9 +128,10 @@ impl UnverifiedItem {
     pub fn verify_fragment(
         range: FragmentRange,
         signatures: Vec<SignatureEvidence>,
+        borrowed: BTreeSet<CommitHash>,
         commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
     ) -> Result<VerifiedItem, VerificationError> {
-        verify_metadata(ItemId::Fragment(range), signatures, commits)
+        verify_metadata(ItemId::Fragment(range), signatures, borrowed, commits)
     }
 }
 
@@ -136,6 +150,7 @@ fn external_parents<'a>(commits: impl Iterator<Item = &'a CommitMeta>) -> BTreeS
 fn verify_metadata(
     id: ItemId,
     signatures: Vec<SignatureEvidence>,
+    borrowed: BTreeSet<CommitHash>,
     commits: impl IntoIterator<Item = Result<CommitMeta, VerificationError>>,
 ) -> Result<VerifiedItem, VerificationError> {
     let mut members = BTreeMap::new();
@@ -171,35 +186,30 @@ fn verify_metadata(
             })?;
     }
 
-    let mut introduced: BTreeMap<Author, BTreeSet<CommitHash>> = BTreeMap::new();
-    for meta in members.values() {
-        introduced
-            .entry(*meta.author())
-            .or_default()
-            .insert(*meta.hash());
-    }
-    let mut signature_boundary = BTreeMap::new();
-    for (author, authored) in introduced {
-        // All concurrent latest commits matter. Checking these maximal members
-        // also establishes coverage of this author's earlier introduced members.
-        let required = frontier(&members, authored);
-        let signed = frontier(
-            &members,
-            signatures
-                .iter()
-                .filter(|evidence| evidence.author == author)
-                .map(|evidence| evidence.commit)
-                .collect(),
-        );
-        let covered = ancestry(&members, signed.iter().copied());
-        if let Some(commit) = required.difference(&covered).next() {
-            return Err(VerificationError::MissingSignature {
-                author,
-                commit: *commit,
-            });
+    // Only fragments may borrow, and a certificate must authenticate its head.
+    if let ItemId::Fragment(range) = &id {
+        if borrowed.contains(&range.head) || borrowed.iter().any(|h| !members.contains_key(h)) {
+            return Err(VerificationError::InvalidItem);
         }
-        signature_boundary.insert(author, signed);
+    } else if !borrowed.is_empty() {
+        return Err(VerificationError::InvalidItem);
     }
+    let (signature_boundary, covered) = coverage(&members, &signatures);
+    let region = ancestry(&members, borrowed.iter().copied());
+    if let Some(meta) = members
+        .values()
+        .find(|meta| !covered.contains(meta.hash()) && !region.contains(meta.hash()))
+    {
+        return Err(VerificationError::MissingSignature {
+            author: *meta.author(),
+            commit: *meta.hash(),
+        });
+    }
+    let unauthenticated = members
+        .keys()
+        .filter(|hash| !covered.contains(hash))
+        .copied()
+        .collect();
     Ok(VerifiedItem {
         id,
         commits: sorted
@@ -209,11 +219,45 @@ fn verify_metadata(
         external_parents,
         signatures,
         signature_boundary,
+        borrowed,
+        unauthenticated,
     })
 }
 
+/// Per-author signed frontiers and the members they authenticate: an author's
+/// signature on a member attests to that author's commits in its supplied
+/// ancestry. Evidence targets must already be known members.
+pub(crate) fn coverage(
+    members: &BTreeMap<CommitHash, CommitMeta>,
+    signatures: &[SignatureEvidence],
+) -> (BTreeMap<Author, BTreeSet<CommitHash>>, BTreeSet<CommitHash>) {
+    let mut signed: BTreeMap<Author, BTreeSet<CommitHash>> = BTreeMap::new();
+    for evidence in signatures {
+        signed
+            .entry(evidence.author)
+            .or_default()
+            .insert(evidence.commit);
+    }
+    let mut boundary = BTreeMap::new();
+    let mut covered = BTreeSet::new();
+    for (author, targets) in signed {
+        let targets = frontier(members, targets);
+        let authored: Vec<_> = ancestry(members, targets.iter().copied())
+            .into_iter()
+            .filter(|hash| members[hash].author() == &author)
+            .collect();
+        // Evidence by an author who introduced nothing here was checked, but
+        // is not part of the boundary.
+        if !authored.is_empty() {
+            covered.extend(authored);
+            boundary.insert(author, targets);
+        }
+    }
+    (boundary, covered)
+}
+
 /// Follow only supplied metadata, including cross-author links.
-fn ancestry(
+pub(crate) fn ancestry(
     members: &BTreeMap<CommitHash, CommitMeta>,
     tips: impl IntoIterator<Item = CommitHash>,
 ) -> BTreeSet<CommitHash> {
@@ -229,7 +273,7 @@ fn ancestry(
     found
 }
 
-fn frontier(
+pub(crate) fn frontier(
     members: &BTreeMap<CommitHash, CommitMeta>,
     mut tips: BTreeSet<CommitHash>,
 ) -> BTreeSet<CommitHash> {
@@ -323,7 +367,9 @@ fn topological_order(
 /// A conditional authentication and closure certificate, not proof that
 /// dependencies or payloads are available. Canonical fragment placement cannot
 /// be proven statelessly; admission checks it against authenticated dependency
-/// history before mutation. There is deliberately no unchecked public constructor.
+/// history before mutation. Members in a borrowed region may be left
+/// unauthenticated; admission requires other items to authenticate those.
+/// There is deliberately no unchecked public constructor.
 ///
 /// ```compile_fail
 /// use stockfoil::VerifiedItem;
@@ -338,6 +384,10 @@ pub struct VerifiedItem {
     external_parents: BTreeSet<CommitHash>,
     pub(crate) signatures: Vec<SignatureEvidence>,
     pub(crate) signature_boundary: BTreeMap<Author, BTreeSet<CommitHash>>,
+    pub(crate) borrowed: BTreeSet<CommitHash>,
+    // Members not covered by this item's own signatures: all inside the
+    // borrowed region. Admission requires each to be authenticated elsewhere.
+    pub(crate) unauthenticated: BTreeSet<CommitHash>,
 }
 
 impl VerifiedItem {
@@ -367,5 +417,24 @@ impl VerifiedItem {
     /// latest supplied commits. Boundaries are dependencies, never members.
     pub fn signature_boundary(&self) -> &BTreeMap<Author, BTreeSet<CommitHash>> {
         &self.signature_boundary
+    }
+    /// Declared tips of the borrowed region; empty for self-contained items.
+    pub fn borrowed(&self) -> &BTreeSet<CommitHash> {
+        &self.borrowed
+    }
+    /// Members this item does not authenticate itself, sorted and distinct.
+    /// Unlike [`Self::dependencies`], these need not be admitted first: it is
+    /// enough that another verified item (queued or admitted) authenticates
+    /// them. Authentication is a stateless fact about that item's signatures
+    /// and metadata, so mutually borrowing items cannot deadlock.
+    pub fn unauthenticated(&self) -> impl Iterator<Item = &CommitHash> {
+        self.unauthenticated.iter()
+    }
+    /// Members authenticated by this item's own signatures.
+    pub fn authenticated(&self) -> impl Iterator<Item = &CommitHash> {
+        self.commits
+            .iter()
+            .map(|meta| meta.hash())
+            .filter(|hash| !self.unauthenticated.contains(*hash))
     }
 }

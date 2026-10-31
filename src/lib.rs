@@ -12,6 +12,12 @@
 //! signing, local insertion, and merge for deferred graph-dependent failures;
 //! valid dependencies are not rolled back. The queue currently has no limits.
 //!
+//! A fragment may borrow authentication for history it cannot cover with its
+//! own signatures, which older signatures being discarded makes unavoidable
+//! after branching from inside a fragment. It is admitted once any other
+//! verified item authenticates that history. See
+//! [`VerifiedItem::unauthenticated`] and [`CommitGraph::missing_authentication`].
+//!
 //! # Materialization
 //!
 //! Use [`CommitGraph::visit_changes`] to build and update a CRDT view. Keep a

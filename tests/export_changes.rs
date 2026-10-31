@@ -128,6 +128,7 @@ fn permissions_and_different_sufficient_proofs_do_not_republish_the_same_item() 
     receive(
         &mut graph,
         UnverifiedItem::Fragment {
+            borrowed: BTreeSet::new(),
             range: range.clone(),
             commits: vec![root.clone(), head.clone()],
             signatures: vec![proof(1, *root.hash()), proof(2, *head.hash())],
@@ -141,6 +142,7 @@ fn permissions_and_different_sufficient_proofs_do_not_republish_the_same_item() 
     receive(
         &mut graph,
         UnverifiedItem::Fragment {
+            borrowed: BTreeSet::new(),
             range,
             commits: vec![root, head.clone()],
             signatures: vec![proof(1, *head.hash()), proof(2, *head.hash())],

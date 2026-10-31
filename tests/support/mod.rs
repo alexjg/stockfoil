@@ -82,6 +82,7 @@ pub fn received_item<P: Clone>(graph: &CommitGraph<P>, meta: CommitMeta) -> Unve
     let commits: Vec<_> = members.iter().map(|hash| known[hash].clone()).collect();
     let signatures = commits.iter().flat_map(received_signatures).collect();
     UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range: FragmentRange { head, boundary },
         commits,
         signatures,
@@ -163,6 +164,7 @@ pub fn signed_fragment(
     seed: u8,
 ) -> UnverifiedItem {
     UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range: range.clone(),
         commits,
         signatures: vec![proof(seed, range.head)],

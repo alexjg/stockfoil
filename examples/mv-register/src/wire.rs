@@ -13,6 +13,8 @@ use stockfoil::{
 use crate::{Assignment, MvRegisterMap};
 
 pub(crate) const MAX_BLOB_BYTES: usize = 8 * 1024 * 1024;
+// Version 2 added borrowed fragment regions.
+const VERSION: u8 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope {
@@ -31,6 +33,7 @@ enum Item {
         boundary: Vec<[u8; 32]>,
         commits: Vec<Commit>,
         signatures: Vec<Evidence>,
+        borrowed: Vec<[u8; 32]>,
     },
 }
 
@@ -90,14 +93,16 @@ pub(crate) fn encode(doc: &MvRegisterMap, item: &UnverifiedItem) -> Result<Vec<u
             range,
             commits,
             signatures,
+            borrowed,
         } => Item::Fragment {
             head: *range.head.as_bytes(),
             boundary: range.boundary.iter().map(|hash| *hash.as_bytes()).collect(),
             commits: commits.iter().map(commit).collect::<Result<_>>()?,
             signatures: evidence(signatures),
+            borrowed: borrowed.iter().map(|hash| *hash.as_bytes()).collect(),
         },
     };
-    let bytes = bcs::to_bytes(&Envelope { version: 1, item })?;
+    let bytes = bcs::to_bytes(&Envelope { version: VERSION, item })?;
     ensure!(
         bytes.len() <= MAX_BLOB_BYTES,
         "example blob exceeds size limit"
@@ -112,7 +117,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded> {
     );
     let envelope: Envelope = bcs::from_bytes(bytes)?;
     ensure!(
-        envelope.version == 1,
+        envelope.version == VERSION,
         "unsupported example envelope version"
     );
     let mut raw_payloads = HashMap::new();
@@ -156,10 +161,14 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded> {
             boundary,
             commits,
             signatures,
+            borrowed,
         } => {
             let count = boundary.len();
             let boundary: BTreeSet<_> = boundary.into_iter().map(CommitHash::from).collect();
             ensure!(boundary.len() == count, "duplicate boundary");
+            let count = borrowed.len();
+            let borrowed: BTreeSet<_> = borrowed.into_iter().map(CommitHash::from).collect();
+            ensure!(borrowed.len() == count, "duplicate borrowed tip");
             UnverifiedItem::Fragment {
                 range: FragmentRange {
                     head: CommitHash::from(head),
@@ -167,6 +176,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded> {
                 },
                 commits: commits.into_iter().map(commit).collect::<Result<_>>()?,
                 signatures: evidence(signatures)?,
+                borrowed,
             }
         }
     }
@@ -200,9 +210,9 @@ mod tests {
         trailing.push(0);
         assert!(decode(&trailing).is_err());
         let mut envelope: Envelope = bcs::from_bytes(&bytes).unwrap();
-        envelope.version = 2;
+        envelope.version = VERSION + 1;
         assert!(decode(&bcs::to_bytes(&envelope).unwrap()).is_err());
-        envelope.version = 1;
+        envelope.version = VERSION;
         let Item::Commit { commit, .. } = &mut envelope.item else {
             unreachable!()
         };

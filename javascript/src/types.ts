@@ -47,6 +47,11 @@ export type TransportItem =
       readonly boundary: readonly CommitHash[];
       readonly commits: readonly Commit[];
       readonly signatures: readonly SignatureEvidence[];
+      /**
+       * Tips of history this fragment does not authenticate itself; other
+       * items must. Usually empty. Optional when sending.
+       */
+      readonly borrowed?: readonly CommitHash[];
     };
 
 export interface MaterializationChange {

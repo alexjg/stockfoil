@@ -55,6 +55,7 @@ fn a_decoder_reconstructs_omitted_hashes_and_parent_references_as_verification_p
     let verified = UnverifiedItem::verify_fragment(
         root_range(&head),
         vec![sig(1, *head.hash()), sig(2, *middle.hash())],
+        BTreeSet::new(),
         decoder,
     )
     .unwrap();
@@ -87,7 +88,7 @@ fn decoder_failure_stops_consumption_without_producing_a_certificate() {
         })
     });
     assert_eq!(
-        UnverifiedItem::verify_fragment(root_range(&head), vec![sig(1, *head.hash())], decoder)
+        UnverifiedItem::verify_fragment(root_range(&head), vec![sig(1, *head.hash())], BTreeSet::new(), decoder)
             .unwrap_err(),
         VerificationError::InvalidItem
     );
@@ -104,6 +105,7 @@ fn signature_boundary_must_dominate_every_concurrent_latest_authored_commit() {
     let members = vec![head.clone(), right.clone(), root.clone(), left.clone()];
     let verify = |signatures| {
         UnverifiedItem::Fragment {
+            borrowed: BTreeSet::new(),
             range: range.clone(),
             commits: members.clone(),
             signatures,
@@ -213,6 +215,7 @@ fn standalone_checkpoints_and_head_announcements_do_not_invent_fragment_certific
     source
         .ingest(
             UnverifiedItem::Fragment {
+                borrowed: BTreeSet::new(),
                 range: range.clone(),
                 commits: vec![head.clone(), middle.clone(), boundary.clone(), root.clone()],
                 signatures: vec![
@@ -369,6 +372,7 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
         let verified = UnverifiedItem::verify_fragment(
             range.clone(),
             signatures.clone(),
+            BTreeSet::new(),
             members.clone().into_iter().map(Ok),
         )
         .unwrap();
@@ -390,7 +394,7 @@ fn seeded_dags_match_an_independent_author_frontier_oracle() {
             .cloned()
             .collect();
         assert_eq!(
-            UnverifiedItem::verify_fragment(range.clone(), incomplete, members.into_iter().map(Ok))
+            UnverifiedItem::verify_fragment(range.clone(), incomplete, BTreeSet::new(), members.into_iter().map(Ok))
                 .unwrap_err(),
             VerificationError::MissingSignature {
                 author: missing.author,

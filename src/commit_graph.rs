@@ -162,6 +162,11 @@ impl<P: Clone> CommitGraph<P> {
     /// dependencies. Every admission, including local signing, automatically
     /// drains the items it unblocks.
     ///
+    /// A fragment's borrowed members ([`crate::VerifiedItem::unauthenticated`])
+    /// need not be admitted, only authenticated by some verified item. Each
+    /// queued item's own authentication counts as soon as it is queued, so
+    /// queuing one item can admit others, and mutual borrowing cannot deadlock.
+    ///
     /// The `payload` callback runs now, even when admission is deferred, for each
     /// member not already delivered. Its results are owned by the queue; the
     /// callback itself is never retained. Exact queued duplicates reuse their
@@ -185,9 +190,16 @@ impl<P: Clone> CommitGraph<P> {
             .filter(|hash| !self.has_commit(hash))
             .copied()
             .collect();
+        let missing_auth: Vec<_> = item
+            .unauthenticated()
+            .filter(|hash| !self.is_authenticated(hash))
+            .copied()
+            .collect();
+        let queued = !missing.is_empty() || !missing_auth.is_empty();
         if missing.is_empty() {
             self.validate_fragment_admission(&item)?;
-        } else if self.pending_ingest.contains(&item) {
+        }
+        if queued && self.pending_ingest.contains(&item) {
             return Ok(self.ingest_report());
         }
         let payloads = item
@@ -196,8 +208,22 @@ impl<P: Clone> CommitGraph<P> {
             .map(|meta| (!self.by_hash.contains_key(meta.hash())).then(|| payload(meta)))
             .collect();
         let prepared = PreparedItem { item, payloads };
-        if !missing.is_empty() {
-            self.pending_ingest.push(prepared, missing);
+        if queued {
+            // A queued item's own authentication is usable immediately: it may
+            // unblock items borrowing its members, including ones it waits on.
+            let authenticated: Vec<_> = prepared
+                .item
+                .authenticated()
+                .filter(|hash| !self.has_commit(hash))
+                .copied()
+                .collect();
+            self.pending_ingest.push(prepared, missing, missing_auth);
+            for hash in authenticated {
+                self.pending_ingest.authenticate(hash);
+            }
+            if self.pending_ingest.has_ready() {
+                return Ok(self.finish_ingest(IngestReport::default()));
+            }
             return Ok(self.ingest_report());
         }
         let mut report = IngestReport::default();
@@ -215,6 +241,19 @@ impl<P: Clone> CommitGraph<P> {
     /// order. Some may already be delivered as unsigned local drafts.
     pub fn missing_dependencies(&self) -> impl Iterator<Item = &CommitHash> {
         self.pending_ingest.missing_dependencies()
+    }
+
+    /// Distinct borrowed members of queued items which no verified item has
+    /// authenticated yet, in unspecified order. Any item authenticating them
+    /// unblocks those waiters, even if that item is itself still queued.
+    pub fn missing_authentication(&self) -> impl Iterator<Item = &CommitHash> {
+        self.pending_ingest.missing_authentication()
+    }
+
+    /// Admitted, or authenticated by the signatures of a verified item this
+    /// graph has queued. Only the latter can be borrowed before admission.
+    fn is_authenticated(&self, hash: &CommitHash) -> bool {
+        self.has_commit(hash) || self.pending_ingest.is_authenticated(hash)
     }
 
     fn ingest_report(&self) -> IngestReport {
@@ -355,6 +394,7 @@ impl<P: Clone> CommitGraph<P> {
                 level,
                 boundary: start..self.fragments.boundary_ids.len(),
                 signature_boundary: BTreeMap::new(),
+                borrowed: Vec::new(),
             });
             self.nodes[head].headed_fragments.push(idx);
         }
@@ -513,6 +553,11 @@ impl<P: Clone> CommitGraph<P> {
                                 }
                             })
                         })
+                        .collect(),
+                    borrowed: self.fragments[fragment]
+                        .borrowed
+                        .iter()
+                        .map(|&idx| *self.nodes[idx].meta.hash())
                         .collect(),
                 }
             }
@@ -877,6 +922,8 @@ impl<P: Clone> CommitGraph<P> {
                     )
                 })
                 .collect();
+            self.fragments.entries[idx.0].borrowed =
+                item.borrowed.iter().map(|hash| self.by_hash[hash]).collect();
         }
     }
 
@@ -905,6 +952,37 @@ impl<P: Clone> CommitGraph<P> {
         // Reuse shared certificates for all newly ready local items before
         // discarding covered ones. Keep topology, not historical export proofs.
         let cover = self.minimal_cover();
+        // A borrowing certificate depends on other items to authenticate part
+        // of its history. Re-derive it from every signature we hold before any
+        // are pruned: a replaced item is contained in its replacement, so this
+        // carries all of its authentication forward, and borrowing persists
+        // only while no evidence for that history is held inside the fragment.
+        for fragment in &cover.fragments {
+            let head = self.by_hash[&fragment.range.head];
+            let idx = self.nodes[head].canonical_fragment().unwrap();
+            if self.fragments[idx].borrowed.is_empty() {
+                continue;
+            }
+            let members = self.fragments.members(&self.nodes, idx);
+            let certificate = self.held_certificate(&members);
+            if certificate.uncovered.iter().all(|hash| self.has_commit(hash))
+                && !certificate.uncovered.contains(&fragment.range.head)
+            {
+                let entry = &mut self.fragments.entries[idx.0];
+                entry.signature_boundary = certificate
+                    .signature_boundary
+                    .into_iter()
+                    .map(|(author, targets)| {
+                        (author, targets.iter().map(|hash| self.by_hash[hash]).collect())
+                    })
+                    .collect();
+                entry.borrowed = certificate
+                    .borrowed
+                    .iter()
+                    .map(|hash| self.by_hash[hash])
+                    .collect();
+            }
+        }
         let heads: HashSet<_> = cover.fragments.iter().map(|f| f.range.head).collect();
         let mut needed: HashSet<_> = cover
             .loose_commits
@@ -919,6 +997,7 @@ impl<P: Clone> CommitGraph<P> {
                 || fragment.level != self.nodes[fragment.head].headed_fragments.len()
             {
                 fragment.signature_boundary.clear();
+                fragment.borrowed.clear();
             }
             for (&author, targets) in &fragment.signature_boundary {
                 needed.extend(targets.iter().map(|&idx| (idx, author)));
@@ -955,19 +1034,18 @@ impl<P: Clone> CommitGraph<P> {
             let members = self
                 .nodes
                 .fragment_members(head, &boundary.iter().copied().collect::<Vec<_>>());
-            // Read only signatures attached to actual member nodes. A head
-            // signature supersedes older signatures by that author. No inherited
-            // arbitrary-target certificate or target-membership filter is needed.
-            let signatures = node
-                .signature_evidence()
-                .chain(
-                    members
-                        .iter()
-                        .filter(|&&idx| idx != head)
-                        .flat_map(|&idx| self.nodes[idx].signature_evidence())
-                        .filter(|evidence| !node.signatures.contains_key(&evidence.author)),
-                )
-                .collect();
+            // Read only signatures attached to actual member nodes. Members no
+            // held signature covers are borrowed, but only once admitted: an
+            // admitted commit was authenticated by some item, whereas an
+            // uncovered draft still awaits its own signature.
+            let certificate = self.held_certificate(&members);
+            if !certificate
+                .uncovered
+                .iter()
+                .all(|hash| self.has_commit(hash))
+            {
+                return None;
+            }
             let range = FragmentRange {
                 head: *node.meta.hash(),
                 boundary: boundary
@@ -982,7 +1060,8 @@ impl<P: Clone> CommitGraph<P> {
             UnverifiedItem::Fragment {
                 range,
                 commits,
-                signatures,
+                signatures: certificate.signatures,
+                borrowed: certificate.borrowed,
             }
         };
         let item = item.verify().ok()?;
@@ -993,6 +1072,41 @@ impl<P: Clone> CommitGraph<P> {
             return None;
         }
         Some(item)
+    }
+
+    // The best certificate for these members from signatures held on them:
+    // per-author signed frontiers, the evidence for exactly those targets, and
+    // the frontier of the members left uncovered as the borrowed tips.
+    fn held_certificate(&self, members: &HashSet<NodeIdx>) -> HeldCertificate {
+        let metas: BTreeMap<_, _> = members
+            .iter()
+            .map(|&idx| (*self.nodes[idx].meta.hash(), self.nodes[idx].meta.clone()))
+            .collect();
+        let evidence: Vec<_> = members
+            .iter()
+            .flat_map(|&idx| self.nodes[idx].signature_evidence())
+            .collect();
+        let (signature_boundary, covered) = crate::ingest::coverage(&metas, &evidence);
+        let signatures = evidence
+            .into_iter()
+            .filter(|e| {
+                signature_boundary
+                    .get(&e.author)
+                    .is_some_and(|targets| targets.contains(&e.commit))
+            })
+            .collect();
+        let uncovered: BTreeSet<_> = metas
+            .keys()
+            .filter(|hash| !covered.contains(hash))
+            .copied()
+            .collect();
+        let borrowed = crate::ingest::frontier(&metas, uncovered.clone());
+        HeldCertificate {
+            signatures,
+            signature_boundary,
+            borrowed,
+            uncovered,
+        }
     }
 
     pub(crate) fn commit_time(&self, commit: &CommitHash) -> Option<ChainTime> {
@@ -1257,12 +1371,21 @@ impl IndexMut<NodeIdx> for NodeStore {
     }
 }
 
+struct HeldCertificate {
+    signatures: Vec<SignatureEvidence>,
+    signature_boundary: BTreeMap<Author, BTreeSet<CommitHash>>,
+    borrowed: BTreeSet<CommitHash>,
+    uncovered: BTreeSet<CommitHash>,
+}
+
 #[derive(Clone)]
 struct Fragment {
     head: NodeIdx,
     level: usize,
     boundary: Range<usize>,
     signature_boundary: BTreeMap<Author, Vec<NodeIdx>>,
+    // Tips of the certificate's borrowed region, authenticated by other items.
+    borrowed: Vec<NodeIdx>,
 }
 
 #[derive(Clone, Default)]
@@ -1563,6 +1686,7 @@ mod tests {
         // The second received fragment carries its own certificate, including
         // evidence shared with the first. No historical signature insertion.
         let incoming = UnverifiedItem::Fragment {
+            borrowed: BTreeSet::new(),
             range: FragmentRange {
                 head: *right.hash(),
                 boundary: BTreeSet::new(),

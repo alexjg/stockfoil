@@ -143,6 +143,9 @@ pub(crate) enum TransportItem {
         boundary: Vec<String>,
         commits: Vec<Commit>,
         signatures: Vec<Evidence>,
+        /// Tips of history authenticated by other items. Usually empty.
+        #[serde(default)]
+        borrowed: Vec<String>,
     },
 }
 
@@ -174,12 +177,19 @@ impl TransportItem {
                 boundary,
                 commits,
                 signatures,
+                borrowed,
             } => {
                 let head = hash(&head)?;
                 let mut bounds = BTreeSet::new();
                 for bound in hashes(boundary)? {
                     if !bounds.insert(bound) {
                         return Err(Error::new("InvalidFragment", "duplicate fragment boundary"));
+                    }
+                }
+                let mut tips = BTreeSet::new();
+                for tip in hashes(borrowed)? {
+                    if !tips.insert(tip) {
+                        return Err(Error::new("InvalidFragment", "duplicate borrowed tip"));
                     }
                 }
                 let mut members = Vec::with_capacity(commits.len());
@@ -201,6 +211,7 @@ impl TransportItem {
                             .into_iter()
                             .map(Evidence::into_core)
                             .collect::<Result<_, _>>()?,
+                        borrowed: tips,
                     },
                     true,
                 )
@@ -233,6 +244,7 @@ impl TransportItem {
                 range,
                 commits,
                 signatures,
+                borrowed,
             } => Self::Fragment {
                 head: hex(range.head.as_slice()),
                 boundary: range.boundary.iter().map(|h| hex(h.as_slice())).collect(),
@@ -241,6 +253,7 @@ impl TransportItem {
                     .map(commit)
                     .collect::<Result<_, Error>>()?,
                 signatures: signatures.into_iter().map(Into::into).collect(),
+                borrowed: borrowed.iter().map(|h| hex(h.as_slice())).collect(),
             },
         })
     }
@@ -426,6 +439,7 @@ mod tests {
             head: h.clone(),
             boundary: vec![],
             signatures: vec![],
+            borrowed: vec![],
             commits: vec![
                 Commit::from_meta(&original, b"payload"),
                 Commit::from_meta(&original, b"payload"),
@@ -440,6 +454,7 @@ mod tests {
             boundary: vec![h.clone(), h],
             commits: vec![],
             signatures: vec![],
+            borrowed: vec![],
         };
         assert_eq!(
             duplicate_boundaries.verify().err().unwrap().message,

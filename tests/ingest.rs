@@ -612,6 +612,7 @@ fn bypass_parent_below_boundary_is_an_external_parent_not_a_payload_or_proof_mem
     let streamed = UnverifiedItem::verify_fragment(
         range.clone(),
         signatures.clone(),
+        BTreeSet::new(),
         commits.iter().cloned().map(Ok),
     )
     .unwrap();
@@ -695,6 +696,7 @@ fn bypass_parent_below_boundary_is_an_external_parent_not_a_payload_or_proof_mem
 
     let exported = receiver.export(&ItemId::Fragment(range.clone())).unwrap();
     let UnverifiedItem::Fragment {
+        borrowed: _,
         range: exported_range,
         commits,
         signatures,
@@ -762,6 +764,7 @@ fn omitted_in_range_parent_passes_stateless_checks_but_not_admission_even_when_a
         boundary: BTreeSet::from([*b.hash()]),
     };
     let incoming = UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range: range.clone(),
         commits: vec![head.clone(), middle.clone()],
         signatures: vec![proof(1, *head.hash())],
@@ -769,6 +772,7 @@ fn omitted_in_range_parent_passes_stateless_checks_but_not_admission_even_when_a
     let streamed = UnverifiedItem::verify_fragment(
         range.clone(),
         vec![proof(1, *head.hash())],
+        BTreeSet::new(),
         [Ok(head.clone()), Ok(middle.clone())],
     )
     .unwrap();
@@ -836,6 +840,7 @@ fn omitted_in_range_parent_passes_stateless_checks_but_not_admission_even_when_a
     // Supplying x and its proof instead is canonical; the earlier rejection
     // neither authenticated pending m nor changed its stored payload.
     let valid = UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range,
         commits: vec![head.clone(), middle.clone(), x.clone()],
         signatures: vec![proof(1, *head.hash()), proof(2, *x.hash())],
@@ -1262,6 +1267,7 @@ fn distinct_queued_certificates_with_the_same_id_are_both_processed() {
         .verify()
         .unwrap();
     let second = UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range: range.clone(),
         commits: vec![head.clone(), middle.clone()],
         signatures: vec![proof(1, *head.hash()), proof(1, *middle.hash())],
@@ -1323,6 +1329,7 @@ fn deferred_rejection_does_not_suppress_same_id_valid_item_or_other_ready_items(
         .verify()
         .unwrap();
     let valid = UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range: range.clone(),
         commits: vec![head.clone(), middle.clone(), x.clone()],
         signatures: vec![proof(1, *head.hash()), proof(2, *x.hash())],

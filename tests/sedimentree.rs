@@ -15,7 +15,7 @@ use std::{
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use stockfoil::{
     Author, BlobHash, Checkpoint, CommitContents, CommitGraph, CommitHash, CommitMeta, ExportError,
-    Fragment, FragmentRange, FragmentReadError, IngestError, ItemId, LooseCommit,
+    Fragment, FragmentRange, FragmentReadError, IngestError, ItemId, LooseCommit, MinimalCover,
     SedimentreeSummary, SignatureEvidence, UnverifiedItem,
 };
 use support::{author, key, sign};
@@ -189,6 +189,7 @@ fn fixture_item(commits: &[CommitMeta], meta: &CommitMeta) -> UnverifiedItem {
         .collect();
     let signatures = members.iter().map(evidence).collect();
     UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range,
         commits: members,
         signatures,
@@ -333,7 +334,10 @@ impl Model {
                 if !dependencies.is_subset(&published) {
                     continue;
                 }
+                // Admitted members may be borrowed: some other item has
+                // already authenticated them. Unadmitted ones need evidence.
                 let mut covered = dependencies;
+                covered.extend(members.intersection(&published).copied());
                 for (signer, target) in &self.signatures {
                     let mut seen = BTreeSet::new();
                     let mut stack = vec![*target];
@@ -1069,6 +1073,7 @@ fn deferred_invalid_fragment_does_not_roll_back_its_dependency_or_block_valid_wa
     // statelessly verifiable but graph-dependent canonical placement is invalid.
     let members: Vec<_> = [0, 17, 18].map(|i| case.commits[i].clone()).into();
     let invalid = UnverifiedItem::Fragment {
+        borrowed: BTreeSet::new(),
         range: case_range(case, 18),
         signatures: members.iter().map(evidence).collect(),
         commits: members,
@@ -1154,6 +1159,7 @@ fn redundant_ancestor_boundary_is_retained_even_when_normalization_excludes_its_
         let item = support::received_item(&graph, meta.clone());
         if hash(meta) == hash(&case.commits[3]) {
             let UnverifiedItem::Fragment {
+                borrowed: _,
                 range,
                 commits,
                 signatures,
@@ -1444,7 +1450,7 @@ fn pending_local_items_do_not_enter_the_index_until_their_certificates_exist() {
 }
 
 #[test]
-fn pending_local_fragment_does_not_block_an_independent_certified_fragment() {
+fn mixed_author_fragment_borrows_an_ancestor_authenticated_by_an_independent_sibling() {
     let seed = 0xb0_0d;
     let alice = author(&key(1));
     let bob = author(&key(2));
@@ -1457,7 +1463,7 @@ fn pending_local_fragment_does_not_block_an_independent_certified_fragment() {
         seed,
         commits: vec![root, boundary, descendant, head, sibling],
     };
-    let [_root, boundary, descendant, head, sibling] = case.commits.as_slice() else {
+    let [root, boundary, descendant, head, sibling] = case.commits.as_slice() else {
         unreachable!()
     };
     let mut source = CommitGraph::new();
@@ -1466,79 +1472,64 @@ fn pending_local_fragment_does_not_block_an_independent_certified_fragment() {
         source.ingest_local_commit(meta.clone(), hash(meta));
         model.ingest(meta, true);
     }
-    for (signer, meta) in [(2, boundary), (1, descendant), (2, head), (1, sibling)] {
+    for (signer, meta) in [(2, boundary), (1, descendant), (2, head)] {
         add_signature(&mut source, &mut model, signer, meta);
         check(&source, &model, &case, "partial mixed-author signatures");
-        assert!(source.minimal_cover().loose_commits.is_empty());
-        assert_eq!(
-            source.minimal_cover().fragments.len(),
-            usize::from(hash(meta) == hash(sibling))
-        );
+        // Nobody has signed Alice's root yet, so nothing can be published.
+        assert_eq!(source.minimal_cover(), MinimalCover::default());
         check_direct_inventory(&source, &model, &case);
     }
-    assert_eq!(model.published(&case.commits).len(), 2);
-    // The independent sibling publishes immediately. B and its descendants
-    // remain pending, and cannot borrow Alice's certificate from another range.
-    for id in [
-        ItemId::Commit(hash(boundary)),
-        ItemId::Fragment(case_range(&case, 1)),
-        ItemId::Fragment(case_range(&case, 3)),
-    ] {
-        assert_eq!(
-            source.export(&id).unwrap_err(),
-            ExportError::NotInMinimalCover(id)
-        );
-    }
-    let mut destination = CommitGraph::new();
-    destination.merge(&source);
-    check(
-        &destination,
-        &model,
-        &case,
-        "independent certified history transfers",
-    );
-    add_signature(&mut source, &mut model, 1, boundary);
+    // Alice's sibling authenticates the root. B's range then borrows it rather
+    // than waiting for Alice to sign something inside that range.
+    add_signature(&mut source, &mut model, 1, sibling);
+    check(&source, &model, &case, "sibling authenticates the shared root");
+    assert_eq!(model.published(&case.commits).len(), case.commits.len());
     assert_structural_cover(&source, summaries(&source).1);
     check_direct_inventory(&source, &model, &case);
-    let item = source
-        .export(&ItemId::Fragment(case_range(&case, 3)))
+    let borrowing = source
+        .export(&ItemId::Fragment(case_range(&case, 1)))
         .unwrap()
         .verify()
         .unwrap();
+    assert_eq!(borrowing.borrowed(), &BTreeSet::from([hash(root)]));
     assert_eq!(
-        item.dependencies().copied().collect::<Vec<_>>(),
-        [hash(boundary)]
+        borrowing.unauthenticated().copied().collect::<Vec<_>>(),
+        [hash(root)]
     );
-    let id = item.id().clone();
-    let report = destination.ingest(item, hash).unwrap();
+    let lending = source
+        .export(&ItemId::Fragment(case_range(&case, 4)))
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert!(lending.borrowed().is_empty());
+
+    // A destination with neither range queues the borrower until some item
+    // authenticates the root. It does not need to be admitted first.
+    let mut destination = CommitGraph::new();
+    let id = borrowing.id().clone();
+    let report = destination.ingest(borrowing, hash).unwrap();
     assert!(report.admitted.is_empty());
-    assert!(report.rejected.is_empty());
     assert_eq!(report.pending, 1);
+    assert!(destination.missing_dependencies().next().is_none());
     assert_eq!(
-        destination
-            .missing_dependencies()
-            .copied()
-            .collect::<BTreeSet<_>>(),
-        [hash(boundary)].into()
+        destination.missing_authentication().copied().collect::<Vec<_>>(),
+        [hash(root)]
     );
-    assert!(destination.publishable_commit(head.hash()).is_none());
-    let report = destination.merge(&source);
+    let report = destination.ingest(lending, hash).unwrap();
     assert!(report.admitted.contains(&id));
     assert!(report.rejected.is_empty());
     assert_eq!(report.pending, 0);
-    check(
-        &destination,
-        &model,
-        &case,
-        "complete mixed-author cover merges",
-    );
+    assert!(destination.missing_authentication().next().is_none());
+    destination.merge(&source);
+    check(&destination, &model, &case, "borrowing cover merges");
+    assert_eq!(destination.minimal_cover(), source.minimal_cover());
     let mut relay = CommitGraph::new();
     relay.merge(&destination);
-    check(&relay, &model, &case, "complete mixed-author cover relays");
+    check(&relay, &model, &case, "borrowing cover relays");
 }
 
 #[test]
-fn late_other_author_fork_requires_fresh_evidence_after_certificate_replacement() {
+fn late_other_author_fork_borrows_pruned_ancestor_authentication() {
     let seed = 0xce47;
     let root = mine_as(vec![], 0, seed, 0, author(&key(1)));
     let head = mine_as(vec![hash(&root)], 1, seed, 1, author(&key(1)));
@@ -1555,7 +1546,7 @@ fn late_other_author_fork_requires_fresh_evidence_after_certificate_replacement(
     support::receive_commit(&mut source, root.clone(), hash(root));
     model.ingest(root, false);
     let stale = ItemId::Commit(hash(root));
-    source.export(&stale).unwrap().verify().unwrap();
+    let loose_root = source.export(&stale).unwrap().verify().unwrap();
     support::receive_commit(&mut source, head.clone(), hash(head));
     model.ingest(head, false);
     let old = source.minimal_cover();
@@ -1569,7 +1560,8 @@ fn late_other_author_fork_requires_fresh_evidence_after_certificate_replacement(
 
     // The old loose certificate is no longer available to a new local fork.
     model.signatures.remove(&(*root.author(), hash(root)));
-    // Bob's signature alone cannot admit an Alice-authored interior ancestor.
+    // Bob's signature alone cannot cover an Alice-authored interior ancestor,
+    // so the fork borrows the root's authentication from the head's range.
     source.ingest_local_commit(fork.clone(), hash(fork));
     model.ingest(fork, true);
     add_signature(&mut source, &mut model, 2, fork);
@@ -1579,25 +1571,42 @@ fn late_other_author_fork_requires_fresh_evidence_after_certificate_replacement(
         &case,
         "late fork with pruned ancestor certificate",
     );
-    assert_eq!(model.published(&case.commits).len(), 2);
-    assert_eq!(source.minimal_cover(), old);
-    let fork_id = ItemId::Fragment(case_range(&case, 2));
-    assert_eq!(
-        source.export(&fork_id).unwrap_err(),
-        ExportError::NotInMinimalCover(fork_id)
-    );
-    check_direct_inventory(&source, &model, &case);
-
-    // Alice co-signs the pending local head, not the historical root.
-    add_signature(&mut source, &mut model, 1, fork);
+    assert_eq!(model.published(&case.commits).len(), 3);
+    assert!(source.has_commit(fork.hash()));
     assert_structural_cover(&source, summaries(&source).1);
     assert_eq!(source.minimal_cover().fragments.len(), 2);
+    let fork_item = source
+        .export(&ItemId::Fragment(case_range(&case, 2)))
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert_eq!(fork_item.borrowed(), &BTreeSet::from([hash(root)]));
     // The old covered commit still cannot be exported on its own.
     assert_eq!(
         source.export(&stale).unwrap_err(),
         ExportError::NotInMinimalCover(stale)
     );
     check_direct_inventory(&source, &model, &case);
+
+    // A replica still holding the root's own signature re-derives a
+    // self-contained certificate for the borrowing fragment.
+    let mut upgraded = CommitGraph::new();
+    upgraded.ingest(loose_root, hash).unwrap();
+    let report = upgraded.ingest(fork_item, hash).unwrap();
+    assert_eq!(report.admitted.len(), 1);
+    let reexported = upgraded
+        .export(&ItemId::Fragment(case_range(&case, 2)))
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert!(reexported.borrowed().is_empty());
+    assert!(reexported.unauthenticated().next().is_none());
+    // That certificate alone now suffices at an empty destination.
+    let mut fresh = CommitGraph::new();
+    let report = fresh.ingest(reexported, hash).unwrap();
+    assert_eq!(report.pending, 0);
+    assert!(fresh.has_commit(fork.hash()));
+    assert!(fresh.has_commit(root.hash()));
 }
 
 fn case_range(case: &Case, node: usize) -> FragmentRange {
