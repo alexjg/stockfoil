@@ -114,6 +114,12 @@ an invalid queued fragment without itself being rejected. Admission is atomic
 per item, not per batch. `pending_items()` and `missing_dependencies()` expose
 queue progress. There are currently no queue resource limits.
 
+Because older signatures are discarded once covered, a fragment branching from
+inside an older fragment may be unable to authenticate the shared history
+itself. Such a fragment declares that history as borrowed and waits until any
+other verified item authenticates it; `missing_authentication()` lists what it
+is waiting for. Each item need not authenticate itself, but every cover does.
+
 ## A history lesson
 
 This library grew out of the work I have been doing on

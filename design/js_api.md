@@ -75,8 +75,13 @@ export type TransportItem =
       readonly boundary: readonly CommitHash[];
       readonly commits: readonly Commit[];
       readonly signatures: readonly SignatureEvidence[];
+      readonly borrowed?: readonly CommitHash[]; // Usually empty.
     };
 ```
+
+`borrowed` lists the tips of fragment history that other items authenticate;
+see [borrowed authentication](authors_signatures_revocation.md#borrowed-authentication).
+Omitting it means the fragment authenticates all of its members itself.
 
 `authorId(bytes)` and `commitHash(bytes)` convert raw public-key and hash bytes to
 canonical lowercase identifiers. Validate identifiers at the binding boundary;
@@ -130,6 +135,7 @@ export declare class CommitGraph {
   isAncestor(ancestor: CommitHash, descendant: CommitHash): boolean;
   pendingItems(): number;
   missingDependencies(): readonly CommitHash[];
+  missingAuthentication(): readonly CommitHash[];
 
   dispose(): void;
 }

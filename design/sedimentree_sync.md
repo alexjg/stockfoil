@@ -123,6 +123,13 @@ queued work it unblocks. `ingest_signature` returns
 `missing_dependencies()` iterates distinct unadmitted prerequisite hashes in
 unspecified order; some may already be delivered as local drafts. These queries
 allow dependency fetching without an external verified-item retry queue.
+
+A fragment may also borrow authentication for part of its history (see
+[borrowed authentication](authors_signatures_revocation.md#borrowed-authentication)).
+Its unauthenticated members are not dependencies: they need only be authenticated
+by some verified item, queued or admitted, which wakes the borrower just as an
+admission does. `missing_authentication()` iterates borrowed members no verified
+item has authenticated yet. Enqueuing an item can therefore admit others.
 Cloning the graph clones queued items and their owned payloads. Export and merge
 do not transfer the sender's queued items; merge can unblock the receiver's queue.
 

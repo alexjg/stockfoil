@@ -57,6 +57,45 @@ publishable. This is transport evidence for verification and export, retained
 independently of viewpoints. `CommitGraph` does not maintain per-author
 `signature_frontiers` or a separate authenticated set.
 
+#### Borrowed authentication
+
+Discarding signatures means a fragment can't always authenticate itself. Say Bob
+writes `R → C → S → H` and his fragment carries only his signature on `H`. If
+somebody branches from `C`, a later fragment on that branch contains `C` but not
+`S` or `H`. Bob's latest commit in it is `C`, and the only surviving evidence
+for `C` is the signature on `H`, outside the fragment. Peers which received
+Bob's fragment never had a signature on `C` at all. This happens with ordinary
+concurrency (a draft based on `C` signed after Bob's fragment arrives), and
+routinely once commits can be created from arbitrary points in the graph.
+
+So a fragment certificate may declare a *borrowed region*: tips among its
+members whose ancestry within the fragment need not be covered by its own
+signatures. Verification checks author coverage everywhere outside the region,
+and reports the members the item does not cover itself as `unauthenticated()`.
+Those members aren't dependencies. Admission only needs each of them to be
+authenticated by some verified item, queued or admitted. Authorship is a
+stateless fact about a signature and hash-bound metadata, independent of
+whether that item's placement is ever accepted, so the queue records the members
+each verified item authenticates when it is enqueued. Mutually borrowing items
+therefore can't deadlock, and no joint verification of incoming items is needed.
+A borrower can even admit a commit that its lender needs as a boundary.
+
+Locally, a certificate borrows only members which are already admitted; an
+unsigned draft must still wait for its own signature. Certificates which borrow
+are re-derived from every signature we hold before pruning, so they become
+self-contained whenever we have evidence inside the fragment. Because a replaced
+item is contained in its replacement, its signatures are also members of the
+replacement, so re-derivation carries its authentication forward: the current
+cover as a whole always authenticates everything it advertises.
+
+The guarantee is now about the cover, not each item. A peer syncing one branch
+may need items from another branch to authenticate the shared history. One edge
+case remains: if we admit a borrower using authentication from an item we never
+admit (for example, one rejected for non-canonical placement, or still waiting
+on a dependency), our cover cannot authenticate the borrowed history for a relay
+until some peer supplies an item that does. This doesn't affect safety, only
+progress, and requires a buggy or malicious peer or an incomplete sync.
+
 ### Creating Local Commits
 
 Signing may require IO, but local edits should show up immediately. The flow is:
