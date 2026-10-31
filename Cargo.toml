@@ -25,3 +25,9 @@ once_cell = { version = "1.21", default-features = false, features = ["alloc", "
 bcs = "0.2.1"
 rand = "0.10.2"
 serde = { version = "1", features = ["derive"] }
+
+# Optimize dependencies (not workspace crates) in dev and test builds. Tests
+# mine hashes and verify many signatures; unoptimized blake3 and ed25519 make
+# them orders of magnitude slower. Our own crates stay fully debuggable.
+[profile.dev.package."*"]
+opt-level = 3
