@@ -12,12 +12,11 @@ use std::{
     ops::ControlFlow,
 };
 
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use stockfoil::{
-    CommitGraph, CommitHash, CommitMeta, FragmentRange, ItemId, UnverifiedItem,
-    VerificationError,
+    CommitGraph, CommitHash, CommitMeta, FragmentRange, ItemId, UnverifiedItem, VerificationError,
 };
-use support::{at_depth, key, proof, seeded_author, sign};
+use support::{at_depth, key, proof, seeded_author, sign, signed_commit};
 
 fn depth(hash: &CommitHash) -> usize {
     hash.as_bytes().iter().take_while(|b| **b == 0).count()
@@ -75,7 +74,10 @@ fn signing_after_the_branch_point_is_compressed_does_not_strand_a_local_draft() 
     alices.merge(&bobs);
 
     sign(&mut alices, &key(1), *x.hash());
-    assert!(alices.has_commit(x.hash()), "signed draft must be published");
+    assert!(
+        alices.has_commit(x.hash()),
+        "signed draft must be published"
+    );
     let range = FragmentRange {
         head: *x.hash(),
         boundary: BTreeSet::new(),
@@ -284,12 +286,11 @@ fn a_borrower_can_admit_the_lenders_boundary() {
     }
 }
 
-/// Authentication by a queued item is a stateless fact about its signatures,
-/// so it suffices even if that item is never admitted. The resulting cover
-/// cannot authenticate the borrowed history on its own, though: relays wait
-/// until some peer supplies an item which does.
+/// A proof only counts once the item holding it can be admitted, alone or in a
+/// batch. Otherwise a graph could advertise a borrower whose proof it cannot
+/// relay, leaving peers which sync from it stuck.
 #[test]
-fn authentication_from_a_never_admitted_item_is_usable_but_not_relayed() {
+fn a_borrower_waits_until_its_proof_can_be_admitted() {
     let q = at_depth(3, [], 0);
     let missing = at_depth(5, [], 1);
     let carol_tip = at_depth(3, [*q.hash()], 0);
@@ -304,31 +305,102 @@ fn authentication_from_a_never_admitted_item_is_usable_but_not_relayed() {
     )
     .verify()
     .unwrap();
-    let borrower = fragment(&borrower_head, &[], &[&q, &borrower_head], &[(4, &borrower_head)], &[&q])
-        .verify()
-        .unwrap();
+    let borrower = fragment(
+        &borrower_head,
+        &[],
+        &[&q, &borrower_head],
+        &[(4, &borrower_head)],
+        &[&q],
+    )
+    .verify()
+    .unwrap();
     let mut graph = CommitGraph::new();
-    graph.ingest(lender.clone(), payload).unwrap();
+    graph.ingest(lender, payload).unwrap();
     let report = graph.ingest(borrower, payload).unwrap();
-    assert_eq!(report.admitted.len(), 1);
-    assert_eq!(report.pending, 1);
-    assert!(graph.has_commit(borrower_head.hash()));
+    assert!(report.admitted.is_empty());
+    assert_eq!(report.pending, 2);
+    assert!(!graph.has_commit(borrower_head.hash()));
+    // The proof is held, so only the lender's dependency is missing.
+    assert!(graph.missing_authentication().next().is_none());
     assert_eq!(
         graph.missing_dependencies().copied().collect::<Vec<_>>(),
         [*missing.hash()]
     );
-
+    // Nothing unadmittable is advertised.
     let mut relay = CommitGraph::new();
     relay.merge(&graph);
-    assert!(!relay.has_commit(borrower_head.hash()));
+    assert_eq!(relay.pending_items(), 0);
+
+    let report = graph
+        .ingest(signed_commit(&missing, 5).verify().unwrap(), payload)
+        .unwrap();
+    assert_eq!(report.admitted.len(), 3);
+    assert_eq!(report.pending, 0);
+    relay.merge(&graph);
+    assert_eq!(relay.pending_items(), 0);
+    assert!(relay.has_commit(borrower_head.hash()));
+}
+
+/// A lender rejected for its placement proves nothing to the batch. Its
+/// borrower stays queued until a valid proof arrives.
+#[test]
+fn a_rejected_lender_does_not_admit_its_borrower() {
+    let q = at_depth(3, [], 0);
+    let x = at_depth(2, [], 1);
+    let stray = at_depth(6, [], 0);
+    let carol_tip = at_depth(3, [*q.hash()], 0);
+    let borrower_head = at_depth(4, [*x.hash(), *q.hash()], 2);
+    // An extra external parent outside the declared boundary's history.
+    let bad_head = at_depth(1, [*x.hash(), *carol_tip.hash(), *stray.hash()], 1);
+    let good_head = at_depth(1, [*x.hash(), *carol_tip.hash()], 1);
+    let lender = |head: &CommitMeta| {
+        fragment(
+            head,
+            &[&x],
+            &[&q, &carol_tip, head],
+            &[(1, head), (3, &carol_tip)],
+            &[],
+        )
+        .verify()
+        .unwrap()
+    };
+    let borrower = fragment(
+        &borrower_head,
+        &[],
+        &[&x, &q, &borrower_head],
+        &[(4, &borrower_head), (2, &x)],
+        &[&q],
+    )
+    .verify()
+    .unwrap();
+    let mut graph = CommitGraph::new();
+    graph
+        .ingest(signed_commit(&stray, 6).verify().unwrap(), payload)
+        .unwrap();
+    graph.ingest(borrower, payload).unwrap();
+    let bad = lender(&bad_head);
+    let bad_id = bad.id().clone();
+    let report = graph.ingest(bad, payload).unwrap();
+    assert!(report.admitted.is_empty());
+    assert_eq!(report.rejected.len(), 1);
+    assert_eq!(report.rejected[0].item, bad_id);
     assert_eq!(
-        relay.missing_authentication().copied().collect::<Vec<_>>(),
+        report.rejected[0].error,
+        stockfoil::IngestError::InvalidFragment
+    );
+    assert_eq!(report.pending, 1);
+    assert!(!graph.has_commit(x.hash()));
+    assert_eq!(
+        graph.missing_authentication().copied().collect::<Vec<_>>(),
         [*q.hash()]
     );
-    // Any authenticating item unblocks the relay, even one it cannot admit.
-    let report = relay.ingest(lender, payload).unwrap();
-    assert!(relay.has_commit(borrower_head.hash()));
-    assert_eq!(report.pending, 1);
+
+    let report = graph.ingest(lender(&good_head), payload).unwrap();
+    assert_eq!(report.admitted.len(), 2);
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.pending, 0);
+    assert!(graph.has_commit(borrower_head.hash()));
+    assert!(!graph.has_commit(bad_head.hash()));
 }
 
 // Replicas branching from arbitrary delivered commits, signing lazily and in
@@ -405,16 +477,32 @@ fn arbitrary_branch_points_keep_covers_self_authenticating() {
                     let other = rng.random_range(0..REPLICAS);
                     if other != replica {
                         let (target, source) = pair(&mut graphs, replica, other);
-                        let report = target.merge(source);
-                        assert!(report.rejected.is_empty());
+                        if rng.random_bool(0.5) {
+                            let report = target.merge(source);
+                            assert!(report.rejected.is_empty());
+                        } else {
+                            // An interrupted sync: some of the cover, in any
+                            // order. Items left queued, including borrowers
+                            // whose lenders are stuck, must not be advertised.
+                            let mut items = source.export_changes(&Default::default()).0.added;
+                            items.shuffle(&mut rng);
+                            items.truncate(rng.random_range(0..=items.len()));
+                            for item in items {
+                                let item = item.verify().unwrap();
+                                let report = target
+                                    .ingest(item, |meta| {
+                                        source.publishable_commit(meta.hash()).unwrap().1.clone()
+                                    })
+                                    .unwrap();
+                                assert!(report.rejected.is_empty());
+                            }
+                        }
                     }
                 }
             }
             // Only the acting replica changed.
-            borrowing += assert_self_authenticating(
-                &graphs[replica],
-                &format!("seed={seed} step={step}"),
-            );
+            borrowing +=
+                assert_self_authenticating(&graphs[replica], &format!("seed={seed} step={step}"));
         }
         for (replica, pending) in drafts.iter_mut().enumerate() {
             for hash in pending.drain(..) {
@@ -445,7 +533,10 @@ fn arbitrary_branch_points_keep_covers_self_authenticating() {
         }
     }
     eprintln!("borrowing cover items observed: {borrowing}");
-    assert!(borrowing > 0, "the fixture must exercise borrowed certificates");
+    assert!(
+        borrowing > 0,
+        "the fixture must exercise borrowed certificates"
+    );
 }
 
 fn pair<T>(items: &mut [T], target: usize, source: usize) -> (&mut T, &T) {
@@ -484,24 +575,37 @@ fn assert_self_authenticating(graph: &CommitGraph<CommitHash>, context: &str) ->
         .loose_commits
         .iter()
         .map(|c| ItemId::Commit(c.commit))
-        .chain(cover.fragments.iter().map(|f| ItemId::Fragment(f.range.clone())))
+        .chain(
+            cover
+                .fragments
+                .iter()
+                .map(|f| ItemId::Fragment(f.range.clone())),
+        )
     {
-        let item = graph.export(&id).unwrap().verify().unwrap_or_else(|e| {
-            panic!("{context}: cover item {id:?} fails verification: {e:?}")
-        });
+        let item =
+            graph.export(&id).unwrap().verify().unwrap_or_else(|e| {
+                panic!("{context}: cover item {id:?} fails verification: {e:?}")
+            });
         if let ItemId::Fragment(range) = &id {
             assert!(depth(&range.head) > 0);
         }
         items.insert(id, item);
     }
     // Relay the cover from empty in reverse order, without a scheduler.
-    let borrowing = items.values().filter(|item| !item.borrowed().is_empty()).count();
+    let borrowing = items
+        .values()
+        .filter(|item| !item.borrowed().is_empty())
+        .count();
     let mut fresh = CommitGraph::new();
     for item in items.into_values().rev() {
         let report = fresh.ingest(item, |meta| *meta.hash()).unwrap();
         assert!(report.rejected.is_empty(), "{context}");
     }
-    assert_eq!(fresh.pending_items(), 0, "{context}: cover leaves items queued");
+    assert_eq!(
+        fresh.pending_items(),
+        0,
+        "{context}: cover leaves items queued"
+    );
     let mut admitted = Vec::new();
     graph.traverse(|meta, _| {
         if graph.has_commit(meta.hash()) {

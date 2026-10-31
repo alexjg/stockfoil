@@ -15,11 +15,11 @@ use std::sync::OnceLock;
 use crate::{
     collections::{HashMap, HashSet},
     Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
-    FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId,
+    FragmentRange, FragmentReadError, IngestReport, ItemId,
     MaterializationChange, MaterializationCursor, SedimentreeView, Signature, SignatureError,
     SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
-    pending_ingest::{PendingIngest, PreparedItem},
+    admission::{self, History, Overlay, PreparedItem, Queue, Step},
     sedimentree::MinimalCover,
 };
 
@@ -36,7 +36,7 @@ pub struct CommitGraph<P> {
     // over
     pending_local: HashSet<CommitHash>,
     // Verified received items and owned payloads, not yet delivered history.
-    pending_ingest: PendingIngest<P>,
+    pending_ingest: Queue<P>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +93,7 @@ impl<P: Clone> CommitGraph<P> {
             heads: BTreeSet::new(),
             permissions: HashMap::new(),
             pending_local: HashSet::new(),
-            pending_ingest: PendingIngest::default(),
+            pending_ingest: Queue::default(),
         }
     }
 
@@ -163,9 +163,11 @@ impl<P: Clone> CommitGraph<P> {
     /// drains the items it unblocks.
     ///
     /// A fragment's borrowed members ([`crate::VerifiedItem::unauthenticated`])
-    /// need not be admitted, only authenticated by some verified item. Each
-    /// queued item's own authentication counts as soon as it is queued, so
-    /// queuing one item can admit others, and mutual borrowing cannot deadlock.
+    /// must be authenticated by admitted history or by items admitted in the
+    /// same batch: the largest set of queued items which supply each other's
+    /// missing dependencies and proofs. Queuing one item can therefore admit
+    /// others. Placement is validated for the whole batch before any of it is
+    /// inserted, and a proof from an item which cannot be admitted never counts.
     ///
     /// The `payload` callback runs now, even when admission is deferred, for each
     /// member not already delivered. Its results are owned by the queue; the
@@ -192,12 +194,12 @@ impl<P: Clone> CommitGraph<P> {
             .collect();
         let missing_auth: Vec<_> = item
             .unauthenticated()
-            .filter(|hash| !self.is_authenticated(hash))
+            .filter(|hash| !self.has_commit(hash))
             .copied()
             .collect();
         let queued = !missing.is_empty() || !missing_auth.is_empty();
         if missing.is_empty() {
-            self.validate_fragment_admission(&item)?;
+            admission::validate_placement(&item, &self.history(), &Overlay::new())?;
         }
         if queued && self.pending_ingest.contains(&item) {
             return Ok(self.ingest_report());
@@ -209,22 +211,15 @@ impl<P: Clone> CommitGraph<P> {
             .collect();
         let prepared = PreparedItem { item, payloads };
         if queued {
-            // A queued item's own authentication is usable immediately: it may
-            // unblock items borrowing its members, including ones it waits on.
-            let authenticated: Vec<_> = prepared
-                .item
-                .authenticated()
-                .filter(|hash| !self.has_commit(hash))
-                .copied()
-                .collect();
+            // The new item may complete a batch with items already queued.
+            // Queuing alone cannot make local work certifiable, so try the
+            // queue first and only drain everything once something changed.
             self.pending_ingest.push(prepared, missing, missing_auth);
-            for hash in authenticated {
-                self.pending_ingest.authenticate(hash);
+            let mut report = IngestReport::default();
+            if !self.queue_step(&mut report) {
+                return Ok(self.ingest_report());
             }
-            if self.pending_ingest.has_ready() {
-                return Ok(self.finish_ingest(IngestReport::default()));
-            }
-            return Ok(self.ingest_report());
+            return Ok(self.finish_ingest(report));
         }
         let mut report = IngestReport::default();
         self.admit_prepared(prepared, &mut report);
@@ -243,17 +238,19 @@ impl<P: Clone> CommitGraph<P> {
         self.pending_ingest.missing_dependencies()
     }
 
-    /// Distinct borrowed members of queued items which no verified item has
-    /// authenticated yet, in unspecified order. Any item authenticating them
-    /// unblocks those waiters, even if that item is itself still queued.
+    /// Distinct borrowed members of queued items for which no admitted or
+    /// queued item holds a proof, in unspecified order. A queued proof only
+    /// counts once its item can be admitted, alone or together with others.
     pub fn missing_authentication(&self) -> impl Iterator<Item = &CommitHash> {
         self.pending_ingest.missing_authentication()
     }
 
-    /// Admitted, or authenticated by the signatures of a verified item this
-    /// graph has queued. Only the latter can be borrowed before admission.
-    fn is_authenticated(&self, hash: &CommitHash) -> bool {
-        self.has_commit(hash) || self.pending_ingest.is_authenticated(hash)
+    fn history(&self) -> HistoryView<'_> {
+        HistoryView {
+            nodes: &self.nodes,
+            by_hash: &self.by_hash,
+            pending_local: &self.pending_local,
+        }
     }
 
     fn ingest_report(&self) -> IngestReport {
@@ -272,57 +269,6 @@ impl<P: Clone> CommitGraph<P> {
             }
         }
         self.admit_certificate(prepared.item, report);
-    }
-
-    // Stateless verification proves member reachability and depth, and derives
-    // exact external parents. Placement in boundary history and boundary stops
-    // reached through omitted metadata remain graph-dependent.
-    fn validate_fragment_admission(
-        &self,
-        item: &crate::VerifiedItem,
-    ) -> Result<(), crate::IngestError> {
-        let ItemId::Fragment(range) = &item.id else {
-            return Ok(());
-        };
-        let invalid = crate::IngestError::InvalidFragment;
-        let boundary_nodes = range
-            .boundary
-            .iter()
-            .map(|h| self.by_hash[h])
-            .collect::<Vec<_>>();
-        let excluded = self.nodes.clock_for_heads(&boundary_nodes);
-        let in_excluded = |hash: &CommitHash| {
-            self.by_hash
-                .get(hash)
-                .is_some_and(|&idx| excluded.contains(self.nodes[idx].chain, idx))
-        };
-        if item.commits.iter().any(|meta| in_excluded(meta.hash())) {
-            return Err(invalid);
-        }
-        let mut stack = Vec::new();
-        for hash in item.external_parents() {
-            if !in_excluded(hash) {
-                return Err(invalid);
-            }
-            stack.push(self.by_hash[hash]);
-        }
-        let mut boundary = BTreeSet::new();
-        let mut visited = HashSet::new();
-        let depth = sedimentree_depth(&range.head);
-        while let Some(idx) = stack.pop() {
-            if !visited.insert(idx) {
-                continue;
-            }
-            if self.nodes[idx].depth >= depth {
-                boundary.insert(*self.nodes[idx].meta.hash());
-            } else {
-                stack.extend(self.parents_by_node_idx(idx));
-            }
-        }
-        if boundary != range.boundary {
-            return Err(invalid);
-        }
-        Ok(())
     }
 
     // Only called for a new commit once all parents are present. Received
@@ -929,7 +875,8 @@ impl<P: Clone> CommitGraph<P> {
 
     // Local work and received items may unblock one another. Received items
     // already have certificates; only local work needs certificate assembly.
-    fn finish_ingest(&mut self, mut report: IngestReport) -> IngestReport {
+    // The queue decides which received items to admit; this only applies it.
+    fn drain(&mut self, report: &mut IngestReport) {
         loop {
             while let Some(item) = self
                 .pending_local
@@ -938,17 +885,35 @@ impl<P: Clone> CommitGraph<P> {
                 .filter(|&idx| !self.nodes[idx].signatures.is_empty())
                 .find_map(|idx| self.local_item(idx))
             {
-                self.admit_certificate(item, &mut report);
+                self.admit_certificate(item, report);
             }
-            let Some(prepared) = self.pending_ingest.pop_ready() else { break };
-            match self.validate_fragment_admission(&prepared.item) {
-                Ok(()) => self.admit_prepared(prepared, &mut report),
-                Err(error) => report.rejected.push(IngestRejection {
-                    item: prepared.item.id().clone(),
-                    error,
-                }),
+            if !self.queue_step(report) {
+                break;
             }
         }
+    }
+
+    // Apply the queue's next decision, if it has one.
+    fn queue_step(&mut self, report: &mut IngestReport) -> bool {
+        let history = HistoryView {
+            nodes: &self.nodes,
+            by_hash: &self.by_hash,
+            pending_local: &self.pending_local,
+        };
+        match self.pending_ingest.next(&history) {
+            Some(Step::Admit(items)) => {
+                for prepared in items {
+                    self.admit_prepared(prepared, report);
+                }
+            }
+            Some(Step::Reject(rejection)) => report.rejected.push(rejection),
+            None => return false,
+        }
+        true
+    }
+
+    fn finish_ingest(&mut self, mut report: IngestReport) -> IngestReport {
+        self.drain(&mut report);
         // Reuse shared certificates for all newly ready local items before
         // discarding covered ones. Keep topology, not historical export proofs.
         let cover = self.minimal_cover();
@@ -1368,6 +1333,34 @@ impl Index<NodeIdx> for NodeStore {
 impl IndexMut<NodeIdx> for NodeStore {
     fn index_mut(&mut self, index: NodeIdx) -> &mut Self::Output {
         &mut self.entries[index.0]
+    }
+}
+
+// Delivered history as seen by admission planning. Borrows only the fields
+// admission reads, so the queue can be updated while it is held.
+struct HistoryView<'a> {
+    nodes: &'a NodeStore,
+    by_hash: &'a HashMap<CommitHash, NodeIdx>,
+    pending_local: &'a HashSet<CommitHash>,
+}
+
+impl History for HistoryView<'_> {
+    fn is_admitted(&self, hash: &CommitHash) -> bool {
+        self.by_hash.contains_key(hash) && !self.pending_local.contains(hash)
+    }
+
+    fn meta(&self, hash: &CommitHash) -> Option<&CommitMeta> {
+        self.by_hash.get(hash).map(|&idx| &self.nodes[idx].meta)
+    }
+
+    fn ancestry(&self, heads: &[CommitHash]) -> impl Fn(&CommitHash) -> bool + '_ {
+        let heads: Vec<_> = heads.iter().map(|hash| self.by_hash[hash]).collect();
+        let clock = self.nodes.clock_for_heads(&heads);
+        move |hash| {
+            self.by_hash
+                .get(hash)
+                .is_some_and(|&idx| clock.contains(self.nodes[idx].chain, idx))
+        }
     }
 }
 

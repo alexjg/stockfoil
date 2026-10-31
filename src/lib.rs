@@ -14,8 +14,8 @@
 //!
 //! A fragment may borrow authentication for history it cannot cover with its
 //! own signatures, which older signatures being discarded makes unavoidable
-//! after branching from inside a fragment. It is admitted once any other
-//! verified item authenticates that history. See
+//! after branching from inside a fragment. It is admitted once an item proving
+//! that history is admitted, possibly in the same batch. See
 //! [`VerifiedItem::unauthenticated`] and [`CommitGraph::missing_authentication`].
 //!
 //! # Materialization
@@ -72,7 +72,7 @@ mod ingest;
 pub use ingest::{
     IngestRejection, IngestReport, ItemId, SignatureEvidence, UnverifiedItem, VerifiedItem,
 };
-mod pending_ingest;
+mod admission;
 mod blob_hash;
 pub use blob_hash::BlobHash;
 mod commit_hash;

@@ -423,10 +423,9 @@ impl VerifiedItem {
         &self.borrowed
     }
     /// Members this item does not authenticate itself, sorted and distinct.
-    /// Unlike [`Self::dependencies`], these need not be admitted first: it is
-    /// enough that another verified item (queued or admitted) authenticates
-    /// them. Authentication is a stateless fact about that item's signatures
-    /// and metadata, so mutually borrowing items cannot deadlock.
+    /// Unlike [`Self::dependencies`], these need not be admitted first: an
+    /// item proving them may instead be admitted in the same batch, so items
+    /// which prove each other's borrowed history are admitted together.
     pub fn unauthenticated(&self) -> impl Iterator<Item = &CommitHash> {
         self.unauthenticated.iter()
     }
