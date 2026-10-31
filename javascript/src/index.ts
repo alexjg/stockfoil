@@ -197,8 +197,8 @@ export class CommitGraph {
   }
 
   /**
-   * Distinct borrowed commits of queued fragments which no received item has
-   * authenticated yet. Any item authenticating them unblocks those fragments.
+   * Distinct borrowed commits of queued fragments for which no received item
+   * holds a proof yet. Fragments are admitted together with their proofs.
    */
   missingAuthentication(): readonly CommitHash[] {
     return call(() => this.#graph().missingAuthentication()) as CommitHash[];

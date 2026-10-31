@@ -72,29 +72,36 @@ So a fragment certificate may declare a *borrowed region*: tips among its
 members whose ancestry within the fragment need not be covered by its own
 signatures. Verification checks author coverage everywhere outside the region,
 and reports the members the item does not cover itself as `unauthenticated()`.
-Those members aren't dependencies. Admission only needs each of them to be
-authenticated by some verified item, queued or admitted. Authorship is a
-stateless fact about a signature and hash-bound metadata, independent of
-whether that item's placement is ever accepted, so the queue records the members
-each verified item authenticates when it is enqueued. Mutually borrowing items
-therefore can't deadlock, and no joint verification of incoming items is needed.
-A borrower can even admit a commit that its lender needs as a boundary.
+Those members aren't dependencies. Each must be authenticated by admitted
+history, or by an item admitted in the same batch as the borrower. A proof from
+an item we can't admit never counts: otherwise our cover could contain a
+borrower whose proof we can't relay, and peers syncing from us would be stuck.
+
+Requiring proofs from items that are *already* admitted would deadlock, since a
+lender can depend on the borrower. For example, the lender's boundary may be one
+of the borrower's members. Items which prove each other's history are instead
+admitted together. A batch is the largest set of queued items which supply each
+other's unadmitted dependencies and proofs, found by discarding unsupported items
+until nothing changes. Batches can only form around borrowers: without borrowing,
+dependencies follow the acyclic commit graph, and single-item admission already
+admits everything admissible. Placement is validated for the whole batch, against
+the graph plus the batch's own metadata, before anything is inserted. A rejected
+item is removed and the batch replanned without it, so its borrowers wait for a
+valid proof. Directly received items use the same placement check with no extra
+metadata.
 
 Locally, a certificate borrows only members which are already admitted; an
 unsigned draft must still wait for its own signature. Certificates which borrow
 are re-derived from every signature we hold before pruning, so they become
 self-contained whenever we have evidence inside the fragment. Because a replaced
 item is contained in its replacement, its signatures are also members of the
-replacement, so re-derivation carries its authentication forward: the current
-cover as a whole always authenticates everything it advertises.
+replacement, so re-derivation carries its authentication forward.
 
-The guarantee is now about the cover, not each item. A peer syncing one branch
-may need items from another branch to authenticate the shared history. One edge
-case remains: if we admit a borrower using authentication from an item we never
-admit (for example, one rejected for non-canonical placement, or still waiting
-on a dependency), our cover cannot authenticate the borrowed history for a relay
-until some peer supplies an item that does. This doesn't affect safety, only
-progress, and requires a buggy or malicious peer or an incomplete sync.
+The guarantee is now about the cover, not each item: every cover authenticates
+everything it advertises, even mid-sync. A peer syncing one branch may need items
+from another branch to authenticate the shared history. If a lender is stuck,
+for example on a dependency that never arrives, its borrower stays queued on the
+node that received both, rather than being advertised to peers who can't use it.
 
 ### Creating Local Commits
 

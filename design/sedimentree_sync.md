@@ -126,10 +126,15 @@ allow dependency fetching without an external verified-item retry queue.
 
 A fragment may also borrow authentication for part of its history (see
 [borrowed authentication](authors_signatures_revocation.md#borrowed-authentication)).
-Its unauthenticated members are not dependencies: they need only be authenticated
-by some verified item, queued or admitted, which wakes the borrower just as an
-admission does. `missing_authentication()` iterates borrowed members no verified
-item has authenticated yet. Enqueuing an item can therefore admit others.
+Its unauthenticated members are not dependencies: they must be authenticated by
+admitted history or by an item admitted in the same batch. A batch is the largest
+set of queued items which supply each other's unadmitted dependencies and proofs;
+its placement is validated as a whole, against the graph plus the batch's own
+metadata, before anything is inserted. Enqueuing an item can therefore admit
+others. `missing_authentication()` iterates borrowed members for which no queued
+or admitted item holds a proof. Batch planning lives in the admission module,
+which reads the graph through a narrow history interface; the graph only applies
+its decisions.
 Cloning the graph clones queued items and their owned payloads. Export and merge
 do not transfer the sender's queued items; merge can unblock the receiver's queue.
 
