@@ -220,11 +220,10 @@ fn mutually_borrowing_fragments_admit_in_either_order() {
         let report = graph.ingest(first, payload).unwrap();
         assert!(report.admitted.is_empty());
         assert_eq!(report.pending, 1);
-        assert_eq!(graph.missing_authentication().count(), 1);
+        assert!(graph.missing_dependencies().next().is_none());
         let report = graph.ingest(second, payload).unwrap();
         assert_eq!(report.admitted.len(), 2, "reverse={reverse}");
         assert_eq!(report.pending, 0);
-        assert!(graph.missing_authentication().next().is_none());
         for meta in [&p, &q, &carol_tip, &left, &bob_tip, &right] {
             assert!(graph.has_commit(meta.hash()));
         }
@@ -320,8 +319,7 @@ fn a_borrower_waits_until_its_proof_can_be_admitted() {
     assert!(report.admitted.is_empty());
     assert_eq!(report.pending, 2);
     assert!(!graph.has_commit(borrower_head.hash()));
-    // The proof is held, so only the lender's dependency is missing.
-    assert!(graph.missing_authentication().next().is_none());
+    // Only the lender's dependency is missing.
     assert_eq!(
         graph.missing_dependencies().copied().collect::<Vec<_>>(),
         [*missing.hash()]
@@ -390,10 +388,8 @@ fn a_rejected_lender_does_not_admit_its_borrower() {
     );
     assert_eq!(report.pending, 1);
     assert!(!graph.has_commit(x.hash()));
-    assert_eq!(
-        graph.missing_authentication().copied().collect::<Vec<_>>(),
-        [*q.hash()]
-    );
+    assert!(!graph.has_commit(q.hash()));
+    assert!(graph.missing_dependencies().next().is_none());
 
     let report = graph.ingest(lender(&good_head), payload).unwrap();
     assert_eq!(report.admitted.len(), 2);

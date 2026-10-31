@@ -196,14 +196,6 @@ export class CommitGraph {
     return call(() => this.#graph().missingDependencies()) as CommitHash[];
   }
 
-  /**
-   * Distinct borrowed commits of queued fragments for which no received item
-   * holds a proof yet. Fragments are admitted together with their proofs.
-   */
-  missingAuthentication(): readonly CommitHash[] {
-    return call(() => this.#graph().missingAuthentication()) as CommitHash[];
-  }
-
   /** Release the graph's Wasm memory. Safe to call more than once. */
   dispose(): void {
     if (this.#raw) {

@@ -1510,16 +1510,14 @@ fn mixed_author_fragment_borrows_an_ancestor_authenticated_by_an_independent_sib
     let report = destination.ingest(borrowing, hash).unwrap();
     assert!(report.admitted.is_empty());
     assert_eq!(report.pending, 1);
+    // Borrowed members are not dependencies.
     assert!(destination.missing_dependencies().next().is_none());
-    assert_eq!(
-        destination.missing_authentication().copied().collect::<Vec<_>>(),
-        [hash(root)]
-    );
+    assert!(!destination.has_commit(root.hash()));
     let report = destination.ingest(lending, hash).unwrap();
     assert!(report.admitted.contains(&id));
     assert!(report.rejected.is_empty());
     assert_eq!(report.pending, 0);
-    assert!(destination.missing_authentication().next().is_none());
+    assert!(destination.has_commit(root.hash()));
     destination.merge(&source);
     check(&destination, &model, &case, "borrowing cover merges");
     assert_eq!(destination.minimal_cover(), source.minimal_cover());

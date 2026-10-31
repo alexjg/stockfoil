@@ -238,13 +238,6 @@ impl<P: Clone> CommitGraph<P> {
         self.pending_ingest.missing_dependencies()
     }
 
-    /// Distinct borrowed members of queued items for which no admitted or
-    /// queued item holds a proof, in unspecified order. A queued proof only
-    /// counts once its item can be admitted, alone or together with others.
-    pub fn missing_authentication(&self) -> impl Iterator<Item = &CommitHash> {
-        self.pending_ingest.missing_authentication()
-    }
-
     fn history(&self) -> HistoryView<'_> {
         HistoryView {
             nodes: &self.nodes,

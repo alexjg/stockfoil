@@ -118,9 +118,8 @@ Because older signatures are discarded once covered, a fragment branching from
 inside an older fragment may be unable to authenticate the shared history
 itself. Such a fragment declares that history as borrowed. It is admitted once
 an item proving that history is admitted too, possibly together with it when
-the two depend on each other; `missing_authentication()` lists borrowed history
-for which no proof has arrived. Each item need not authenticate itself, but
-every cover does.
+the two depend on each other. Each item need not authenticate itself, but every
+cover does.
 
 ## A history lesson
 

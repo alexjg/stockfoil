@@ -16,7 +16,7 @@
 //! own signatures, which older signatures being discarded makes unavoidable
 //! after branching from inside a fragment. It is admitted once an item proving
 //! that history is admitted, possibly in the same batch. See
-//! [`VerifiedItem::unauthenticated`] and [`CommitGraph::missing_authentication`].
+//! [`VerifiedItem::unauthenticated`].
 //!
 //! # Materialization
 //!

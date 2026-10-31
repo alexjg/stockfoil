@@ -131,8 +131,7 @@ admitted history or by an item admitted in the same batch. A batch is the larges
 set of queued items which supply each other's unadmitted dependencies and proofs;
 its placement is validated as a whole, against the graph plus the batch's own
 metadata, before anything is inserted. Enqueuing an item can therefore admit
-others. `missing_authentication()` iterates borrowed members for which no queued
-or admitted item holds a proof. Batch planning lives in the admission module,
+others. Batch planning lives in the admission module,
 which reads the graph through a narrow history interface; the graph only applies
 its decisions.
 Cloning the graph clones queued items and their owned payloads. Export and merge

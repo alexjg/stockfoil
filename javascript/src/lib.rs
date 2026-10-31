@@ -230,17 +230,6 @@ impl RawGraph {
         hashes.sort_unstable();
         encode(&hashes)
     }
-
-    #[wasm_bindgen(js_name = missingAuthentication)]
-    pub fn missing_authentication(&self) -> Result<JsValue, JsValue> {
-        let mut hashes: Vec<_> = self
-            .0
-            .missing_authentication()
-            .map(|h| dto::hex(h.as_slice()))
-            .collect();
-        hashes.sort_unstable();
-        encode(&hashes)
-    }
 }
 
 impl Default for RawGraph {

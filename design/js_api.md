@@ -135,7 +135,6 @@ export declare class CommitGraph {
   isAncestor(ancestor: CommitHash, descendant: CommitHash): boolean;
   pendingItems(): number;
   missingDependencies(): readonly CommitHash[];
-  missingAuthentication(): readonly CommitHash[];
 
   dispose(): void;
 }

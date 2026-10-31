@@ -225,13 +225,6 @@ impl<P> Queue<P> {
         self.waiting.keys()
     }
 
-    /// Borrowed members for which no queued item holds a proof.
-    pub fn missing_authentication(&self) -> impl Iterator<Item = &CommitHash> {
-        self.waiting_auth
-            .keys()
-            .filter(|hash| !self.proofs.contains_key(*hash))
-    }
-
     pub fn contains(&self, item: &VerifiedItem) -> bool {
         self.keys.contains_key(&Key::new(item))
     }
