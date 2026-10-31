@@ -55,7 +55,7 @@ export function signedCommit(commit, who = alice) {
 
 // Do not normalize malformed fragments: tests must exercise native validation.
 export function fragment(head, commits, boundary = [], signatures = [alice.proof(head.hash)]) {
-  return { kind: 'fragment', head: head.hash, boundary: [...boundary], commits: copy(commits), signatures };
+  return { kind: 'fragment', head: head.hash, boundary: [...boundary], commits: copy(commits), signatures, borrowed: [] };
 }
 
 export function itemId(item) {

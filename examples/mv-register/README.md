@@ -66,7 +66,7 @@ crate versions in `Cargo.toml`; this is not a stable cross-version protocol.
   blobs into Stockfoil. Stockfoil owns pending items and
   payloads, automatically admitting them when dependencies arrive or are signed
   locally.
-- [`src/wire.rs`](src/wire.rs): **example-only** versioned BCS envelopes for
+- [`src/wire.rs`](src/wire.rs): **example-only** BCS encodings for
   individual commits and fragments. Original author signatures are retained;
   the transport peer cannot replace them with its own signatures. Commit hashes
   are reconstructed from exact payload bytes before signature verification and

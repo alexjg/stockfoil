@@ -49,9 +49,9 @@ export type TransportItem =
       readonly signatures: readonly SignatureEvidence[];
       /**
        * Tips of history this fragment does not authenticate itself; other
-       * items must. Usually empty. Optional when sending.
+       * items must. Usually empty.
        */
-      readonly borrowed?: readonly CommitHash[];
+      readonly borrowed: readonly CommitHash[];
     };
 
 export interface MaterializationChange {

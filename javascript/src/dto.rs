@@ -144,7 +144,6 @@ pub(crate) enum TransportItem {
         commits: Vec<Commit>,
         signatures: Vec<Evidence>,
         /// Tips of history authenticated by other items. Usually empty.
-        #[serde(default)]
         borrowed: Vec<String>,
     },
 }

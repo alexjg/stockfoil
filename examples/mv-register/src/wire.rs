@@ -1,4 +1,4 @@
-//! Example-only, versioned BCS envelope. This is NOT a stable Stockfoil format.
+//! Example-only BCS encoding. This is NOT a stable Stockfoil format.
 //! Subduction authenticates the transport metadata; Stockfoil independently
 //! authenticates the original authors and validates canonical fragment placement.
 use std::collections::{BTreeSet, HashMap};
@@ -13,14 +13,6 @@ use stockfoil::{
 use crate::{Assignment, MvRegisterMap};
 
 pub(crate) const MAX_BLOB_BYTES: usize = 8 * 1024 * 1024;
-// Version 2 added borrowed fragment regions.
-const VERSION: u8 = 2;
-
-#[derive(Serialize, Deserialize)]
-struct Envelope {
-    version: u8,
-    item: Item,
-}
 
 #[derive(Serialize, Deserialize)]
 enum Item {
@@ -102,7 +94,7 @@ pub(crate) fn encode(doc: &MvRegisterMap, item: &UnverifiedItem) -> Result<Vec<u
             borrowed: borrowed.iter().map(|hash| *hash.as_bytes()).collect(),
         },
     };
-    let bytes = bcs::to_bytes(&Envelope { version: VERSION, item })?;
+    let bytes = bcs::to_bytes(&item)?;
     ensure!(
         bytes.len() <= MAX_BLOB_BYTES,
         "example blob exceeds size limit"
@@ -115,11 +107,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded> {
         bytes.len() <= MAX_BLOB_BYTES,
         "example blob exceeds size limit"
     );
-    let envelope: Envelope = bcs::from_bytes(bytes)?;
-    ensure!(
-        envelope.version == VERSION,
-        "unsupported example envelope version"
-    );
+    let item: Item = bcs::from_bytes(bytes)?;
     let mut raw_payloads = HashMap::new();
     let mut commit = |wire: Commit| -> Result<CommitMeta> {
         let meta = CommitMeta::new(CommitContents {
@@ -148,7 +136,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded> {
             })
             .collect()
     };
-    let item = match envelope.item {
+    let item = match item {
         Item::Commit {
             commit: wire,
             signatures,
@@ -196,7 +184,7 @@ mod tests {
     use stockfoil::ItemId;
 
     #[test]
-    fn envelopes_bind_payloads_signatures_and_version() {
+    fn encoding_binds_payloads_and_signatures() {
         let mut doc = MvRegisterMap::new();
         let hash = doc.set("title", "hello");
         // A signed head is exportable even if it happens to be a checkpoint.
@@ -209,20 +197,17 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert!(decode(&trailing).is_err());
-        let mut envelope: Envelope = bcs::from_bytes(&bytes).unwrap();
-        envelope.version = VERSION + 1;
-        assert!(decode(&bcs::to_bytes(&envelope).unwrap()).is_err());
-        envelope.version = VERSION;
-        let Item::Commit { commit, .. } = &mut envelope.item else {
+        let mut item: Item = bcs::from_bytes(&bytes).unwrap();
+        let Item::Commit { commit, .. } = &mut item else {
             unreachable!()
         };
         commit.payload[0] ^= 1;
-        assert!(decode(&bcs::to_bytes(&envelope).unwrap()).is_err());
-        let mut envelope: Envelope = bcs::from_bytes(&bytes).unwrap();
-        let Item::Commit { signatures, .. } = &mut envelope.item else {
+        assert!(decode(&bcs::to_bytes(&item).unwrap()).is_err());
+        let mut item: Item = bcs::from_bytes(&bytes).unwrap();
+        let Item::Commit { signatures, .. } = &mut item else {
             unreachable!()
         };
         signatures[0].signature[0] ^= 1;
-        assert!(decode(&bcs::to_bytes(&envelope).unwrap()).is_err());
+        assert!(decode(&bcs::to_bytes(&item).unwrap()).is_err());
     }
 }
