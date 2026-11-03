@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use crate::{
     collections::{HashMap, HashSet},
     Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
-    FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId,
+    FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId, NodeIdx,
     MaterializationChange, MaterializationCursor, SedimentreeView, Signature, SignatureError,
     SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, VisDiff, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
@@ -127,7 +127,7 @@ impl<P: Clone> CommitGraph<P> {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(i, node)| node.parents.is_empty().then_some(NodeIdx(i)))
+            .filter_map(|(i, node)| node.parents.is_empty().then_some(NodeIdx::new(i)))
             .map(|idx| self.nodes[idx].meta.hash())
     }
 
@@ -301,7 +301,7 @@ impl<P: Clone> CommitGraph<P> {
             .parent_ids
             .extend(meta.parents().iter().map(|hash| self.by_hash[hash]));
         let parents = start..self.nodes.parent_ids.len();
-        let node_idx = NodeIdx(self.nodes.entries.len());
+        let node_idx = NodeIdx::new(self.nodes.entries.len());
         let chain = self
             .nodes
             .assign_chain(*meta.author(), parents.clone(), node_idx);
@@ -617,15 +617,15 @@ impl<P: Clone> CommitGraph<P> {
             .filter_map(|hash| self.by_hash.get(hash).copied())
             .collect::<Vec<_>>();
         while let Some(idx) = stack.pop() {
-            if excluded[idx.0] {
+            if excluded[idx.index()] {
                 continue;
             }
-            excluded[idx.0] = true;
+            excluded[idx.index()] = true;
             stack.extend(self.parents_by_node_idx(idx));
         }
 
         for (idx, node) in &self.nodes {
-            if excluded[idx.0] {
+            if excluded[idx.index()] {
                 continue;
             }
             if traversal(&node.meta, &self.store[&idx]).is_break() {
@@ -927,7 +927,7 @@ impl<P: Clone> CommitGraph<P> {
         for (index, node) in self.nodes.entries.iter_mut().enumerate() {
             if !self.pending_local.contains(node.meta.hash()) {
                 node.signatures
-                    .retain(|author, _| needed.contains(&(NodeIdx(index), *author)));
+                    .retain(|author, _| needed.contains(&(NodeIdx::new(index), *author)));
             }
         }
         report.pending = self.pending_items();
@@ -1076,10 +1076,6 @@ impl<P: Clone> CommitGraph<P> {
         }))
     }
 }
-
-/// An opaque node index, valid only in the graph that produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct NodeIdx(pub(crate) usize);
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeStore {
@@ -1239,7 +1235,7 @@ impl<'a> Iterator for NodeIter<'a> {
     type Item = (NodeIdx, &'a Node);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|(count, node)| (NodeIdx(count), node))
+        self.0.next().map(|(count, node)| (NodeIdx::new(count), node))
     }
 }
 
@@ -1247,13 +1243,13 @@ impl Index<NodeIdx> for NodeStore {
     type Output = Node;
 
     fn index(&self, index: NodeIdx) -> &Self::Output {
-        &self.entries[index.0]
+        &self.entries[index.index()]
     }
 }
 
 impl IndexMut<NodeIdx> for NodeStore {
     fn index_mut(&mut self, index: NodeIdx) -> &mut Self::Output {
-        &mut self.entries[index.0]
+        &mut self.entries[index.index()]
     }
 }
 
@@ -1294,7 +1290,7 @@ impl FragmentStore {
             .filter_map(|(idx, node)| {
                 node.canonical_fragment()
                     .filter(|&fragment| {
-                        eligible[idx.0]
+                        eligible[idx.index()]
                             && (!certified_only || !self[fragment].signature_boundary.is_empty())
                     })
                     .map(|fragment| (fragment, self.members(nodes, fragment)))
@@ -1359,7 +1355,7 @@ impl FragmentStore {
         }
         let mut loose_commits = Vec::new();
         for (idx, node) in nodes {
-            if eligible[idx.0] && !covered.contains(&idx) {
+            if eligible[idx.index()] && !covered.contains(&idx) {
                 loose_commits.push(crate::LooseCommit {
                     commit: *node.meta.hash(),
                     parents: node.meta.parents().iter().copied().collect(),

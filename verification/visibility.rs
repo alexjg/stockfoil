@@ -50,13 +50,13 @@ pub proof fn bounded_policy(g: Graph, h: ISet<int>, frontier: ISet<int>, a: int)
 // The wrapper must still establish these premises from its maps and iterators.
 pub open spec fn compiled_bounds(
     g: Graph, chains: Seq<usize>, authors: Seq<usize>, heads: ISet<int>,
-    perms: IMap<usize, Permission>, entries: Seq<Entry>, bounds: Seq<Option<usize>>,
+    perms: IMap<usize, Permission>, entries: Seq<Entry>, bounds: Seq<Option<crate::clock::NodeIdx>>,
     frontiers: IMap<usize, Seq<Entry>>,
 ) -> bool {
     &&& bounds.len() == entries.len()
     &&& forall|i: int| #![trigger bounds[i]] 0 <= i < entries.len() ==> {
         let (chain, tip) = entries[i];
-        let author = authors[tip as int];
+        let author = authors[tip@ as int];
         match permission(perms, author) {
             Permission::Denied => bounds[i] == None,
             Permission::Unbounded => bounds[i] == Some(tip),
@@ -70,18 +70,18 @@ pub open spec fn compiled_bounds(
 
 proof fn entry_permission(
     g: Graph, chains: Seq<usize>, authors: Seq<usize>, heads: ISet<int>,
-    perms: IMap<usize, Permission>, entries: Seq<Entry>, bounds: Seq<Option<usize>>,
+    perms: IMap<usize, Permission>, entries: Seq<Entry>, bounds: Seq<Option<crate::clock::NodeIdx>>,
     frontiers: IMap<usize, Seq<Entry>>, i: int, a: usize,
 )
     requires
         chain_invariant(g, chains, authors), a < g.len(),
         summarizes(entries, chains, history(g, heads)),
         compiled_bounds(g, chains, authors, heads, perms, entries, bounds, frontiers),
-        0 <= i < entries.len(), entries[i].0 == chains[a as int], a <= entries[i].1,
+        0 <= i < entries.len(), entries[i].0 == chains[a as int], a <= entries[i].1@,
     ensures below(bounds[i], a)
         == allowed(g, history(g, heads), permission(perms, authors[a as int]), a as int),
 {
-    let tip = entries[i].1;
+    let tip = entries[i].1@;
     let author = authors[tip as int];
     assert(0 <= a <= tip < g.len());
     assert(chains[tip as int] == chains[a as int]);
@@ -97,7 +97,7 @@ proof fn entry_permission(
 
 pub proof fn mask_matches_policy(
     g: Graph, chains: Seq<usize>, authors: Seq<usize>, heads: ISet<int>,
-    perms: IMap<usize, Permission>, entries: Seq<Entry>, bounds: Seq<Option<usize>>,
+    perms: IMap<usize, Permission>, entries: Seq<Entry>, bounds: Seq<Option<crate::clock::NodeIdx>>,
     frontiers: IMap<usize, Seq<Entry>>, a: usize,
 )
     requires
@@ -110,20 +110,20 @@ pub proof fn mask_matches_policy(
     clock_matches_history(g, chains, authors, heads, entries, a);
     if permitted(entries, bounds, chains[a as int], a) {
         let i = choose|i: int| 0 <= i < entries.len() && entries[i].0 == chains[a as int]
-            && a <= entries[i].1 && below(bounds[i], a);
+            && a <= entries[i].1@ && below(bounds[i], a);
         assert(member(entries, chains[a as int], a));
         entry_permission(g, chains, authors, heads, perms, entries, bounds, frontiers, i, a);
     }
     if visible(g, authors, heads, perms, a as int) {
         let i = choose|i: int| 0 <= i < entries.len()
-            && entries[i].0 == chains[a as int] && a <= entries[i].1;
+            && entries[i].0 == chains[a as int] && a <= entries[i].1@;
         entry_permission(g, chains, authors, heads, perms, entries, bounds, frontiers, i, a);
         assert(permitted(entries, bounds, chains[a as int], a));
     }
 }
 
 pub fn prepare_visibility(
-    entries: &Vec<Entry>, bounds: &Vec<Option<usize>>,
+    entries: &Vec<Entry>, bounds: &Vec<Option<crate::clock::NodeIdx>>,
     Ghost(g): Ghost<Graph>, Ghost(chains): Ghost<Seq<usize>>,
     Ghost(authors): Ghost<Seq<usize>>, Ghost(heads): Ghost<ISet<int>>,
     Ghost(perms): Ghost<IMap<usize, Permission>>, Ghost(frontiers): Ghost<IMap<usize, Seq<Entry>>>,

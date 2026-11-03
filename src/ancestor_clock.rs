@@ -15,16 +15,16 @@ use crate::NodeIdx;
 #[derive(Debug, Default)]
 pub(crate) struct AncestorClock {
     // Constructors preserve the strict chain ordering required by verified lookup.
-    entries: Vec<(usize, usize)>,
+    entries: Vec<(usize, NodeIdx)>,
 }
 
 impl AncestorClock {
     pub(crate) fn position(&self, chain: usize) -> Option<NodeIdx> {
-        clock::position(&self.entries, chain).map(NodeIdx)
+        clock::position(&self.entries, chain)
     }
 
     pub(crate) fn contains(&self, chain: usize, position: NodeIdx) -> bool {
-        clock::contains(&self.entries, chain, position.0)
+        clock::contains(&self.entries, chain, position)
     }
 
     pub(crate) fn contains_time(&self, time: ChainTime) -> bool {
@@ -32,16 +32,11 @@ impl AncestorClock {
     }
 
     pub(crate) fn entries(&self) -> impl Iterator<Item = (usize, NodeIdx)> + '_ {
-        self.entries
-            .iter()
-            .map(|&(chain, position)| (chain, NodeIdx(position)))
+        self.entries.iter().copied()
     }
 
     pub(crate) fn latest(&self) -> Option<NodeIdx> {
-        self.entries
-            .iter()
-            .map(|&(_, position)| NodeIdx(position))
-            .max()
+        self.entries.iter().map(|&(_, position)| position).max()
     }
 
     /// Cap each coordinate at its permission bound, or remove it for `None`.
@@ -55,8 +50,7 @@ impl AncestorClock {
             entries: self
                 .entries()
                 .filter_map(|(chain, tip)| {
-                    clock::cap(tip.0, bound(chain, tip).map(|limit| limit.0))
-                        .map(|limit| (chain, limit))
+                    clock::cap(tip, bound(chain, tip)).map(|limit| (chain, limit))
                 })
                 .collect(),
         }
@@ -65,7 +59,7 @@ impl AncestorClock {
     /// The current working history contains every node, hence every chain tip.
     pub(crate) fn from_tips(tips: &[NodeIdx]) -> Self {
         Self {
-            entries: tips.iter().map(|tip| tip.0).enumerate().collect(),
+            entries: tips.iter().copied().enumerate().collect(),
         }
     }
 }
@@ -80,7 +74,7 @@ impl ClockBuilder {
     pub(crate) fn include(&mut self, chain: usize, position: NodeIdx) {
         self.entries
             .entry(chain)
-            .and_modify(|known| known.0 = clock::max_position(known.0, position.0))
+            .and_modify(|known| *known = clock::max_position(*known, position))
             .or_insert(position);
     }
 
@@ -92,11 +86,7 @@ impl ClockBuilder {
 
     pub(crate) fn finish(self) -> AncestorClock {
         AncestorClock {
-            entries: self
-                .entries
-                .into_iter()
-                .map(|(chain, position)| (chain, position.0))
-                .collect(),
+            entries: self.entries.into_iter().collect(),
         }
     }
 }

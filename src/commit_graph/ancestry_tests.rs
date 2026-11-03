@@ -12,7 +12,7 @@ fn append(graph: &mut CommitGraph<()>, parents: &[NodeIdx]) -> NodeIdx {
 }
 
 fn append_by(graph: &mut CommitGraph<()>, author: Author, parents: &[NodeIdx]) -> NodeIdx {
-    let idx = NodeIdx(graph.nodes.entries.len());
+    let idx = NodeIdx::new(graph.nodes.entries.len());
     let meta = (0u64..)
         .map(|nonce| {
             CommitMeta::new(CommitContents {
@@ -23,7 +23,7 @@ fn append_by(graph: &mut CommitGraph<()>, author: Author, parents: &[NodeIdx]) -
                     .collect(),
                 payload: BlobHash::of_contents(
                     &[
-                        idx.0.to_le_bytes().as_slice(),
+                        idx.index().to_le_bytes().as_slice(),
                         nonce.to_le_bytes().as_slice(),
                     ]
                     .concat(),
@@ -96,12 +96,12 @@ fn alternating_authors_reuse_only_their_own_ancestral_chain_tips() {
         assert_eq!(graph.nodes.chain_tips.len(), 2);
     }
     // Reuse must cross the other author's intervening commit, but never put
-    // two authors on the same chain. NodeIdx(0) is still a real coordinate.
-    assert_eq!(root, NodeIdx(0));
+    // two authors on the same chain. NodeIdx::new(0) is still a real coordinate.
+    assert_eq!(root, NodeIdx::new(0));
     assert_eq!(graph.nodes.chain_authors, vec![author(1), author(2)]);
     for (idx, node) in &graph.nodes {
         assert_eq!(graph.nodes.chain_authors[node.chain], *node.meta.author());
-        assert_eq!(node.chain, idx.0 % 2);
+        assert_eq!(node.chain, idx.index() % 2);
         let expected = walk(&graph.nodes, idx);
         let clock = graph.nodes.clock(idx);
         for (other, other_node) in &graph.nodes {
@@ -201,26 +201,26 @@ fn same_author_forks_have_independent_permission_coordinates() {
 
 #[test]
 fn masks_cap_or_remove_coordinates_without_mutating_history() {
-    let history = AncestorClock::from_tips(&[NodeIdx(0), NodeIdx(5), NodeIdx(9)]);
+    let history = AncestorClock::from_tips(&[NodeIdx::new(0), NodeIdx::new(5), NodeIdx::new(9)]);
     let masked = history.mask(|chain, _| match chain {
-        0 => Some(NodeIdx(usize::MAX)),
+        0 => Some(NodeIdx::new(usize::MAX)),
         1 => None,
-        2 => Some(NodeIdx(7)),
+        2 => Some(NodeIdx::new(7)),
         _ => unreachable!(),
     });
     assert_eq!(
         masked.entries().collect::<Vec<_>>(),
-        vec![(0, NodeIdx(0)), (2, NodeIdx(7))]
+        vec![(0, NodeIdx::new(0)), (2, NodeIdx::new(7))]
     );
-    assert!(masked.contains(0, NodeIdx(0)));
-    assert!(!masked.contains(1, NodeIdx(0)));
-    assert!(!masked.contains(2, NodeIdx(8)));
-    assert_eq!(masked.latest(), Some(NodeIdx(7)));
-    assert_eq!(history.position(1), Some(NodeIdx(5)));
-    assert_eq!(history.position(2), Some(NodeIdx(9)));
+    assert!(masked.contains(0, NodeIdx::new(0)));
+    assert!(!masked.contains(1, NodeIdx::new(0)));
+    assert!(!masked.contains(2, NodeIdx::new(8)));
+    assert_eq!(masked.latest(), Some(NodeIdx::new(7)));
+    assert_eq!(history.position(1), Some(NodeIdx::new(5)));
+    assert_eq!(history.position(2), Some(NodeIdx::new(9)));
     let empty = history.mask(|_, _| None);
     assert_eq!(empty.latest(), None);
-    assert!(!empty.contains(0, NodeIdx(0)));
+    assert!(!empty.contains(0, NodeIdx::new(0)));
     assert_eq!(AncestorClock::default().mask(|_, tip| Some(tip)).latest(), None);
 }
 
@@ -228,7 +228,7 @@ fn masks_cap_or_remove_coordinates_without_mutating_history() {
 fn cached_clocks_are_exact_downsets_not_topological_prefixes() {
     let mut graph = CommitGraph::new();
     let root = append(&mut graph, &[]);
-    assert_eq!(root, NodeIdx(0));
+    assert_eq!(root, NodeIdx::new(0));
     let left = append(&mut graph, &[root]);
     let other_root = append(&mut graph, &[]);
     let right = append(&mut graph, &[root, other_root]);
@@ -236,7 +236,7 @@ fn cached_clocks_are_exact_downsets_not_topological_prefixes() {
     let late_fork = append(&mut graph, &[root]);
     let tip = append(&mut graph, &[join, late_fork]);
     for i in 0..graph.nodes.entries.len() {
-        let head = NodeIdx(i);
+        let head = NodeIdx::new(i);
         let expected = walk(&graph.nodes, head);
         let clock = graph.nodes.clock(head);
         for (idx, node) in &graph.nodes {
@@ -255,7 +255,7 @@ fn cached_clocks_are_exact_downsets_not_topological_prefixes() {
             .clock(root)
             .contains(graph.nodes[other_root].chain, other_root)
     );
-    assert!(!graph.nodes.clock(root).contains(usize::MAX, NodeIdx(0)));
+    assert!(!graph.nodes.clock(root).contains(usize::MAX, NodeIdx::new(0)));
     assert!(
         !graph
             .nodes

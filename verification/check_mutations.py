@@ -15,22 +15,22 @@ MUTATIONS = [
     (
         "cap expands permission",
         "src/verified/clock.rs",
-        "Some(limit) => Some(if tip <= limit { tip } else { limit }),",
-        "Some(limit) => Some(if tip >= limit { tip } else { limit }),",
+        "Some(limit) => Some(if tip.index() <= limit.index() { tip } else { limit }),",
+        "Some(limit) => Some(if tip.index() >= limit.index() { tip } else { limit }),",
         "last",
     ),
     (
         "lookup excludes the inclusive tip",
         "src/verified/clock.rs",
-        "Some(tip) => p <= tip,",
-        "Some(tip) => p < tip,",
+        "Some(tip) => p.index() <= tip.index(),",
+        "Some(tip) => p.index() < tip.index(),",
         "last",
     ),
     (
         "union takes the smaller position",
         "src/verified/clock.rs",
-        "if left >= right { left } else { right }",
-        "if left <= right { left } else { right }",
+        "if left.index() >= right.index() { left } else { right }",
+        "if left.index() <= right.index() { left } else { right }",
         "last",
     ),
     (

@@ -26,7 +26,7 @@ verifies every module in `main.rs`, and enables `--no-cheating`. It does not
 forward arguments that could skip verification. A successful run reports:
 
 ```text
-verification results:: 43 verified, 0 errors
+verification results:: 47 verified, 0 errors
 ```
 
 The count includes helpers and loop obligations; it does not measure production
@@ -49,6 +49,7 @@ generated implementation for the following kernels:
 
 | Kernel | Proved contract | Production caller |
 | --- | --- | --- |
+| `NodeIdx::new`, `NodeIdx::index` | Construction and indexing preserve the exact integer position. The tuple field is private. | Graph insertion and node-store indexing |
 | `max_position` | Exact maximum; its prefix is the union of both inputs' prefixes. | `ClockBuilder::include` |
 | `position`, `contains` | Sound and complete binary search on strictly sorted chain IDs; termination, bounds and arithmetic safety. | `AncestorClock` lookup/membership |
 | `cap` | Exact intersection of the history prefix and an optional bound; absence is distinct from zero. | `AncestorClock::mask` |
@@ -58,6 +59,12 @@ generated implementation for the following kernels:
 Ordinary builds use the pinned `verus_builtin_macros` procedural macro to erase
 specifications and proofs. They require neither the Verus executable nor vstd as
 a Cargo dependency. `alloc` and the existing `no_std` API remain supported.
+
+Clock entries remain `Vec<(usize, NodeIdx)>`: chain IDs and node positions have
+distinct Rust types. Lookup, maximum and permission-cap helpers accept and return
+`NodeIdx` values directly. Proofs use its integer view (`node@`); production code
+uses the verified constructor/accessor where numeric indexing is needed. There
+is no raw-position staging vector or per-entry conversion at clock boundaries.
 
 The clock file also retains verification-only executable models of coordinate
 union and whole-vector masking, guarded by `verus_keep_ghost`. Production masking

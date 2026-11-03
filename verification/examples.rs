@@ -1,6 +1,6 @@
 //! Concrete, nonempty witnesses for the proof contracts and policy edge cases.
 use vstd::prelude::*;
-use crate::clock::Entry;
+use crate::clock::{Entry, NodeIdx};
 use crate::graph::*;
 use crate::visibility::*;
 
@@ -49,8 +49,10 @@ pub proof fn visibility_can_skip_a_denied_intermediate_author()
     let authors = a2.push(0);
     let heads = ISet::empty().insert(2int);
     let perms = IMap::empty().insert(0usize, Permission::Unbounded).insert(1usize, Permission::Denied);
-    let entries: Seq<Entry> = seq![(0usize, 2usize), (1usize, 1usize)];
-    let bounds: Seq<Option<usize>> = seq![Some(2usize), None];
+    NodeIdx::spec_new_index(1);
+    NodeIdx::spec_new_index(2);
+    let entries: Seq<Entry> = seq![(0usize, NodeIdx::spec_new(2)), (1usize, NodeIdx::spec_new(1))];
+    let bounds: Seq<Option<NodeIdx>> = seq![Some(NodeIdx::spec_new(2)), None];
     let frontiers: IMap<usize, Seq<Entry>> = IMap::empty();
     assert forall|a: int| 0 <= a <= 2 implies reaches(g, a, 2) by {
         unfold_reaches(g, a, 0);

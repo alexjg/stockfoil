@@ -170,12 +170,13 @@ pub open spec fn chain_invariant(g: Graph, chains: Seq<usize>, authors: Seq<usiz
 pub open spec fn summarizes(entries: Seq<Entry>, chains: Seq<usize>, h: ISet<int>) -> bool {
     &&& sorted(entries)
     &&& forall|i: int| #![trigger entries[i]] 0 <= i < entries.len() ==> {
-        let (c, tip) = entries[i];
+        let (c, node) = entries[i];
+        let tip = node@;
         tip < chains.len() && chains[tip as int] == c && h.contains(tip as int)
     }
     &&& forall|a: int| h.contains(a) ==> 0 <= a < chains.len()
         && exists|i: int| 0 <= i < entries.len()
-            && entries[i].0 == chains[a as int] && a <= entries[i].1
+            && entries[i].0 == chains[a as int] && a <= entries[i].1@
 }
 
 pub proof fn clock_matches_history(
@@ -189,8 +190,8 @@ pub proof fn clock_matches_history(
 {
     if member(entries, chains[a as int], a) {
         let i = choose|i: int| 0 <= i < entries.len()
-            && entries[i].0 == chains[a as int] && a <= entries[i].1;
-        let tip = entries[i].1;
+            && entries[i].0 == chains[a as int] && a <= entries[i].1@;
+        let tip = entries[i].1@;
         assert(chains[a as int] == chains[tip as int]);
         assert(reaches(g, a as int, tip as int));
         history_closed(g, heads, a as int, tip as int);
@@ -210,7 +211,7 @@ pub fn contains_history(
     ensures result == history(g, heads).contains(a as int),
 {
     proof { clock_matches_history(g, chains, authors, heads, entries@, a); }
-    crate::clock::contains(entries, chain, a)
+    crate::clock::contains(entries, chain, crate::clock::NodeIdx::new(a))
 }
 
 // Reusing a same-author maximal chain tip in the parents' history preserves the

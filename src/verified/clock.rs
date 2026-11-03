@@ -8,7 +8,38 @@ use verus_builtin_macros::verus;
 
 verus! {
 
-pub type Entry = (usize, usize);
+/// An opaque node index, valid only in the graph that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeIdx(usize);
+
+#[cfg(verus_keep_ghost)]
+impl View for NodeIdx {
+    type V = usize;
+
+    closed spec fn view(&self) -> usize { self.0 }
+}
+
+impl NodeIdx {
+    pub fn new(index: usize) -> (result: Self)
+        ensures result@ == index,
+    {
+        Self(index)
+    }
+
+    pub fn index(self) -> (result: usize)
+        ensures result == self@,
+    {
+        self.0
+    }
+
+    pub closed spec fn spec_new(index: usize) -> Self { Self(index) }
+
+    pub proof fn spec_new_index(index: usize)
+        ensures Self::spec_new(index)@ == index,
+    {}
+}
+
+pub type Entry = (usize, NodeIdx);
 
 pub open spec fn sorted(entries: Seq<Entry>) -> bool {
     forall|i: int, j: int| 0 <= i < j < entries.len() ==>
@@ -17,32 +48,32 @@ pub open spec fn sorted(entries: Seq<Entry>) -> bool {
 
 pub open spec fn member(entries: Seq<Entry>, chain: usize, position: usize) -> bool {
     exists|i: int| 0 <= i < entries.len()
-        && entries[i].0 == chain && position <= entries[i].1
+        && entries[i].0 == chain && position <= entries[i].1@
 }
 
-pub open spec fn below(tip: Option<usize>, position: usize) -> bool {
+pub open spec fn below(tip: Option<NodeIdx>, position: usize) -> bool {
     match tip {
         None => false,
-        Some(tip) => position <= tip,
+        Some(tip) => position <= tip@,
     }
 }
 
-pub fn max_position(left: usize, right: usize) -> (result: usize)
+pub fn max_position(left: NodeIdx, right: NodeIdx) -> (result: NodeIdx)
     ensures
-        result == if left >= right { left } else { right },
-        forall|p: usize| below(Some(result), p) == (p <= left || p <= right),
+        result == if left@ >= right@ { left } else { right },
+        forall|p: usize| below(Some(result), p) == (p <= left@ || p <= right@),
 {
-    if left >= right { left } else { right }
+    if left.index() >= right.index() { left } else { right }
 }
 
 proof fn member_push(entries: Seq<Entry>, entry: Entry, c: usize, p: usize)
     ensures member(entries.push(entry), c, p)
-        == (member(entries, c, p) || (entry.0 == c && p <= entry.1)),
+        == (member(entries, c, p) || (entry.0 == c && p <= entry.1@)),
 {
     let extended = entries.push(entry);
     if member(extended, c, p) {
         let i = choose|i: int| 0 <= i < extended.len()
-            && extended[i].0 == c && p <= extended[i].1;
+            && extended[i].0 == c && p <= extended[i].1@;
         if i < entries.len() {
             assert(entries[i] == extended[i]);
             assert(member(entries, c, p));
@@ -50,11 +81,11 @@ proof fn member_push(entries: Seq<Entry>, entry: Entry, c: usize, p: usize)
     }
     if member(entries, c, p) {
         let i = choose|i: int| 0 <= i < entries.len()
-            && entries[i].0 == c && p <= entries[i].1;
+            && entries[i].0 == c && p <= entries[i].1@;
         assert(extended[i] == entries[i]);
         assert(member(extended, c, p));
     }
-    if entry.0 == c && p <= entry.1 {
+    if entry.0 == c && p <= entry.1@ {
         assert(extended[entries.len() as int] == entry);
         assert(member(extended, c, p));
     }
@@ -62,13 +93,13 @@ proof fn member_push(entries: Seq<Entry>, entry: Entry, c: usize, p: usize)
 
 // The per-coordinate operation performed by ClockBuilder::include.
 #[cfg(verus_keep_ghost)]
-pub fn include(known: Option<usize>, position: usize) -> (result: Option<usize>)
+pub fn include(known: Option<NodeIdx>, position: NodeIdx) -> (result: Option<NodeIdx>)
     ensures
         result == Some(match known {
             None => position,
-            Some(tip) => if tip >= position { tip } else { position },
+            Some(tip) => if tip@ >= position@ { tip } else { position },
         }),
-        forall|p: usize| below(result, p) == (below(known, p) || p <= position),
+        forall|p: usize| below(result, p) == (below(known, p) || p <= position@),
 {
     match known {
         None => Some(position),
@@ -78,7 +109,7 @@ pub fn include(known: Option<usize>, position: usize) -> (result: Option<usize>)
 
 // One coordinate of ClockBuilder::merge, including absent coordinates.
 #[cfg(verus_keep_ghost)]
-pub fn union(left: Option<usize>, right: Option<usize>) -> (result: Option<usize>)
+pub fn union(left: Option<NodeIdx>, right: Option<NodeIdx>) -> (result: Option<NodeIdx>)
     ensures
         forall|p: usize| below(result, p) == (below(left, p) || below(right, p)),
 {
@@ -90,23 +121,23 @@ pub fn union(left: Option<usize>, right: Option<usize>) -> (result: Option<usize
 
 // The min/None operation in AncestorClock::mask. Unbounded permission is
 // represented by Some(history_tip), exactly as participation() does.
-pub fn cap(tip: usize, bound: Option<usize>) -> (result: Option<usize>)
+pub fn cap(tip: NodeIdx, bound: Option<NodeIdx>) -> (result: Option<NodeIdx>)
     ensures
         result == match bound {
             None => None,
-            Some(limit) => Some(if tip <= limit { tip } else { limit }),
+            Some(limit) => Some(if tip@ <= limit@ { tip } else { limit }),
         },
-        forall|p: usize| below(result, p) == (p <= tip && below(bound, p)),
+        forall|p: usize| below(result, p) == (p <= tip@ && below(bound, p)),
 {
     match bound {
         None => None,
-        Some(limit) => Some(if tip <= limit { tip } else { limit }),
+        Some(limit) => Some(if tip.index() <= limit.index() { tip } else { limit }),
     }
 }
 
 // Explicit binary search in place of std's binary_search_by_key adapter.
 // The proof establishes lookup soundness AND completeness, not just bounds safety.
-pub fn position(entries: &Vec<Entry>, chain: usize) -> (result: Option<usize>)
+pub fn position(entries: &Vec<Entry>, chain: usize) -> (result: Option<NodeIdx>)
     requires sorted(entries@),
     ensures
         match result {
@@ -150,27 +181,27 @@ pub fn position(entries: &Vec<Entry>, chain: usize) -> (result: Option<usize>)
     None
 }
 
-pub fn contains(entries: &Vec<Entry>, chain: usize, p: usize) -> (result: bool)
+pub fn contains(entries: &Vec<Entry>, chain: usize, p: NodeIdx) -> (result: bool)
     requires sorted(entries@),
-    ensures result == member(entries@, chain, p),
+    ensures result == member(entries@, chain, p@),
 {
     match position(entries, chain) {
         None => false,
-        Some(tip) => p <= tip,
+        Some(tip) => p.index() <= tip.index(),
     }
 }
 
 pub open spec fn permitted(
-    entries: Seq<Entry>, bounds: Seq<Option<usize>>, chain: usize, p: usize,
+    entries: Seq<Entry>, bounds: Seq<Option<NodeIdx>>, chain: usize, p: usize,
 ) -> bool {
     exists|i: int| 0 <= i < entries.len() && entries[i].0 == chain
-        && p <= entries[i].1 && below(bounds[i], p)
+        && p <= entries[i].1@ && below(bounds[i], p)
 }
 
 // Bounds are the results of the production FnMut, captured once per input entry.
 // This verifies coordinate filtering; computing those bounds is a separate task.
 #[cfg(verus_keep_ghost)]
-pub fn mask(entries: &Vec<Entry>, bounds: &Vec<Option<usize>>) -> (out: Vec<Entry>)
+pub fn mask(entries: &Vec<Entry>, bounds: &Vec<Option<NodeIdx>>) -> (out: Vec<Entry>)
     requires sorted(entries@), bounds.len() == entries.len(),
     ensures
         sorted(out@),
@@ -203,7 +234,7 @@ pub fn mask(entries: &Vec<Entry>, bounds: &Vec<Option<usize>>) -> (out: Vec<Entr
             == permitted(entries@.take(i as int + 1), bounds@, c, p) by {
             assert(member(previous, c, p)
                 == permitted(entries@.take(i as int), bounds@, c, p));
-            assert(below(capped, p) == (p <= entry.1 && below(bound, p)));
+            assert(below(capped, p) == (p <= entry.1@ && below(bound, p)));
             if let Some(limit) = capped {
                 member_push(previous, (entry.0, limit), c, p);
             }
@@ -211,7 +242,7 @@ pub fn mask(entries: &Vec<Entry>, bounds: &Vec<Option<usize>>) -> (out: Vec<Entr
                 == (member(previous, c, p) || (entry.0 == c && below(capped, p))));
             assert(permitted(entries@.take(i as int + 1), bounds@, c, p)
                 == (permitted(entries@.take(i as int), bounds@, c, p)
-                    || (entry.0 == c && p <= entry.1 && below(bound, p))));
+                    || (entry.0 == c && p <= entry.1@ && below(bound, p))));
         }
         i += 1;
     }
@@ -241,7 +272,8 @@ pub proof fn chain_prefix_is_exact(
 }
 
 pub proof fn absent_is_not_zero()
-    ensures !below(None, 0), below(Some(0), 0), !below(Some(0), 1),
-{}
+    ensures !below(None, 0), below(Some(NodeIdx::spec_new(0)), 0),
+        !below(Some(NodeIdx::spec_new(0)), 1),
+{ NodeIdx::spec_new_index(0); }
 
 } // verus!

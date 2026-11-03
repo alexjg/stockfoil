@@ -74,7 +74,7 @@ mod commit_hash;
 pub use commit_hash::{CommitHash, InvalidCommitHash};
 mod commit_graph;
 pub use commit_graph::{CommitGraph};
-pub(crate) use commit_graph::NodeIdx;
+pub(crate) use verified::clock::NodeIdx;
 mod commit_meta;
 pub use commit_meta::{CommitContents, CommitMeta};
 mod parsing;
