@@ -53,6 +53,7 @@ pub mod collections {
 }
 
 mod ancestor_clock;
+mod verified;
 mod author;
 pub use author::Author;
 mod errors;

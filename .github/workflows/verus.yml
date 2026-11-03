@@ -1,0 +1,35 @@
+name: Verus and Rust compatibility
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install matching Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --target thumbv7em-none-eabi
+      - name: Install pinned Verus release
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/verus.zip"
+          curl --fail --location --retry 3 \
+            https://github.com/verus-lang/verus/releases/download/release/0.2026.11.02.8bf68ee/verus-0.2026.11.02.8bf68ee-x86-linux.zip \
+            --output "$archive"
+          echo "f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c  $archive" | sha256sum --check
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          echo "VERUS_BIN=$RUNNER_TEMP/verus-x86-linux/verus" >> "$GITHUB_ENV"
+      - name: Verify all proofs and reject semantic mutations
+        run: python3 verification/check_mutations.py
+      - name: Test the production implementation
+        run: cargo +1.99.1 test -p stockfoil --locked
+      - name: Test without std
+        run: cargo +1.99.1 test -p stockfoil --locked --no-default-features
+      - name: Check embedded no_std build
+        run: cargo +1.99.1 check -p stockfoil --locked --no-default-features --lib --target thumbv7em-none-eabi

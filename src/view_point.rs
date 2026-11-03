@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use crate::collections::HashMap;
+pub use crate::verified::events::Vis;
 
 use crate::{
     Author, CommitGraph, CommitHash, QueryError, WritePermission,
@@ -63,15 +64,10 @@ impl<'a, P: Clone> ViewPointDiff<'a, P> {
     }
 
     pub(crate) fn visibility_at(&self, time: ChainTime) -> Vis {
-        match (
+        crate::verified::events::classify(
             self.before.contains_time(time),
             self.after.contains_time(time),
-        ) {
-            (true, false) => Vis::Before,
-            (false, true) => Vis::After,
-            (true, true) => Vis::Both,
-            (false, false) => Vis::Neither,
-        }
+        )
     }
 
     /// Each changed commit once, in topological (ancestors-before-descendants) order.
@@ -92,15 +88,6 @@ impl<'a, P: Clone> core::fmt::Debug for ViewPointDiff<'a, P> {
             .field("after", &self.after)
             .finish()
     }
-}
-
-/// Which side of a comparison a commit contributes to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Vis {
-    Before,
-    After,
-    Both,
-    Neither,
 }
 
 /// The direction of a change in participation.

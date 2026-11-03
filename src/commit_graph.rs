@@ -17,7 +17,7 @@ use crate::{
     Author, BlobHash, CommitContents, CommitDiff, CommitHash, CommitMeta, DiffError, ExportError,
     FragmentRange, FragmentReadError, IngestRejection, IngestReport, ItemId,
     MaterializationChange, MaterializationCursor, SedimentreeView, Signature, SignatureError,
-    SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, Vis, VisDiff, WritePermission,
+    SignatureEvidence, UnverifiedItem, ViewPoint, ViewPointDiff, VisDiff, WritePermission,
     ancestor_clock::{AncestorClock, ChainTime, ClockBuilder},
     pending_ingest::{PendingIngest, PreparedItem},
     sedimentree::MinimalCover,
@@ -815,7 +815,7 @@ impl<P: Clone> CommitGraph<P> {
             let time = self.nodes.chain_time(idx);
             let newly_delivered = !delivered.contains_time(time);
             let visibility = diff.visibility_at(time);
-            if newly_delivered || matches!(visibility, Vis::Before | Vis::After) {
+            if crate::verified::events::should_emit(newly_delivered, visibility) {
                 visit(MaterializationChange {
                     meta: &node.meta,
                     payload: &self.store[&idx],
@@ -1079,7 +1079,7 @@ impl<P: Clone> CommitGraph<P> {
 
 /// An opaque node index, valid only in the graph that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct NodeIdx(usize);
+pub(crate) struct NodeIdx(pub(crate) usize);
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeStore {

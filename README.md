@@ -2,6 +2,10 @@
 
 A library for building CRDTs on top of authenticated commit DAGs.
 
+The [Verus verification work](verification/README.md) covers shared executable
+kernels and a graph/visibility/materialization model, with explicit remaining
+boundaries to verification of the full crate.
+
 ## `no_std`
 
 The default `std` feature preserves the standard-library API. Disable it for

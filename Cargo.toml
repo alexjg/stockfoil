@@ -20,6 +20,11 @@ blake3 = { version = "1.8.7", default-features = false }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "fast", "zeroize"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
 once_cell = { version = "1.21", default-features = false, features = ["alloc", "race"] }
+# Erases proof/specification code in ordinary Rust builds; no runtime dependency.
+verus_builtin_macros = "=0.0.0-2026-11-01-0251"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }
 
 [dev-dependencies]
 bcs = "0.2.1"
