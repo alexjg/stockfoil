@@ -1,7 +1,7 @@
 //! Concrete witnesses for the actual shared tree's representation and lookup.
 use vstd::prelude::*;
 use std::sync::Arc;
-use crate::tree::{Clock, Entry};
+use crate::tree::{Clock, ClockBuilder, Entry};
 use crate::clock::NodeIdx;
 
 verus! {
@@ -302,6 +302,31 @@ pub fn masks_deny_cap_and_preserve_zero_without_expansion() {
     let unchanged = tree.mask(allow);
     assert(unchanged.contents() == tree.contents());
     assert(tree.contents()[0u32] == low && tree.contents()[1u32] == high);
+}
+
+pub fn builders_accumulate_maxima_without_losing_cached_inputs() {
+    let low = NodeIdx::new(10);
+    let high = NodeIdx::new(30);
+    let cached = Clock::from_tips(&vec![high, low]);
+    let mut builder = ClockBuilder::default();
+    builder.include(0, low);
+    assert(builder.contents().dom().union(cached.contents().dom()) =~= set![0u32, 1u32]);
+    builder.merge(&cached);
+    assert(builder.contents().contains_key(0u32));
+    assert(cached.contents().contains_key(0u32));
+    assert(cached.contents()[0u32] == high);
+    assert(Clock::joins(builder.contents(), Map::<u32, NodeIdx>::empty().insert(0, low), cached.contents()));
+    assert(builder.contents()[0u32]@ >= cached.contents()[0u32]@);
+    assert(builder.contents()[0u32]@ >= high@);
+    assert(builder.contents()[0u32] == high);
+    builder.include(1, high);
+    builder.include(2, low);
+    let result = builder.finish();
+    assert(result.contents().contains_key(0u32));
+    assert(result.contents()[0u32]@ >= high@);
+    assert(result.valid() && result.size() == 3);
+    assert(result.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, high).insert(1, high).insert(2, low));
+    assert(cached.contents()[1u32] == low);
 }
 
 // The ordering precondition is substantive: a left key above its parent is

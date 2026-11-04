@@ -137,7 +137,7 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  134 verified obligations and rejects all 44 mutations.
+  139 verified obligations and rejects all 47 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -190,9 +190,13 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   fragment callers use this checked output path. Table completeness/uniqueness
   and candidate sort/dedup remain later-stage obligations. A nonempty witness and
   three mutations exercise whole-clock enumeration.
+- The actual `ClockBuilder` now composes the checked include/union contracts and
+  returns the exact accumulated result. A cached-input witness and three mutations
+  test accumulation. The graph walk still must prove it includes precisely the
+  intended nodes and satisfies the builder's capacity premises.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking (#12), the clock-to-policy connection (#13), and complete differences. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking (#12), the clock-to-policy connection (#13), complete differences (#14), and accumulation. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
 step is proving concrete history and bound compilation establish the remaining

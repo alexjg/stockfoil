@@ -27,11 +27,11 @@ cargo +1.99.1 test --workspace --locked
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with forty-four deliberate semantic errors.
+baseline, then checks temporary copies with forty-seven deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked proof baseline reports **134 verified, 0 errors** and rejects all
-forty-four mutations. The authorization plan records which stage these results
+The checked proof baseline reports **139 verified, 0 errors** and rejects all
+forty-seven mutations. The authorization plan records which stage these results
 establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -49,7 +49,8 @@ implementations of their executable bodies:
 | --- | --- | --- |
 | [`clock.rs`](../stockfoil-core/src/verified/clock.rs): `NodeIdx::new`, `index` | Preserve the exact `u32` position; the tuple field remains private. | History insertion and node indexing |
 | `contains` | Inclusive membership in an optional coordinate; `None` differs from position zero. | `Clock::contains` and `include`'s early return |
-| `cap` | Exact prefix intersection, including absent and zero bounds. | `Clock::mask` |
+| `cap` | Exact prefix intersection, including absent and zero bounds. | `ClockBuilder::default`, `include`, `merge`, `finish` | Empty construction and accumulation preserve the checked clock invariant; merges take pointwise maxima and finish returns exactly the accumulated map and size. | Cached ancestry walks and multi-head summaries |
+| `Clock::mask` |
 | `upper_bound` | Terminates and returns exactly the first index above a bound in a nondecreasing slice; arithmetic and indexing are safe. | Interval difference |
 | `difference_range` | Valid half-open slice containing exactly the nodes in the after-prefix and outside the before-prefix. Reversed bounds give an empty slice. | `clock::difference`, hence fragment membership and materialization planning |
 | [`difference.rs`](../stockfoil-core/src/verified/difference.rs): `difference`, `symmetric_difference` | Append exactly every selected chain-table node, preserving the existing output prefix and chain traversal order; prove indexing and termination. Sorted tables and clock-chain index bounds remain explicit premises. | Materialization candidates and fragment members |
@@ -57,6 +58,7 @@ implementations of their executable bodies:
 | `batch_end` | Advances by `min(max, remaining)` without overflow. Positive budgets make progress; zero budgets preserve position. | `emit_next_changes` |
 | [`tree.rs`](../stockfoil-core/src/verified/tree.rs): `Clock::default`, `clone` | Empty clocks are ordered and have an empty coordinate map; cloning preserves the logical tree using `Arc::clone`. | Clock construction and snapshots |
 | `Clock::node`, `height`, `len` | Constructor preserves ordering and the exact coordinate map, and computes exact structural height/size without overflow under explicit child and capacity premises. Accessors return cached metadata, which equals structural values when metadata is valid. | Rotations, updates and reconstruction |
+| `ClockBuilder::default`, `include`, `merge`, `finish` | Empty construction and accumulation preserve the checked clock invariant; merges take pointwise maxima and finish returns exactly the accumulated map and size. | Cached ancestry walks and multi-head summaries |
 | `Clock::mask` | Exact coordinate-wise intersection with the callback bounds, preserving the tree invariant and never increasing size. Denied keys disappear, zero remains a valid tip, and retained tips are capped. | Permission participation |
 | `Clock::from_sorted`, `from_tips` | Sorted reconstruction preserves the exact entry sequence and establishes ordering, metadata and AVL balance. Tip-table construction maps precisely the contiguous chain IDs to their supplied tips. Both prove capacity, indexing safety and termination under an input-length bound. | Permission masks and delivered-history clocks |
 | `Clock::union` | Exact union of keys and pointwise maximum tips; preserves the tree invariant and computes exact distinct-key size. The result must fit u32; overlap is counted only once. | ClockBuilder and ancestry summaries |
@@ -140,6 +142,11 @@ filtered-entry vector and visits each input once; no new runtime parameter or
 whole-history scan is added. The production permission callback must still be
 proved to supply the policy's correct bounds; the mask does not assume this fact.
 
+The actual `ClockBuilder` now lives beside the verified tree and composes its
+checked inclusion and union operations. It preserves the clock invariant and
+returns precisely the accumulated map and size. The cached-walk callers still
+must prove their inputs summarize the intended graph and satisfy capacity.
+
 The callback specification uses a chosen result satisfying its contract;
 existence for all visited coordinates is established by the actual calls, and
 uniqueness is an explicit premise. No callback outcome is assumed without a
@@ -206,7 +213,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Forty-four mutations must be rejected: an expanding cap, exclusive membership,
+Forty-seven mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -224,7 +231,8 @@ reconstructed children, shifting tip-table chain IDs, failing to cap expanding
 mask bounds, dropping position zero, ignoring denied mask coordinates, shifting
 chain IDs in the model projection, dropping projected permission bounds,
 skipping selected difference nodes, emitting the wrong node, and omitting the
-reverse symmetric-difference direction.
+reverse symmetric-difference direction, ignoring builder coordinates, discarding
+previously accumulated inputs during a merge, and dropping the finished result.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -258,8 +266,8 @@ obligations; it is not a measure of production coverage.
    assuming they cannot overflow.
 2. **History refinement:** prove insertion and author-chain selection preserve
    the chain invariant, table completeness and unique membership, and that
-   concrete cached walks produce exact summaries. Whole-clock difference writes
-   are now verified under the table and clock premises.
+   concrete cached walks produce exact summaries. Clock accumulation and
+   whole-clock difference writes are now verified under their input premises.
 3. **Views and materialization:** prove permission compilation, complete chain
    enumeration, candidate dedup/order, capture semantics, wrong-history rejection
    and cursor publication establish the model contracts.

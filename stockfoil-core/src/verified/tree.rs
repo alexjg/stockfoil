@@ -21,6 +21,53 @@ pub(crate) struct Entry {
     pub(crate) right: Clock,
 }
 
+/// Accumulates a union of persistent clocks and single coordinates.
+pub(crate) struct ClockBuilder {
+    clock: Clock,
+}
+
+impl Default for ClockBuilder {
+    fn default() -> (out: Self)
+        ensures out.valid(), out.contents() == Map::<ChainId, NodeIdx>::empty(), out.size() == 0,
+    {
+        Self { clock: Clock::default() }
+    }
+}
+
+impl ClockBuilder {
+    pub closed spec fn valid(&self) -> bool { self.clock.valid() }
+    pub closed spec fn contents(&self) -> Map<ChainId, NodeIdx> { self.clock.contents() }
+    pub closed spec fn size(&self) -> nat { self.clock.size() }
+
+    pub fn include(&mut self, chain: ChainId, position: NodeIdx)
+        requires old(self).valid(),
+            old(self).size() + (if old(self).contents().contains_key(chain) { 0nat } else { 1nat }) <= u32::MAX,
+        ensures final(self).valid(),
+            final(self).contents() == if old(self).contents().contains_key(chain) && position@ <= old(self).contents()[chain]@ {
+                old(self).contents()
+            } else { old(self).contents().insert(chain, position) },
+            final(self).size() == old(self).size() + (if old(self).contents().contains_key(chain) { 0nat } else { 1nat }),
+    {
+        self.clock.include(chain, position);
+    }
+
+    pub fn merge(&mut self, clock: &Clock)
+        requires old(self).valid(), clock.valid(),
+            old(self).contents().dom().union(clock.contents().dom()).len() <= u32::MAX,
+        ensures final(self).valid(), Clock::joins(final(self).contents(), old(self).contents(), clock.contents()),
+            final(self).size() == old(self).contents().dom().union(clock.contents().dom()).len(),
+    {
+        self.clock = self.clock.union(clock);
+    }
+
+    pub fn finish(self) -> (out: Clock)
+        requires self.valid(),
+        ensures out.valid(), out.contents() == self.contents(), out.size() == self.size(),
+    {
+        self.clock
+    }
+}
+
 pub(crate) struct Entries<'a> {
     stack: Vec<&'a Entry>,
     node: &'a Clock,
