@@ -27,11 +27,11 @@ cargo +1.99.1 test --workspace --locked
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with thirty-three deliberate semantic errors.
+baseline, then checks temporary copies with thirty-six deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked proof baseline reports **104 verified, 0 errors** and rejects all
-thirty-three mutations. The authorization plan records which stage these results
+The checked proof baseline reports **112 verified, 0 errors** and rejects all
+thirty-six mutations. The authorization plan records which stage these results
 establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -56,6 +56,7 @@ implementations of their executable bodies:
 | `batch_end` | Advances by `min(max, remaining)` without overflow. Positive budgets make progress; zero budgets preserve position. | `emit_next_changes` |
 | [`tree.rs`](../stockfoil-core/src/verified/tree.rs): `Clock::default`, `clone` | Empty clocks are ordered and have an empty coordinate map; cloning preserves the logical tree using `Arc::clone`. | Clock construction and snapshots |
 | `Clock::node`, `height`, `len` | Constructor preserves ordering and the exact coordinate map, and computes exact structural height/size without overflow under explicit child and capacity premises. Accessors return cached metadata, which equals structural values when metadata is valid. | Rotations, updates and reconstruction |
+| `Clock::from_sorted`, `from_tips` | Sorted reconstruction preserves the exact entry sequence and establishes ordering, metadata and AVL balance. Tip-table construction maps precisely the contiguous chain IDs to their supplied tips. Both prove capacity, indexing safety and termination under an input-length bound. | Permission masks and delivered-history clocks |
 | `Clock::union` | Exact union of keys and pointwise maximum tips; preserves the tree invariant and computes exact distinct-key size. The result must fit u32; overlap is counted only once. | ClockBuilder and ancestry summaries |
 | `Clock::entries`, `Entries::next` | Actual Rust iterator returns precisely the remaining in-order sequence, terminates and stays exhausted. For ordered trees, the sequence contains every map entry exactly once in strictly increasing key order, with length equal to structural size. | Union, masking and interval differences |
 | `Clock::set`, `include` | Terminating path-copying replacement and pointwise maximum update preserve ordering, metadata and balance, with exact size changes and height growth at most one. Only a new coordinate needs size capacity. | Clock builders and union |
@@ -121,7 +122,14 @@ one of those inputs. This characterizes the pointwise maximum without inventing
 entries. A map-cardinality lemma connects ordered-tree size to distinct keys;
 capacity is required only for the union of keys, so overlapping inputs are not
 charged twice. The output has exactly that size and preserves the tree invariant.
-Masking and `from_sorted` remain in `history/clock.rs` and are unproved.
+Sorted reconstruction now establishes the full tree invariant directly. It
+preserves the input sequence exactly, computes its exact size and midpoint-tree
+height, and proves balance using a height-step lemma. Recursive calls consume
+strictly smaller slices. Input length must fit `u32`; derived child height bounds
+discharge constructor capacity without an independent height assumption.
+`from_tips` constructs the same indexed entries as before, with a separate lemma
+connecting each array index to its coordinate and excluding all other keys.
+Masking remains in `history/clock.rs` and is unproved.
 
 The binary search requires a sorted chain-node slice, and `batch_end` requires
 `next <= total`. The wrappers maintain these by construction and have regression
@@ -146,7 +154,7 @@ states.
 | [`materialization.rs`](materialization.rs) | Candidate sets equal new delivery union visibility change. A batch model uses the shared boundary and classifier, emits the selected pending slice with exact fields, and consecutive slices concatenate without gaps or overlap. Sorted candidates are unique and topological; an unchanged cursor yields no candidates. | Concrete set assembly, sort/dedup, record/hash/payload mapping, history identity checks, captured heads and completed-cursor publication. |
 | [`examples.rs`](examples.rs) | Nonempty witnesses for chain summaries, permission masking and batches; zero versus absence, reversed bounds, maximum indices and budgets. | Specification checks, not wrapper proofs. |
 | [`authorization_tests.rs`](authorization_tests.rs) | Nonempty policy witnesses with multiple heads, cross-author bounds, denied intermediate authors, unavailable heads, and a frontier becoming known after capture. | Specification checks, not wrapper proofs. |
-| [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also uses actual construction and balancing for all four rotations, the no-rotation case, and equal-height grandchildren, with distinct tips and retained snapshots. Update witnesses also check replacement, monotone inclusion, extreme keys and retained snapshots; iteration witnesses check key/tip order, completeness and repeated exhaustion. Union witnesses cover overlapping keys, maximum tips, idempotence, both size-selection branches, empty inputs and retained snapshots. Masked reconstruction and history callers remain unproved. |
+| [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also uses actual construction and balancing for all four rotations, the no-rotation case, and equal-height grandchildren, with distinct tips and retained snapshots. Update witnesses also check replacement, monotone inclusion, extreme keys and retained snapshots; iteration witnesses check key/tip order, completeness and repeated exhaustion. Union witnesses cover overlapping keys, maximum tips, idempotence, both size-selection branches, empty inputs and retained snapshots. Reconstruction witnesses cover sparse/extreme keys, even sizes, empty inputs and zero tips. Masking and history callers remain unproved. |
 
 [`coordinates.rs`](coordinates.rs) supplies a mathematical sequence view of AVL
 entries. It is not an executable vector clock. Model chain labels widen `u32`
@@ -170,7 +178,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Thirty-three mutations must be rejected: an expanding cap, exclusive membership,
+Thirty-six mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -183,7 +191,8 @@ rotation, skipping the left-heavy balancing case, ignoring replacement tips,
 dropping a new coordinate, skipping every inclusion update, descending the wrong
 iterator subtree, revisiting the left subtree, dropping a yielded entry,
 ignoring the smaller union input, replacing union tips with zero, and discarding
-the larger initial tree.
+the larger initial tree, replacing reconstructed tips with zero, swapping
+reconstructed children, and shifting tip-table chain IDs.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -208,8 +217,9 @@ obligations; it is not a measure of production coverage.
    establish those premises, including deriving height capacity from balanced
    structure and size metadata. Complete ordered iteration is now verified too.
    Union now composes iteration and inclusion and checks capacity against the
-   distinct result keys. Next prove masking and `from_sorted`, then connect the
-   tree's map to the graph model's coordinate view.
+   distinct result keys. Sorted reconstruction and tip-table construction now
+   establish the invariant directly. Next prove masking and connect the tree's
+   map to the graph model's coordinate view.
    Preserve structural sharing and account for `u32`/`u8` limits rather than
    assuming they cannot overflow.
 2. **History refinement:** prove insertion and author-chain selection preserve

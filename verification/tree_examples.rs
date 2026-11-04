@@ -248,6 +248,35 @@ pub fn unions_take_maximum_preserve_inputs_and_handle_overlap() {
     assert(a.contents()[2] == high && b.contents()[2] == mid);
 }
 
+pub fn sorted_reconstruction_keeps_sparse_keys_and_tips() {
+    let low = NodeIdx::new(0);
+    let high = NodeIdx::new(u32::MAX);
+    let entries = vec![(0u32, low), (5u32, high), (7u32, low), (u32::MAX, high)];
+    let tree = Clock::from_sorted(&entries);
+    assert(tree.valid() && tree.size() == 4 && tree.sequence() == entries@);
+    proof { tree.sequence_correct(); }
+    let first = tree.position(0);
+    let last = tree.position(u32::MAX);
+    let gap = tree.position(6);
+    assert(first == Some(low) && last == Some(high) && gap is None);
+    let empty: Vec<(u32, NodeIdx)> = Vec::new();
+    let empty_tree = Clock::from_sorted(&empty);
+    assert(empty_tree.valid() && empty_tree.size() == 0);
+}
+
+pub fn tip_tables_preserve_zero_and_chain_indices() {
+    let zero = NodeIdx::new(0);
+    let middle = NodeIdx::new(10);
+    let last = NodeIdx::new(u32::MAX);
+    let tips = vec![last, zero, middle];
+    let tree = Clock::from_tips(&tips);
+    assert(tree.valid() && tree.size() == 3);
+    assert(tree.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, last).insert(1, zero).insert(2, middle));
+    let empty: Vec<NodeIdx> = Vec::new();
+    let tree = Clock::from_tips(&empty);
+    assert(tree.valid() && tree.size() == 0 && tree.contents() =~= Map::<u32, NodeIdx>::empty());
+}
+
 // The ordering precondition is substantive: a left key above its parent is
 // rejected even if the height and size metadata look reasonable.
 pub fn malformed_tree_does_not_satisfy_the_invariant() {

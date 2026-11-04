@@ -137,7 +137,7 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  104 verified obligations and rejects all 33 mutations.
+  112 verified obligations and rejects all 36 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -166,14 +166,18 @@ Stage 2 progress (still incomplete):
   cardinality proof connects structural size to distinct keys and establishes
   intermediate capacity from the final union's key count. Witnesses cover
   overlap, idempotence, empty inputs and both size-selection branches; three
-  mutations test union. Masked reconstruction remains unproved.
+  mutations test union.
+- Sorted reconstruction now establishes ordering, exact metadata and AVL balance
+  while preserving the entire input sequence. Tip-table construction establishes
+  precisely the supplied contiguous coordinates. Both prove indexing, capacity
+  and termination from an input-length bound. Two witnesses and three mutations
+  exercise reconstruction. The mask callback/iteration composition remains open.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), and union. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), and reconstruction. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
-step is proving masked reconstruction using the checked iterator and sorted
-construction.
+step is proving masking using the checked iterator and sorted construction.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.
