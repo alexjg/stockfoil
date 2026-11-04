@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'iterator descends right before visiting the root',
+        'stockfoil-core/src/verified/tree.rs',
+        'self.node = &e.left;',
+        'self.node = &e.right;',
+        'last',
+    ),
+    (
+        'iterator revisits the left subtree after popping',
+        'stockfoil-core/src/verified/tree.rs',
+        'self.node = &e.right;',
+        'self.node = &e.left;',
+        'last',
+    ),
+    (
+        'iterator drops the yielded entry',
+        'stockfoil-core/src/verified/tree.rs',
+        'Some((e.chain, e.tip))',
+        'None',
+        'last',
+    ),
+    (
         'set ignores replacement tips',
         'stockfoil-core/src/verified/tree.rs',
         'Self::node(chain, tip, e.left.clone(), e.right.clone())',

@@ -17,21 +17,6 @@ use std::sync::Arc;
 pub(crate) use crate::verified::tree::{ChainId, Clock};
 
 impl Clock {
-    /// Entries in chain order.
-    pub fn entries(&self) -> impl Iterator<Item = (ChainId, NodeIdx)> + '_ {
-        let mut stack = Vec::new();
-        let mut node = self.0.as_deref();
-        std::iter::from_fn(move || {
-            while let Some(e) = node {
-                stack.push(e);
-                node = e.left.0.as_deref();
-            }
-            let e = stack.pop()?;
-            node = e.right.0.as_deref();
-            Some((e.chain, e.tip))
-        })
-    }
-
     /// The pointwise maximum, sharing the larger side's structure.
     pub fn union(&self, other: &Self) -> Self {
         let (mut big, small) = if self.len() >= other.len() {

@@ -186,6 +186,30 @@ pub fn replacement_and_extreme_keys() {
     assert(tree.contents()[u32::MAX] == last);
 }
 
+pub fn iteration_is_ordered_complete_and_stays_exhausted() {
+    let mut tree = Clock::default();
+    let a = NodeIdx::new(10);
+    let b = NodeIdx::new(20);
+    let c = NodeIdx::new(30);
+    tree.include(2, c);
+    tree.include(0, a);
+    tree.include(1, b);
+    proof { tree.sequence_correct(); }
+    let mut iter = tree.entries();
+    let first = iter.next();
+    let second = iter.next();
+    let third = iter.next();
+    let end = iter.next();
+    let again = iter.next();
+    assert(first == Some((0u32, a)) && second == Some((1u32, b)) && third == Some((2u32, c)));
+    assert(end is None && again is None);
+    let empty = Clock::default();
+    proof { empty.sequence_correct(); }
+    let mut iter = empty.entries();
+    let end = iter.next();
+    assert(end is None);
+}
+
 // The ordering precondition is substantive: a left key above its parent is
 // rejected even if the height and size metadata look reasonable.
 pub fn malformed_tree_does_not_satisfy_the_invariant() {
