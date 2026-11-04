@@ -14,19 +14,8 @@ use crate::verified::clock as verified;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-pub(crate) type ChainId = u32;
-
-#[derive(Clone, Default)]
-pub(crate) struct Clock(Option<Arc<Entry>>);
-
-struct Entry {
-    chain: ChainId,
-    tip: NodeIdx,
-    height: u8,
-    len: u32,
-    left: Clock,
-    right: Clock,
-}
+use crate::verified::tree::Entry;
+pub(crate) use crate::verified::tree::{ChainId, Clock};
 
 impl Clock {
     fn height(&self) -> u8 {
@@ -88,22 +77,6 @@ impl Clock {
             );
         }
         Self::node(chain, tip, left, right)
-    }
-
-    pub fn position(&self, chain: ChainId) -> Option<NodeIdx> {
-        let mut node = self.0.as_ref();
-        while let Some(e) = node {
-            match chain.cmp(&e.chain) {
-                Ordering::Less => node = e.left.0.as_ref(),
-                Ordering::Greater => node = e.right.0.as_ref(),
-                Ordering::Equal => return Some(e.tip),
-            }
-        }
-        None
-    }
-
-    pub fn contains(&self, chain: ChainId, position: NodeIdx) -> bool {
-        verified::contains(self.position(chain), position)
     }
 
     /// Entries in chain order.
@@ -271,6 +244,29 @@ pub(crate) fn symmetric_difference(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn lookup_extremes_and_cloned_snapshots() {
+        let mut clock = Clock::default();
+        assert_eq!(clock.position(0), None);
+        clock.include(0, NodeIdx::new(0));
+        clock.include(5, NodeIdx::new(7));
+        clock.include(u32::MAX, NodeIdx::new(u32::MAX));
+        let snapshot = clock.clone();
+        assert!(Arc::ptr_eq(
+            clock.0.as_ref().unwrap(),
+            snapshot.0.as_ref().unwrap()
+        ));
+        clock.include(0, NodeIdx::new(9));
+        assert_eq!(snapshot.position(0), Some(NodeIdx::new(0)));
+        assert_eq!(clock.position(0), Some(NodeIdx::new(9)));
+        assert_eq!(snapshot.position(5), Some(NodeIdx::new(7)));
+        assert_eq!(snapshot.position(u32::MAX), Some(NodeIdx::new(u32::MAX)));
+        assert_eq!(snapshot.position(4), None);
+        assert_eq!(snapshot.position(6), None);
+        assert!(snapshot.contains(0, NodeIdx::new(0)));
+        assert!(!snapshot.contains(0, NodeIdx::new(1)));
+    }
 
     #[test]
     fn interval_difference_matches_a_linear_filter() {

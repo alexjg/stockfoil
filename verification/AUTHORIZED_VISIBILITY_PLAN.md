@@ -126,11 +126,23 @@ Stage 1 evidence:
 - [`authorized_visibility.rs`](../stockfoil-core/tests/authorized_visibility.rs)
   tests the public API across batch sizes, permission transitions, an unknown
   frontier delivered after capture, invalid heads and wrong-history rejection.
-- The verifier reports 58 verified obligations; all 12 semantic mutations are
+- The Stage 1 baseline reports 58 verified obligations; all 12 semantic mutations are
   rejected, including four new authorization-policy mutations.
 
-The starting point was PR #3's conditional visibility theorem and shared scalar,
-interval and batch helpers. Stage 1 changes specifications and integration tests;
-it does not yet add production refinement. No complete public API authorization
-theorem exists. The next implementation step is Stage 2, starting with the
-actual persistent tree's representation invariant and lookup contract.
+Stage 2 progress (still incomplete):
+
+- The shared production tree now has a coordinate-map view and a strict BST
+  ordering predicate. Its actual iterative lookup and membership functions are
+  proved exact under that predicate; empty construction and shallow cloning are
+  also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
+- Actual tree witnesses, a structural-sharing regression and four additional
+  semantic mutations exercise these contracts. The combined suite reports
+  69 verified obligations and rejects all 16 mutations.
+- Nonempty construction and rotations still must establish ordering, balance,
+  and metadata bounds. Updates, iteration, union and masking remain unproved.
+
+Review stack: foundations (#4), authorization plan/policy (#3), then the AVL
+lookup layer. Stage 1 adds specifications and integration tests. Stage 2 has
+begun production refinement, but no complete public API authorization theorem
+exists. The next implementation step is proving nonempty node construction and
+rotations preserve the invariants needed by lookup and subsequent operations.
