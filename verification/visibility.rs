@@ -3,48 +3,9 @@ use vstd::prelude::*;
 use crate::coordinates::{Entry, member, permitted};
 use crate::clock::below;
 use crate::graph::*;
+pub use crate::authorization::*;
 
 verus! {
-
-pub enum Permission {
-    Denied,
-    Unbounded,
-    Bounded(ISet<int>),
-}
-
-pub open spec fn permission(perms: IMap<usize, Permission>, author: usize) -> Permission {
-    if perms.dom().contains(author) { perms[author] } else { Permission::Denied }
-}
-
-pub open spec fn allowed(g: Graph, h: ISet<int>, perm: Permission, a: int) -> bool {
-    match perm {
-        Permission::Denied => false,
-        Permission::Unbounded => true,
-        Permission::Bounded(frontier) => exists|f: int|
-            frontier.contains(f) && h.contains(f) && reaches(g, a, f),
-    }
-}
-
-pub open spec fn visible(
-    g: Graph, authors: Seq<usize>, heads: ISet<int>, perms: IMap<usize, Permission>, a: int,
-) -> bool {
-    0 <= a < authors.len() && history(g, heads).contains(a)
-        && allowed(g, history(g, heads), permission(perms, authors[a]), a)
-}
-
-pub proof fn bounded_policy(g: Graph, h: ISet<int>, frontier: ISet<int>, a: int)
-    ensures allowed(g, h, Permission::Bounded(frontier), a)
-        == history(g, frontier.intersect(h)).contains(a),
-{
-    if allowed(g, h, Permission::Bounded(frontier), a) {
-        let f = choose|f: int| frontier.contains(f) && h.contains(f) && reaches(g, a, f);
-        assert(frontier.intersect(h).contains(f));
-    }
-    if history(g, frontier.intersect(h)).contains(a) {
-        let f = choose|f: int| frontier.intersect(h).contains(f) && reaches(g, a, f);
-        assert(frontier.contains(f) && h.contains(f));
-    }
-}
 
 // Captures the three branches of participation(). For a bounded author, the
 // bound is the lookup result in the union of *available frontier heads*.
@@ -122,14 +83,5 @@ pub proof fn mask_matches_policy(
         assert(permitted(entries, bounds, chains[a as int], a));
     }
 }
-
-// No available frontier head means no grant, even if rejected heads have
-// ancestors inside the delivered history.
-pub proof fn unavailable_frontier_grants_nothing(
-    g: Graph, h: ISet<int>, frontier: ISet<int>, a: int,
-)
-    requires forall|f: int| frontier.contains(f) ==> !h.contains(f),
-    ensures !allowed(g, h, Permission::Bounded(frontier), a),
-{}
 
 } // verus!

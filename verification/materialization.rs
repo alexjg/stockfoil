@@ -4,7 +4,7 @@
 use vstd::prelude::*;
 use crate::events::{self, Vis};
 use crate::graph::*;
-use crate::visibility::*;
+use crate::authorization::*;
 
 verus! {
 
