@@ -210,6 +210,44 @@ pub fn iteration_is_ordered_complete_and_stays_exhausted() {
     assert(end is None);
 }
 
+pub fn unions_take_maximum_preserve_inputs_and_handle_overlap() {
+    let low = NodeIdx::new(10);
+    let mid = NodeIdx::new(20);
+    let high = NodeIdx::new(30);
+    let mut a = Clock::default();
+    a.include(0, low);
+    a.include(2, high);
+    let mut b = Clock::default();
+    b.include(1, mid);
+    b.include(2, mid);
+    assert(a.contents().dom().union(b.contents().dom()) =~= set![0u32, 1u32, 2u32]);
+    let out = a.union(&b);
+    assert(out.valid() && out.size() == 3);
+    assert(out.contents().contains_key(0u32));
+    assert(out.contents().contains_key(1u32));
+    assert(out.contents().contains_key(2u32));
+    assert(a.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, low).insert(2, high));
+    assert(b.contents() =~= Map::<u32, NodeIdx>::empty().insert(1, mid).insert(2, mid));
+    assert(out.contents()[0u32] == low);
+    assert(out.contents()[1u32] == mid);
+    assert(out.contents()[2u32]@ >= high@);
+    assert(out.contents()[2u32] == high);
+    assert(out.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, low).insert(1, mid).insert(2, high));
+    assert(b.contents().dom().union(a.contents().dom()) =~= set![0u32, 1u32, 2u32]);
+    let swapped = b.union(&a);
+    assert(swapped.contents() == out.contents());
+    assert(a.contents().dom().union(a.contents().dom()) =~= set![0u32, 2u32]);
+    let same = a.union(&a);
+    assert(same.contents() == a.contents() && same.size() == a.size());
+    let empty = Clock::default();
+    assert(empty.contents().dom().union(out.contents().dom()) =~= set![0u32, 1u32, 2u32]);
+    assert(out.contents().dom().union(empty.contents().dom()) =~= set![0u32, 1u32, 2u32]);
+    let from_empty = empty.union(&out); // larger tree is the second argument
+    let with_empty = out.union(&empty);
+    assert(from_empty.contents() == out.contents() && with_empty.contents() == out.contents());
+    assert(a.contents()[2] == high && b.contents()[2] == mid);
+}
+
 // The ordering precondition is substantive: a left key above its parent is
 // rejected even if the height and size metadata look reasonable.
 pub fn malformed_tree_does_not_satisfy_the_invariant() {

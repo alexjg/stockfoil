@@ -500,6 +500,123 @@ impl Clock {
         *self = self.set(chain, position);
     }
 
+    pub(crate) proof fn map_size(&self)
+        requires self.ordered(),
+        ensures self.contents().len() == self.size(),
+        decreases self,
+    {
+        self.unfold();
+        if let Some(e) = self.0 {
+            e.left.map_size();
+            e.right.map_size();
+            assert(e.left.contents().dom().disjoint(e.right.contents().dom()));
+            vstd::map_lib::lemma_disjoint_union_size(e.left.contents(), e.right.contents());
+            assert(!e.left.contents().union_prefer_right(e.right.contents()).contains_key(e.chain));
+        }
+    }
+
+    pub open spec fn prefix_union(out: Map<ChainId, NodeIdx>, base: Map<ChainId, NodeIdx>, entries: Seq<(ChainId, NodeIdx)>, n: nat) -> bool {
+        &&& n <= entries.len()
+        &&& forall|c: ChainId| out.contains_key(c) <==>
+            base.contains_key(c) || exists|i: int| 0 <= i < n && entries[i].0 == c
+        &&& forall|c: ChainId| base.contains_key(c) ==> out[c]@ >= base[c]@
+        &&& forall|i: int| 0 <= i < n ==> out[entries[i].0]@ >= entries[i].1@
+        &&& forall|c: ChainId| out.contains_key(c) ==>
+            (base.contains_key(c) && out[c] == base[c]) ||
+            exists|i: int| 0 <= i < n && entries[i].0 == c && out[c] == entries[i].1
+    }
+
+    pub open spec fn joins(out: Map<ChainId, NodeIdx>, a: Map<ChainId, NodeIdx>, b: Map<ChainId, NodeIdx>) -> bool {
+        &&& out.dom() == a.dom().union(b.dom())
+        &&& forall|c: ChainId| a.contains_key(c) ==> out[c]@ >= a[c]@
+        &&& forall|c: ChainId| b.contains_key(c) ==> out[c]@ >= b[c]@
+        &&& forall|c: ChainId| out.contains_key(c) ==>
+            (a.contains_key(c) && out[c] == a[c]) || (b.contains_key(c) && out[c] == b[c])
+    }
+
+    proof fn prefix_union_step(&self, base: Map<ChainId, NodeIdx>, entries: Seq<(ChainId, NodeIdx)>, n: nat)
+        requires Self::prefix_union(self.contents(), base, entries, n), n < entries.len(),
+        ensures Self::prefix_union(self.raised(entries[n as int].0, entries[n as int].1), base, entries, n + 1),
+    {
+        let c = entries[n as int].0;
+        let p = entries[n as int].1;
+        let out = self.raised(c, p);
+        assert forall|k: ChainId| out.contains_key(k) implies
+            (base.contains_key(k) && out[k] == base[k]) ||
+            exists|i: int| 0 <= i < n + 1 && entries[i].0 == k && out[k] == entries[i].1 by {
+            if k == c && (!self.contents().contains_key(c) || self.contents()[c]@ < p@) {
+                assert(entries[n as int].0 == k && out[k] == entries[n as int].1);
+            } else if !(base.contains_key(k) && out[k] == base[k]) {
+                let i = choose|i: int| 0 <= i < n && entries[i].0 == k && self.contents()[k] == entries[i].1;
+                assert(out[k] == entries[i].1);
+            }
+        }
+    }
+
+    /// Pointwise maximum, retaining the larger side and visiting only the smaller.
+    pub fn union(&self, other: &Self) -> (out: Self)
+        requires self.valid(), other.valid(), self.contents().dom().union(other.contents().dom()).len() <= u32::MAX,
+        ensures out.valid(), Self::joins(out.contents(), self.contents(), other.contents()),
+            out.size() == self.contents().dom().union(other.contents().dom()).len(),
+            out.size() <= self.size() + other.size(),
+    {
+        let (mut big, small) = if self.len() >= other.len() {
+            (self.clone(), other)
+        } else {
+            (other.clone(), self)
+        };
+        let ghost base = big.contents();
+        let ghost base_size = big.size();
+        proof { small.sequence_correct(); }
+        let ghost sequence = small.sequence();
+        let mut iter = small.entries();
+        let ghost mut done: nat = 0;
+        loop
+            invariant
+                big.valid(), small.valid(), sequence == small.sequence(), sequence.len() == small.size(),
+                self.contents().dom().union(other.contents().dom()).len() <= u32::MAX,
+                (base == self.contents() && small.contents() == other.contents()) ||
+                    (base == other.contents() && small.contents() == self.contents()),
+                base_size + small.size() == self.size() + other.size(),
+                done <= sequence.len(), iter.remaining() == sequence.skip(done as int),
+                big.size() <= base_size + done,
+                Self::prefix_union(big.contents(), base, sequence, done),
+            ensures big.valid(), Self::joins(big.contents(), self.contents(), other.contents()),
+                big.size() <= self.size() + other.size(),
+            decreases iter.remaining().len(),
+        {
+            let next = iter.next();
+            match next {
+                None => {
+                    proof {
+                        small.sequence_correct();
+                        assert(done == sequence.len());
+                        assert(big.contents().dom() =~= base.dom().union(small.contents().dom()));
+                        assert(Self::joins(big.contents(), base, small.contents()));
+                        assert(base.dom().union(small.contents().dom()) =~= self.contents().dom().union(other.contents().dom()));
+                        assert(Self::joins(big.contents(), self.contents(), other.contents()));
+                    }
+                    break;
+                },
+                Some((chain, tip)) => {
+                    proof {
+                        big.prefix_union_step(base, sequence, done);
+                        small.sequence_correct();
+                        big.map_size();
+                        let next_keys = big.contents().dom().insert(chain);
+                        let all_keys = self.contents().dom().union(other.contents().dom());
+                        assert(next_keys.subset_of(all_keys));
+                        vstd::set_lib::lemma_len_subset(next_keys, all_keys);
+                    }
+                    big.include(chain, tip);
+                    proof { done = done + 1; }
+                },
+            }
+        }
+        proof { big.map_size(); }
+        big
+    }
+
     pub closed spec fn contents(&self) -> Map<ChainId, NodeIdx>
         decreases self,
     {

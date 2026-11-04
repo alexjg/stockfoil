@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'union ignores the smaller tree',
+        'stockfoil-core/src/verified/tree.rs',
+        'let next = iter.next();',
+        'let next = None;',
+        'last',
+    ),
+    (
+        'union replaces tips with zero',
+        'stockfoil-core/src/verified/tree.rs',
+        'big.include(chain, tip);',
+        'big.include(chain, NodeIdx::new(0));',
+        'last',
+    ),
+    (
+        'union discards the larger initial tree',
+        'stockfoil-core/src/verified/tree.rs',
+        '(self.clone(), other)',
+        '(Self::default(), other)',
+        'last',
+    ),
+    (
         'iterator descends right before visiting the root',
         'stockfoil-core/src/verified/tree.rs',
         'self.node = &e.left;',
