@@ -8,7 +8,7 @@ verus! {
 
 fn leaf(chain: u32, tip: NodeIdx) -> (out: Clock)
     ensures out.ordered(), out.contents() == Map::<u32, NodeIdx>::empty().insert(chain, tip),
-        out.metadata(), out.size() == 1, out.depth() == 1,
+        out.metadata(), out.balanced(), out.size() == 1, out.depth() == 1,
 {
     let left = Clock::default();
     let right = Clock::default();
@@ -63,6 +63,95 @@ pub fn unbalanced_construction_has_exact_metadata() {
     assert(lh == 3 && rh == 3 && ll == 3 && rl == 3);
     let old = left_heavy.clone();
     assert(old.metadata() && old.size() == 3 && old.depth() == 3);
+}
+
+// All rotation paths have satisfiable premises, with distinct tips so key/value
+// association matters as well as key membership. The general balance contract
+// covers arbitrary subtrees; these witnesses check concrete nonempty use.
+pub fn single_right_rotation() {
+    let a = NodeIdx::new(10);
+    let b = NodeIdx::new(20);
+    let c = NodeIdx::new(30);
+    let child = Clock::node(1, b, leaf(0, a), Clock::default());
+    let snapshot = child.clone();
+    let ghost old_contents = child.contents();
+    let tree = Clock::balance(2, c, child, Clock::default());
+    assert(tree.ordered() && tree.metadata() && tree.balanced());
+    assert(tree.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, a).insert(1, b).insert(2, c));
+    let size = tree.len();
+    let first = tree.position(0);
+    let middle = tree.position(1);
+    let last = tree.position(2);
+    assert(size == 3 && first == Some(a) && middle == Some(b) && last == Some(c));
+    assert(snapshot.contents() == old_contents);
+}
+
+pub fn double_left_right_rotation() {
+    let a = NodeIdx::new(10);
+    let b = NodeIdx::new(20);
+    let c = NodeIdx::new(30);
+    let child = Clock::node(0, a, Clock::default(), leaf(1, b));
+    let snapshot = child.clone();
+    let ghost old_contents = child.contents();
+    let tree = Clock::balance(2, c, child, Clock::default());
+    assert(tree.ordered() && tree.metadata() && tree.balanced());
+    assert(tree.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, a).insert(1, b).insert(2, c));
+    let size = tree.len();
+    let first = tree.position(0);
+    let middle = tree.position(1);
+    let last = tree.position(2);
+    assert(size == 3 && first == Some(a) && middle == Some(b) && last == Some(c));
+    assert(snapshot.contents() == old_contents);
+}
+
+pub fn single_left_rotation() {
+    let a = NodeIdx::new(10);
+    let b = NodeIdx::new(20);
+    let c = NodeIdx::new(30);
+    let child = Clock::node(1, b, Clock::default(), leaf(2, c));
+    let snapshot = child.clone();
+    let ghost old_contents = child.contents();
+    let tree = Clock::balance(0, a, Clock::default(), child);
+    assert(tree.ordered() && tree.metadata() && tree.balanced());
+    assert(tree.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, a).insert(1, b).insert(2, c));
+    let size = tree.len();
+    let first = tree.position(0);
+    let middle = tree.position(1);
+    let last = tree.position(2);
+    assert(size == 3 && first == Some(a) && middle == Some(b) && last == Some(c));
+    assert(snapshot.contents() == old_contents);
+}
+
+pub fn double_right_left_rotation() {
+    let a = NodeIdx::new(10);
+    let b = NodeIdx::new(20);
+    let c = NodeIdx::new(30);
+    let child = Clock::node(2, c, leaf(1, b), Clock::default());
+    let snapshot = child.clone();
+    let ghost old_contents = child.contents();
+    let tree = Clock::balance(0, a, Clock::default(), child);
+    assert(tree.ordered() && tree.metadata() && tree.balanced());
+    assert(tree.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, a).insert(1, b).insert(2, c));
+    let size = tree.len();
+    let first = tree.position(0);
+    let middle = tree.position(1);
+    let last = tree.position(2);
+    assert(size == 3 && first == Some(a) && middle == Some(b) && last == Some(c));
+    assert(snapshot.contents() == old_contents);
+}
+
+pub fn no_rotation_and_equal_height_grandchildren() {
+    let tip = NodeIdx::new(0);
+    let tree = Clock::balance(1, tip, leaf(0, tip), leaf(2, tip));
+    assert(tree.balanced() && tree.metadata() && tree.size() == 3);
+    // Equal grandchild heights select a single rotation, not a double rotation.
+    let left_heavy = Clock::balance(3, tip, tree.clone(), Clock::default());
+    let right_heavy = Clock::balance(0, tip, Clock::default(),
+        Clock::node(2, tip, leaf(1, tip), leaf(3, tip)));
+    assert(left_heavy.balanced() && right_heavy.balanced());
+    assert(left_heavy.size() == 4 && right_heavy.size() == 4);
+    assert(left_heavy.contents() =~= right_heavy.contents());
+    assert(tree.balanced() && tree.size() == 3);
 }
 
 // The ordering precondition is substantive: a left key above its parent is

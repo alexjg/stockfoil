@@ -12,53 +12,12 @@
 use super::NodeIdx;
 use crate::verified::clock as verified;
 use std::cmp::Ordering;
+#[cfg(test)]
 use std::sync::Arc;
 
 pub(crate) use crate::verified::tree::{ChainId, Clock};
 
 impl Clock {
-    fn balance(chain: ChainId, tip: NodeIdx, mut left: Self, mut right: Self) -> Self {
-        if left.height() > right.height() + 1 {
-            let l = left.0.as_ref().unwrap();
-            if l.right.height() > l.left.height() {
-                let r = l.right.0.as_ref().unwrap();
-                left = Self::node(
-                    r.chain,
-                    r.tip,
-                    Self::node(l.chain, l.tip, l.left.clone(), r.left.clone()),
-                    r.right.clone(),
-                );
-            }
-            let l = left.0.as_ref().unwrap();
-            return Self::node(
-                l.chain,
-                l.tip,
-                l.left.clone(),
-                Self::node(chain, tip, l.right.clone(), right),
-            );
-        }
-        if right.height() > left.height() + 1 {
-            let r = right.0.as_ref().unwrap();
-            if r.left.height() > r.right.height() {
-                let l = r.left.0.as_ref().unwrap();
-                right = Self::node(
-                    l.chain,
-                    l.tip,
-                    l.left.clone(),
-                    Self::node(r.chain, r.tip, l.right.clone(), r.right.clone()),
-                );
-            }
-            let r = right.0.as_ref().unwrap();
-            return Self::node(
-                r.chain,
-                r.tip,
-                Self::node(chain, tip, left, r.left.clone()),
-                r.right.clone(),
-            );
-        }
-        Self::node(chain, tip, left, right)
-    }
-
     /// Entries in chain order.
     pub fn entries(&self) -> impl Iterator<Item = (ChainId, NodeIdx)> + '_ {
         let mut stack = Vec::new();

@@ -27,11 +27,11 @@ cargo +1.99.1 test --workspace --locked
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with nineteen deliberate semantic errors.
+baseline, then checks temporary copies with twenty-four deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked proof baseline reports **76 verified, 0 errors** and rejects all
-nineteen mutations. The authorization plan records which stage these results
+The checked proof baseline reports **85 verified, 0 errors** and rejects all
+twenty-four mutations. The authorization plan records which stage these results
 establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -56,6 +56,7 @@ implementations of their executable bodies:
 | `batch_end` | Advances by `min(max, remaining)` without overflow. Positive budgets make progress; zero budgets preserve position. | `emit_next_changes` |
 | [`tree.rs`](../stockfoil-core/src/verified/tree.rs): `Clock::default`, `clone` | Empty clocks are ordered and have an empty coordinate map; cloning preserves the logical tree using `Arc::clone`. | Clock construction and snapshots |
 | `Clock::node`, `height`, `len` | Constructor preserves ordering and the exact coordinate map, and computes exact structural height/size without overflow under explicit child and capacity premises. Accessors return cached metadata, which equals structural values when metadata is valid. | Rotations, updates and reconstruction |
+| `Clock::balance` | Given balanced children whose heights differ by at most two, restores AVL balance while preserving ordering, the exact map and size, and valid metadata. Output height lies between the taller input child and one more than it. Explicit size/height capacity premises cover every intermediate constructor. | Path-copying insertion |
 | `Clock::position`, `contains` | Terminating, exact lookup and inclusive membership in the actual tree, conditional on its BST ordering invariant. | History, permission bounds and interval differences |
 
 `NodeIdx` stays a distinct history-local newtype; chain IDs remain `u32`.
@@ -67,7 +68,7 @@ not rely on cached height/length metadata. No tree copying or recursive runtime
 lookup is introduced. The clone proof uses vstd's trusted `Arc::clone` contract;
 a runtime pointer-equality regression also checks structural sharing.
 
-**Rotation and update callers still must establish the constructor preconditions.**
+**Update callers still must establish construction and balancing preconditions.**
 The actual `Clock::node` now lives in the shared verified module. Its children
 must be ordered, have exact metadata, and have keys strictly below/above the new
 root. Their combined size plus the root must fit `u32`, and their heights plus
@@ -77,9 +78,24 @@ proof obligations, not new runtime checks or a proof of global capacity safety.
 
 `size` and `depth` are independent recursive specifications; `metadata` requires
 cached values to equal them throughout the tree. Empty clocks establish this
-predicate. Temporary unbalanced nodes are allowed, as required during rotations;
-this constructor does not claim AVL balance. Rotations, updates, union, sorted
-iteration, masking and `from_sorted` remain in `history/clock.rs` and are unproved.
+predicate. The recursive `balanced` predicate independently requires child
+heights to differ by at most one at every node. `node` characterizes when its
+result is balanced; it also permits temporary unbalanced nodes used by rotations.
+
+The production `balance` routine now lives in the shared module, with helpers
+for the left-heavy and right-heavy cases. It verifies all four rotation paths
+and the no-rotation path. Its inputs must be ordered, balanced, have valid
+metadata, partition keys around the root, differ in height by at most two, and
+meet the constructor's total-size and input-height capacity bounds. The proof
+establishes each intermediate constructor's premises, safe height comparisons,
+and the nonempty children needed by `unwrap`. Returned height is between the
+maximum input child height and that height plus one. Unchanged subtrees still
+use shallow `Arc::clone`; no whole-tree traversal or copying is added.
+
+These are conditional operation proofs. Insertion (`set`/`include`) must still
+establish the premises, including bounds, along every update path. Updates,
+union, sorted iteration, masking and `from_sorted` remain in `history/clock.rs`
+and are unproved.
 
 The binary search requires a sorted chain-node slice, and `batch_end` requires
 `next <= total`. The wrappers maintain these by construction and have regression
@@ -104,7 +120,7 @@ states.
 | [`materialization.rs`](materialization.rs) | Candidate sets equal new delivery union visibility change. A batch model uses the shared boundary and classifier, emits the selected pending slice with exact fields, and consecutive slices concatenate without gaps or overlap. Sorted candidates are unique and topological; an unchanged cursor yields no candidates. | Concrete set assembly, sort/dedup, record/hash/payload mapping, history identity checks, captured heads and completed-cursor publication. |
 | [`examples.rs`](examples.rs) | Nonempty witnesses for chain summaries, permission masking and batches; zero versus absence, reversed bounds, maximum indices and budgets. | Specification checks, not wrapper proofs. |
 | [`authorization_tests.rs`](authorization_tests.rs) | Nonempty policy witnesses with multiple heads, cross-author bounds, denied intermediate authors, unavailable heads, and a frontier becoming known after capture. | Specification checks, not wrapper proofs. |
-| [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also builds nonempty trees through the verified production constructor and checks asymmetric heights; rotation callers remain unproved. |
+| [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also uses actual construction and balancing for all four rotations, the no-rotation case, and equal-height grandchildren, with distinct tips and retained snapshots. Update callers remain unproved. |
 
 [`coordinates.rs`](coordinates.rs) supplies a mathematical sequence view of AVL
 entries. It is not an executable vector clock. Model chain labels widen `u32`
@@ -128,13 +144,16 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Nineteen mutations must be rejected: an expanding cap, exclusive membership,
+Twenty-four mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
 unbounded, escaping the selected history, excluding the frontier itself, and
 selecting permissions by the wrong author, taking either wrong AVL subtree,
-omitting a matching tree root, dropping a tree during cloning, choosing the shorter child height, omitting the root from the size, and swapping constructor children.
+omitting a matching tree root, dropping a tree during cloning, choosing the shorter
+child height, omitting the root from the size, swapping constructor children,
+using the wrong tip in either rotation direction, skipping either inner double
+rotation, and skipping the left-heavy balancing case.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -154,9 +173,11 @@ obligations; it is not a measure of production coverage.
 
 1. **Persistent clocks:** the BST predicate and conditional lookup are checked.
    Node construction now preserves ordering and exact metadata under explicit
-   premises. Next prove AVL rotations and their callers establish those premises,
-   including capacity bounds, then sorted iteration, set/include, union, and
-   `from_sorted`. Connect the tree's map to the graph model's coordinate view.
+   premises. Balancing now restores AVL balance and preserves the map, size and
+   metadata under explicit child and capacity premises. Next prove `set`/`include`
+   establish those premises and preserve the clock invariant, then sorted
+   iteration, union, masking and `from_sorted`. Connect the tree's map to the graph
+   model's coordinate view.
    Preserve structural sharing and account for `u32`/`u8` limits rather than
    assuming they cannot overflow.
 2. **History refinement:** prove insertion and author-chain selection preserve

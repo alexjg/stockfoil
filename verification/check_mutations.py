@@ -13,6 +13,41 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'left rotation associates the wrong tip',
+        'stockfoil-core/src/verified/tree.rs',
+        'l.tip,\n            l.left.clone(),',
+        'tip,\n            l.left.clone(),',
+        'last',
+    ),
+    (
+        'right rotation associates the wrong tip',
+        'stockfoil-core/src/verified/tree.rs',
+        'r.tip,\n            Self::node(chain, tip, left, r.left.clone()),',
+        'tip,\n            Self::node(chain, tip, left, r.left.clone()),',
+        'last',
+    ),
+    (
+        'left-right rotation skips the inner rotation',
+        'stockfoil-core/src/verified/tree.rs',
+        'if l.right.height() > l.left.height() {',
+        'if false {',
+        'last',
+    ),
+    (
+        'right-left rotation skips the inner rotation',
+        'stockfoil-core/src/verified/tree.rs',
+        'if r.left.height() > r.right.height() {',
+        'if false {',
+        'last',
+    ),
+    (
+        'balancing skips the left-heavy case',
+        'stockfoil-core/src/verified/tree.rs',
+        'if left.height() > right.height() + 1 {',
+        'if false {',
+        'last',
+    ),
+    (
         'node height uses the shorter child',
         'stockfoil-core/src/verified/tree.rs',
         'let height = 1 + if lh >= rh { lh } else { rh };',
