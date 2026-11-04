@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'mask fails to cap expanding bounds',
+        'stockfoil-core/src/verified/tree.rs',
+        'if let Some(value) = super::clock::cap(tip, limit) {',
+        'if let Some(value) = limit {',
+        'last',
+    ),
+    (
+        'mask drops position zero',
+        'stockfoil-core/src/verified/tree.rs',
+        'entries.push((chain, value));',
+        'if value.index() > 0 { entries.push((chain, value)); }',
+        'last',
+    ),
+    (
+        'mask ignores denied coordinates',
+        'stockfoil-core/src/verified/tree.rs',
+        'let limit = bound(chain, tip);',
+        'let _ = bound(chain, tip); let limit = Some(tip);',
+        'last',
+    ),
+    (
         'sorted reconstruction replaces a tip with zero',
         'stockfoil-core/src/verified/tree.rs',
         'let (chain, tip) = entries[mid];',

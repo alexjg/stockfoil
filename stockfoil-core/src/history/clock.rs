@@ -17,17 +17,6 @@ use std::sync::Arc;
 pub(crate) use crate::verified::tree::{ChainId, Clock};
 
 impl Clock {
-    /// Cap each coordinate at its bound, or drop it for `None`.
-    pub fn mask(&self, mut bound: impl FnMut(ChainId, NodeIdx) -> Option<NodeIdx>) -> Self {
-        let entries: Vec<_> = self
-            .entries()
-            .filter_map(|(chain, tip)| {
-                verified::cap(tip, bound(chain, tip)).map(|limit| (chain, limit))
-            })
-            .collect();
-        Self::from_sorted(&entries)
-    }
-
     /// Visit every tree entry, identified by address, for memory accounting.
     #[cfg(test)]
     pub fn for_each_entry(&self, visit: &mut impl FnMut(*const ()) -> bool) {

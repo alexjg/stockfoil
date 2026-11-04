@@ -277,6 +277,33 @@ pub fn tip_tables_preserve_zero_and_chain_indices() {
     assert(tree.valid() && tree.size() == 0 && tree.contents() =~= Map::<u32, NodeIdx>::empty());
 }
 
+pub fn masks_deny_cap_and_preserve_zero_without_expansion() {
+    let zero = NodeIdx::new(0);
+    let low = NodeIdx::new(10);
+    let high = NodeIdx::new(30);
+    let tips = vec![low, high, low];
+    let tree = Clock::from_tips(&tips);
+    let bound = |chain: u32, _tip: NodeIdx| -> (limit: Option<NodeIdx>)
+        ensures limit == (if chain == 0 { Some(zero) } else if chain == 1 { None } else { Some(high) }),
+    {
+        if chain == 0 { Some(zero) } else if chain == 1 { None } else { Some(high) }
+    };
+    let out = tree.mask(bound);
+    assert(out.valid() && out.size() <= tree.size());
+    assert(out.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, zero).insert(2, low));
+    let deny = |_chain: u32, _tip: NodeIdx| -> (limit: Option<NodeIdx>)
+        ensures limit is None,
+    { None };
+    let denied = tree.mask(deny);
+    assert(denied.contents() =~= Map::<u32, NodeIdx>::empty());
+    let allow = |_chain: u32, tip: NodeIdx| -> (limit: Option<NodeIdx>)
+        ensures limit == Some(tip),
+    { Some(tip) };
+    let unchanged = tree.mask(allow);
+    assert(unchanged.contents() == tree.contents());
+    assert(tree.contents()[0u32] == low && tree.contents()[1u32] == high);
+}
+
 // The ordering precondition is substantive: a left key above its parent is
 // rejected even if the height and size metadata look reasonable.
 pub fn malformed_tree_does_not_satisfy_the_invariant() {

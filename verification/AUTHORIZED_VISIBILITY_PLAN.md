@@ -137,7 +137,7 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  112 verified obligations and rejects all 36 mutations.
+  119 verified obligations and rejects all 39 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -171,13 +171,21 @@ Stage 2 progress (still incomplete):
   while preserving the entire input sequence. Tip-table construction establishes
   precisely the supplied contiguous coordinates. Both prove indexing, capacity
   and termination from an input-length bound. Two witnesses and three mutations
-  exercise reconstruction. The mask callback/iteration composition remains open.
+  exercise reconstruction.
+- Masking now composes verified iteration, cap and reconstruction and returns
+  exactly the callback-bound intersection, preserving the tree invariant and
+  never increasing size. Callback existence is established through actual calls;
+  deterministic callback behavior is an explicit premise. A nonempty witness
+  covers denial, unbounded, zero and expanding bounds; three mutations test it.
+  The production permission callback still must establish the bound contract.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), and reconstruction. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), and masking. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
-step is proving masking using the checked iterator and sorted construction.
+step is connecting the executable clocks to the graph/authorization model,
+then proving concrete history and bound compilation establish the remaining
+hypotheses.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.
