@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'set ignores replacement tips',
+        'stockfoil-core/src/verified/tree.rs',
+        'Self::node(chain, tip, e.left.clone(), e.right.clone())',
+        'Self::node(chain, e.tip, e.left.clone(), e.right.clone())',
+        'last',
+    ),
+    (
+        'set drops a new coordinate',
+        'stockfoil-core/src/verified/tree.rs',
+        'return Self::node(chain, tip, Self::default(), Self::default());',
+        'return Self::default();',
+        'last',
+    ),
+    (
+        'include skips every update',
+        'stockfoil-core/src/verified/tree.rs',
+        'if super::clock::contains(self.position(chain), position) {',
+        'if true {',
+        'last',
+    ),
+    (
         'left rotation associates the wrong tip',
         'stockfoil-core/src/verified/tree.rs',
         'l.tip,\n            l.left.clone(),',

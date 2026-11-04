@@ -11,7 +11,6 @@
 //! representation but need not be parent-closed.
 use super::NodeIdx;
 use crate::verified::clock as verified;
-use std::cmp::Ordering;
 #[cfg(test)]
 use std::sync::Arc;
 
@@ -31,29 +30,6 @@ impl Clock {
             node = e.right.0.as_deref();
             Some((e.chain, e.tip))
         })
-    }
-
-    /// Raise `chain`'s position to at least `position`.
-    pub fn include(&mut self, chain: ChainId, position: NodeIdx) {
-        if verified::contains(self.position(chain), position) {
-            return;
-        }
-        *self = self.set(chain, position);
-    }
-
-    fn set(&self, chain: ChainId, tip: NodeIdx) -> Self {
-        let Some(e) = &self.0 else {
-            return Self::node(chain, tip, Self::default(), Self::default());
-        };
-        match chain.cmp(&e.chain) {
-            Ordering::Less => {
-                Self::balance(e.chain, e.tip, e.left.set(chain, tip), e.right.clone())
-            }
-            Ordering::Greater => {
-                Self::balance(e.chain, e.tip, e.left.clone(), e.right.set(chain, tip))
-            }
-            Ordering::Equal => Self::node(chain, tip, e.left.clone(), e.right.clone()),
-        }
     }
 
     /// The pointwise maximum, sharing the larger side's structure.
