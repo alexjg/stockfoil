@@ -6,11 +6,10 @@ publish = false
 
 [dependencies]
 stockfoil = { path = "../stockfoil" }
-# The sibling checkout, for unreleased Subduction APIs.
-sedimentree_core = { path = "../../subduction/sedimentree_core", features = ["std"] }
+sedimentree_core = { version = "0.17.0", features = ["std"] }
 
 [dev-dependencies]
 blake3 = "1.8.7"
 ed25519-dalek = "2"
-subduction_core = { path = "../../subduction/subduction_core", features = ["std", "test_utils"] }
+subduction_core = { version = "0.21.0", features = ["std", "test_utils"] }
 tokio = { version = "1", features = ["macros", "rt"] }

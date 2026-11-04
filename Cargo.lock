@@ -623,6 +623,8 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "sedimentree_core"
 version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef33f31eda0c04deaf39f2d1188090f98cceb17f644f3358142cc97da4c2560f"
 dependencies = [
  "arbitrary",
  "async-lock",
@@ -799,6 +801,8 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe20b303157ad344d11375e51138db0bddcdfa820c2511cbd2b94042e2a7f3a"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -822,6 +826,8 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb086c22f8c31e98306b76e180c0d0d14c73d4d3979e6855a4d58825b6a102d9"
 dependencies = [
  "ed25519-dalek",
  "future_form",

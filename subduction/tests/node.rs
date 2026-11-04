@@ -1,5 +1,5 @@
 //! Items published to and read back from an in-memory Subduction node.
-#[path = "../../tests/support/mod.rs"]
+#[path = "../../stockfoil/tests/support/mod.rs"]
 mod support;
 
 use ed25519_dalek::SigningKey;
