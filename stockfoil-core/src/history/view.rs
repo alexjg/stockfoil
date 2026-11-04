@@ -182,8 +182,7 @@ pub(super) fn plan_changes(
         &mut pending,
     );
     clock::symmetric_difference(&history.chain_nodes, &before, &after, &mut pending);
-    pending.sort_unstable();
-    pending.dedup();
+    crate::verified::candidates::normalize(&mut pending);
     Ok(Changes {
         history: history.id,
         pending,

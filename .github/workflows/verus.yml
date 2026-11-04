@@ -10,7 +10,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install matching Rust toolchain
@@ -25,6 +25,8 @@ jobs:
           echo "f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c  $archive" | sha256sum --check
           unzip -q "$archive" -d "$RUNNER_TEMP"
           echo "VERUS_BIN=$RUNNER_TEMP/verus-x86-linux/verus" >> "$GITHUB_ENV"
+      - name: Test the trusted contract audit
+        run: python3 verification/test_trusted_audit.py
       - name: Verify all proofs and reject semantic mutations
         run: python3 verification/check_mutations.py
       - name: Check formatting

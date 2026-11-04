@@ -1,0 +1,9 @@
+{
+  "stockfoil-core/src/verified/stdlib.rs": {
+    "sha256": "0c16ef94a5fdd2dc9dedc79b344f97dd873c7c3b191074592d4a31cb768b6bcd",
+    "contracts": [
+      "SORT-1",
+      "DEDUP-1"
+    ]
+  }
+}

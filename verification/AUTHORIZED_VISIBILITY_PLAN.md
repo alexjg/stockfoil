@@ -102,9 +102,12 @@ ordering, batch partitioning, and completed-cursor publication.
 - Every reported visibility bit equals the independent policy for its captured
   view; every authorized commit is included in the participation set.
 - History and clock prerequisites follow from public construction paths, rather
-  than unchecked assumptions or project `external_body` declarations.
+  than application assumptions. Explicit standard-library contracts are allowed
+  only through the [enumerated trusted boundary](TRUSTED_STDLIB.md).
 - Production code is shared with the harness; model-only functions are labeled.
-- `--no-cheating`, semantic mutation checks and applicable runtime tests pass.
+- The original suite passes `--no-cheating`; the full suite passes with only
+  enumerated standard-library contracts, enforced by the trust audit. Semantic
+  mutation checks and applicable runtime tests pass.
 - Documentation names any remaining trusted library specifications and excludes
   cryptographic security and application crash recovery from this milestone.
 

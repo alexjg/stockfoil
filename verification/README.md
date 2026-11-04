@@ -10,7 +10,8 @@ separately below.
 The next milestone is tracked in the [authorized visibility plan](AUTHORIZED_VISIBILITY_PLAN.md),
 which states the public contract, proof dependencies and completion criteria.
 The [remaining public API work](PUBLIC_API_PROOF_BOUNDARY.md) maps all five requested
-guarantees to concrete boundaries and records the pending standard-library decision.
+guarantees to concrete boundaries and records the accepted standard-library boundary.
+[TRUSTED_STDLIB.md](TRUSTED_STDLIB.md) enumerates the two enabled assumptions.
 
 ## Run
 
@@ -27,7 +28,8 @@ cargo +1.99.1 test --workspace --locked
 ```
 
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
-verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
+runs the original suite with `--no-cheating`, then the full suite with the
+enumerated standard-library contracts; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
 baseline, then checks temporary copies with forty-seven deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
@@ -67,6 +69,7 @@ implementations of their executable bodies:
 | `Clock::entries`, `Entries::next` | Actual Rust iterator returns precisely the remaining in-order sequence, terminates and stays exhausted. For ordered trees, the sequence contains every map entry exactly once in strictly increasing key order, with length equal to structural size. | Union, masking and interval differences |
 | `Clock::set`, `include` | Terminating path-copying replacement and pointwise maximum update preserve ordering, metadata and balance, with exact size changes and height growth at most one. Only a new coordinate needs size capacity. | Clock builders and union |
 | `Clock::balance` | Given balanced children whose heights differ by at most two, restores AVL balance while preserving ordering, the exact map and size, and valid metadata. Output height lies between the taller input child and one more than it. Explicit size/height capacity premises cover every intermediate constructor. | Path-copying insertion |
+| `candidates::normalize` | Exact set preservation and strict numeric ordering, conditional on the two enumerated stdlib contracts. Production planning uses this same wrapper. | Candidate assembly and topological materialization |
 | `Clock::position`, `contains` | Terminating, exact lookup and inclusive membership in the actual tree, conditional on its BST ordering invariant. | History, permission bounds and interval differences |
 
 `NodeIdx` stays a distinct history-local newtype; chain IDs remain `u32`.
@@ -165,7 +168,8 @@ actual output writes; no staging allocation or whole-history scan is added.
 The table rows must be sorted and every clock chain must index an existing row.
 Concrete history construction must still establish table completeness, correct
 chain membership and uniqueness. Enumeration is not globally topological across
-chains; materialization's sort/dedup remains to be proved. `batch_end` also
+chains; materialization now uses checked normalization under the two standard-library
+contracts. Assembly of its input set remains a separate obligation. `batch_end` also
 requires `next <= total`; captured traversal construction must establish this.
 
 ## Connected model theorems and refinement
@@ -215,7 +219,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Forty-seven mutations must be rejected: an expanding cap, exclusive membership,
+Forty-eight mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -234,7 +238,7 @@ mask bounds, dropping position zero, ignoring denied mask coordinates, shifting
 chain IDs in the model projection, dropping projected permission bounds,
 skipping selected difference nodes, emitting the wrong node, and omitting the
 reverse symmetric-difference direction, ignoring builder coordinates, discarding
-previously accumulated inputs during a merge, and dropping the finished result.
+previously accumulated inputs during a merge, and dropping the finished result, and clearing the normalized candidate set.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -244,8 +248,9 @@ exercise the policy through `changes`/`next_changes`, including permission
 transitions and a frontier becoming known after capture.
 These tests complement the proofs; they do not discharge model hypotheses.
 
-There are no project `assume`, `admit`, `external_body`, `assume_specification`,
-or custom axioms. The trusted base includes Verus and erasure, vstd's library
+There are two project standard-library adapter contracts, documented and pinned
+in [TRUSTED_STDLIB.md](TRUSTED_STDLIB.md). Application code contains no project
+assumptions or unchecked bodies. The original suite still passes `--no-cheating`. The trusted base includes Verus and erasure, vstd's library
 specifications, Z3, and Rust. Allocation failure, resource limits and cryptographic
 security are outside this milestone. The proof count includes helpers and loop
 obligations; it is not a measure of production coverage.

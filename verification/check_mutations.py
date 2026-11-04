@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'normalization clears the candidate set',
+        'stockfoil-core/src/verified/candidates.rs',
+        '    super::stdlib::dedup_nodes(nodes);',
+        '    super::stdlib::dedup_nodes(nodes); nodes.clear();',
+        'last',
+    ),
+
+    (
         'builder ignores a coordinate',
         'stockfoil-core/src/verified/tree.rs',
         'self.clock.include(chain, position);',
@@ -344,9 +352,9 @@ MUTATIONS = [
 ]
 
 
-def verify(root):
+def verify(root, mutation=False):
     return subprocess.run(
-        ["bash", str(root / "verification/verify.sh")],
+        ["bash", str(root / "verification/verify.sh")] + (["--mutation-only"] if mutation else []),
         cwd=root,
         env=os.environ.copy(),
         capture_output=True,
@@ -372,7 +380,7 @@ def main():
             if not matched:
                 raise SystemExit(f"Mutation no longer matches source: {name}")
             path.write_text(prefix + after + suffix)
-            result = verify(root)
+            result = verify(root, mutation=True)
             output = result.stdout + result.stderr
             if result.returncode == 0 or not any(
                 message in output
