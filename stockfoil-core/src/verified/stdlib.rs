@@ -1,5 +1,7 @@
 //! Audited standard-library contracts. See verification/TRUSTED_STDLIB.md.
-use super::clock::{self, NodeIdx};
+#[cfg(verus_keep_ghost)]
+use super::clock;
+use super::clock::NodeIdx;
 #[cfg(not(verus_keep_ghost))]
 use verus_builtin_macros::verus;
 #[cfg(verus_keep_ghost)]

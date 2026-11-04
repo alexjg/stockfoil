@@ -225,3 +225,18 @@ unchanged traversal. No concrete history invariant or public API theorem is
 claimed. The full suite now reports 147 checks with two explicit stdlib contracts;
 the original suite reports 140 checks with `--no-cheating`; 52 mutation checks
 exercise the combined suite.
+
+The next construction layer moves actual chain-tip and row updates into
+`verified/chain_tables.rs`, called by both branches of `assign_chain`. It proves
+exact writes and preservation of nonempty strictly increasing rows with their
+last node as tip. A refinement proves that appending a fresh node preserves the
+candidate model's complete table layout, and that `Clock::from_tips` over valid
+tables covers every recorded node. A witness starts from empty tables, creates
+two interleaved chains, and extends the first. These are checked application
+proofs; no additional trusted contracts were introduced.
+
+Stage 3 remains open: History must connect the ghost chain-label sequence to its
+stored nodes, verify chain selection and author mappings, establish fresh indices
+and capacity, and verify the actual cached walk. The latest baseline is 143 strict
+checks and 154 full-suite checks with the same two stdlib contracts. Three table
+mutations bring the mutation suite to 55 cases.

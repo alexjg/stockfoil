@@ -45,7 +45,7 @@ impl std::fmt::Debug for Clock {
     }
 }
 
-pub(crate) use crate::verified::difference::{difference, symmetric_difference};
+pub(crate) use crate::verified::difference::difference;
 
 #[cfg(test)]
 mod tests {

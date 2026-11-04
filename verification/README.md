@@ -34,10 +34,10 @@ passes, then uses `--mutation-only` to run the complete expanded suite and audit
 on each temporary mutation without repeating the subset pass.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The original-suite baseline reports **140 verified, 0 errors**; the full suite
-reports **147 verified, 0 errors**, conditional on **two standard-library
+The original-suite baseline reports **143 verified, 0 errors**; the full suite
+reports **154 verified, 0 errors**, conditional on **two standard-library
 contracts**. These overlapping proof counts are not additive. The mutation suite
-checks 52 deliberate errors. The authorization plan records which stage these
+checks 55 deliberate errors. The authorization plan records which stage these
 results establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -71,6 +71,7 @@ implementations of their executable bodies:
 | `Clock::entries`, `Entries::next` | Actual Rust iterator returns precisely the remaining in-order sequence, terminates and stays exhausted. For ordered trees, the sequence contains every map entry exactly once in strictly increasing key order, with length equal to structural size. | Union, masking and interval differences |
 | `Clock::set`, `include` | Terminating path-copying replacement and pointwise maximum update preserve ordering, metadata and balance, with exact size changes and height growth at most one. Only a new coordinate needs size capacity. | Clock builders and union |
 | `Clock::balance` | Given balanced children whose heights differ by at most two, restores AVL balance while preserving ordering, the exact map and size, and valid metadata. Output height lies between the taller input child and one more than it. Explicit size/height capacity premises cover every intermediate constructor. | Path-copying insertion |
+| `chain_tables::append` | Actual writes to tips and rows preserve nonempty strictly ordered rows and exact last-node tips; extend precisely the selected row or allocate the next contiguous row. | History chain selection, stored node labels and fresh-index premises |
 | `candidates::assemble` | Actual difference enumeration plus normalization returns exactly new delivery union both visibility-change directions, in strictly increasing numeric order. | Concrete history table and clock premises |
 | `candidates::normalize` | Exact set preservation and strict numeric ordering, conditional on the two enumerated stdlib contracts. Production planning uses this same wrapper. | Candidate assembly and topological materialization |
 | `Clock::position`, `contains` | Terminating, exact lookup and inclusive membership in the actual tree, conditional on its BST ordering invariant. | History, permission bounds and interval differences |
@@ -185,6 +186,7 @@ production mask and connects its result to the independent graph policy.
 
 | File | Checked result | Remaining production boundary |
 | --- | --- | --- |
+| [`chain_table_refinement.rs`](chain_table_refinement.rs) | Actual table append preserves complete/correct node membership from the empty layout. Valid table tips produce a delivered clock covering every recorded node. | History must connect the ghost chain-label sequence to stored nodes, establish fresh indices and valid chain selection, and maintain author/ancestry invariants and capacity. |
 | [`candidate_refinement.rs`](candidate_refinement.rs) | Production assembly establishes the existing batch model’s pending contract under explicit complete-table and delivered-clock premises. Numeric projection preserves membership; the model then gives uniqueness and topological order. A nonempty harness calls the actual assembler. | Concrete table construction, ancestry and permission clocks, captured traversal fields and public wrappers. |
 | [`tree_refinement.rs`](tree_refinement.rs) | Actual tree entries refine the coordinate model; actual lookup equals coordinate membership; actual mask output equals graph authorization under history-summary and compiled-bound premises. A nonempty witness executes the production mask with an inclusive frontier. | Concrete history construction, stored author/chain mapping, view capture and permission compilation must establish these premises. This is not a public History API proof. |
 | [`graph.rs`](graph.rs) | Independent parent-edge reachability is ordered and transitive; append preserves old reachability; same-author maximal-tip reuse preserves chain invariants; valid summaries imply exact ancestry membership. | Hash-to-index mapping, chain assignment, concrete summary construction, strict-ancestor fast path and unknown hashes. |
@@ -224,7 +226,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Fifty-two mutations must be rejected: an expanding cap, exclusive membership,
+Fifty-five mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -248,6 +250,8 @@ clearing the normalized candidate set, dropping new deliveries or visibility
 changes during candidate assembly, and shifting projected node indices. A
 nonempty consumer must also reject an inserted `assert(false)`; this checks for
 exposed inconsistency in that witness, not global consistency of the contracts.
+Three table mutations change the current tip, clear existing members, or omit the
+first node of a newly allocated chain.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -282,7 +286,10 @@ obligations; it is not a measure of production coverage.
    assuming they cannot overflow.
 2. **History refinement:** prove insertion and author-chain selection preserve
    the chain invariant, table completeness and unique membership, and that
-   concrete cached walks produce exact summaries. Clock accumulation and
+   concrete cached walks produce exact summaries. Actual table append now preserves
+   completeness under explicit stored-label/fresh-index premises, and valid table
+   tips discharge delivered-clock coverage. The public History construction path
+   still must establish those premises. Clock accumulation and
    whole-clock difference writes are now verified under their input premises.
 3. **Views and materialization:** prove permission compilation, complete chain
    enumeration premises, capture semantics, wrong-history rejection

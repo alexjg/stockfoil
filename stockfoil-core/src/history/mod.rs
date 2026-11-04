@@ -501,14 +501,22 @@ impl History {
                 .find(|&chain| history.contains(chain, self.chain_tips[chain as usize]))
         });
         if let Some(chain) = reusable {
-            self.chain_tips[chain as usize] = position;
-            self.chain_nodes[chain as usize].push(position);
+            crate::verified::chain_tables::append(
+                &mut self.chain_tips,
+                &mut self.chain_nodes,
+                chain,
+                position,
+            );
             chain
         } else {
             let chain = ChainId::try_from(self.chain_tips.len()).expect("chain space");
-            self.chain_tips.push(position);
+            crate::verified::chain_tables::append(
+                &mut self.chain_tips,
+                &mut self.chain_nodes,
+                chain,
+                position,
+            );
             self.chain_authors.push(author);
-            self.chain_nodes.push(vec![position]);
             self.author_chains.entry(author).or_default().push(chain);
             chain
         }
