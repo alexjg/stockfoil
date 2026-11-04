@@ -111,7 +111,7 @@ ordering, batch partitioning, and completed-cursor publication.
 ## Progress
 
 - [x] Stage 1: policy laws, nonempty examples, public API contract tests and mutations.
-- [ ] Stage 2: production AVL refinement.
+- [x] Stage 2: production AVL operations and coordinate-model refinement.
 - [ ] Stage 3: history and cached-walk refinement.
 - [ ] Stage 4: production permission compilation.
 - [ ] Stage 5: public API authorization theorem.
@@ -129,7 +129,7 @@ Stage 1 evidence:
 - The Stage 1 baseline reports 58 verified obligations; all 12 semantic mutations are
   rejected, including four new authorization-policy mutations.
 
-Stage 2 progress (still incomplete):
+Stage 2 evidence (conditional operation contracts; caller premises remain in later stages):
 
 - The shared production tree now has a coordinate-map view and a strict BST
   ordering predicate. Its actual iterative lookup and membership functions are
@@ -137,7 +137,7 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  119 verified obligations and rejects all 39 mutations.
+  123 verified obligations and rejects all 41 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -178,14 +178,19 @@ Stage 2 progress (still incomplete):
   deterministic callback behavior is an explicit premise. A nonempty witness
   covers denial, unbounded, zero and expanding bounds; three mutations test it.
   The production permission callback still must establish the bound contract.
+- `tree_refinement.rs` proves actual lookup matches the coordinate model and
+  composes the production mask with the independent graph authorization theorem.
+  A nonempty executable witness retains an inclusive frontier ancestor and
+  excludes a later commit. Two mutations test the coordinate/bound projections.
+  Concrete history summaries, author mapping and compiled bounds remain premises
+  to discharge in stages 3 and 4; no public API proof is claimed.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), and masking. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking, and the clock-to-policy connection. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
-step is connecting the executable clocks to the graph/authorization model,
-then proving concrete history and bound compilation establish the remaining
-hypotheses.
+step is proving concrete history and bound compilation establish the remaining
+hypotheses, alongside complete difference enumeration and captured batch assembly.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.

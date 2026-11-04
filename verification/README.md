@@ -27,11 +27,11 @@ cargo +1.99.1 test --workspace --locked
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with thirty-nine deliberate semantic errors.
+baseline, then checks temporary copies with forty-one deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked proof baseline reports **119 verified, 0 errors** and rejects all
-thirty-nine mutations. The authorization plan records which stage these results
+The checked proof baseline reports **123 verified, 0 errors** and rejects all
+forty-one mutations. The authorization plan records which stage these results
 establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -151,14 +151,16 @@ Strict ordering and unique chain membership are additionally needed for unique
 whole-history enumeration. The helpers add no staging allocation and retain
 logarithmic interval search.
 
-## Connected model theorems
+## Connected model theorems and refinement
 
-These files are verification-only models. Their hypotheses are explicit proof
-obligations for the concrete wrappers, not facts established about all runtime
-states.
+These files contain verification-only models and their refinement connections.
+Their hypotheses are explicit proof obligations for the concrete wrappers, not
+facts established about all runtime states. `tree_refinement.rs` calls the actual
+production mask and connects its result to the independent graph policy.
 
 | File | Checked result | Remaining production boundary |
 | --- | --- | --- |
+| [`tree_refinement.rs`](tree_refinement.rs) | Actual tree entries refine the coordinate model; actual lookup equals coordinate membership; actual mask output equals graph authorization under history-summary and compiled-bound premises. A nonempty witness executes the production mask with an inclusive frontier. | Concrete history construction, stored author/chain mapping, view capture and permission compilation must establish these premises. This is not a public History API proof. |
 | [`graph.rs`](graph.rs) | Independent parent-edge reachability is ordered and transitive; append preserves old reachability; same-author maximal-tip reuse preserves chain invariants; valid summaries imply exact ancestry membership. | Hash-to-index mapping, chain assignment, concrete summary construction, strict-ancestor fast path and unknown hashes. |
 | [`walk.rs`](walk.rs) | Starting, expanding parents, revisiting and substituting a complete cache preserve the walk invariant; an empty pending set yields exact history. | Stack/visited bookkeeping and termination, selective cache initialization and thread safety, accumulating the AVL summary. |
 | [`authorization.rs`](authorization.rs) | Independent policy laws: missing/denied permissions, exact unbounded permission, inclusive bounds, author isolation, available-frontier equivalence/monotonicity, and fixed-view stability under append. | Mapping commit hashes and stored authors to model nodes; view validation and concrete capture. |
@@ -170,9 +172,13 @@ states.
 | [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also uses actual construction and balancing for all four rotations, the no-rotation case, and equal-height grandchildren, with distinct tips and retained snapshots. Update witnesses also check replacement, monotone inclusion, extreme keys and retained snapshots; iteration witnesses check key/tip order, completeness and repeated exhaustion. Union witnesses cover overlapping keys, maximum tips, idempotence, both size-selection branches, empty inputs and retained snapshots. Reconstruction witnesses cover sparse/extreme keys, even sizes, empty inputs and zero tips. Mask witnesses use actual callbacks for denied, unbounded, zero and expanding bounds. The production permission callback and history callers remain unproved. |
 
 [`coordinates.rs`](coordinates.rs) supplies a mathematical sequence view of AVL
-entries. It is not an executable vector clock. Model chain labels widen `u32`
-IDs to `usize`, and authors are abstract integer labels; neither mapping from
-production is proved here. `graph::summarizes` requires each coordinate to be a
+entries. It is not an executable vector clock. `tree_refinement::entries` now
+widens the actual tree's `u32` keys to model `usize` labels, and proves sortedness
+and membership agree with actual lookup. `masked_coordinates` connects actual
+mask postconditions to coordinate permission intersection. `mask_for_policy`
+executes the production mask and composes that result with `mask_matches_policy`.
+Stored history authors are still abstract integer labels; their mapping and the
+summary/compiled-bound premises remain unproved at public entry points. `graph::summarizes` requires each coordinate to be a
 real history member and to bound every history member on its chain. Exact
 membership is derived from these facts and the chain ancestry invariant.
 
@@ -191,7 +197,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Thirty-nine mutations must be rejected: an expanding cap, exclusive membership,
+Forty-one mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -206,7 +212,8 @@ iterator subtree, revisiting the left subtree, dropping a yielded entry,
 ignoring the smaller union input, replacing union tips with zero, and discarding
 the larger initial tree, replacing reconstructed tips with zero, swapping
 reconstructed children, shifting tip-table chain IDs, failing to cap expanding
-mask bounds, dropping position zero, and ignoring denied mask coordinates.
+mask bounds, dropping position zero, ignoring denied mask coordinates, shifting
+chain IDs in the model projection, and dropping projected permission bounds.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -233,8 +240,9 @@ obligations; it is not a measure of production coverage.
    Union now composes iteration and inclusion and checks capacity against the
    distinct result keys. Sorted reconstruction and tip-table construction now
    establish the invariant directly. Masking now proves exact callback-bound
-   intersection. Next connect the tree's map to the graph model's coordinate
-   view and verify whole-history callers establish the remaining contracts.
+   intersection, and the model projection now connects actual lookup/masking to
+   graph authorization. The next work is proving whole-history callers establish
+   the remaining contracts, including identity mappings and size capacity.
    Preserve structural sharing and account for `u32`/`u8` limits rather than
    assuming they cannot overflow.
 2. **History refinement:** prove insertion and author-chain selection preserve
