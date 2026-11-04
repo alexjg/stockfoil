@@ -13,6 +13,35 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'candidate assembly drops new invisible deliveries',
+        'stockfoil-core/src/verified/candidates.rs',
+        'difference::difference(tables, delivered, processed, &mut pending);',
+        'difference::difference(tables, processed, processed, &mut pending);',
+        'last',
+    ),
+    (
+        'candidate assembly drops visibility changes',
+        'stockfoil-core/src/verified/candidates.rs',
+        'difference::symmetric_difference(tables, before, after, &mut pending);',
+        'difference::symmetric_difference(tables, before, before, &mut pending);',
+        'last',
+    ),
+    (
+        'candidate projection shifts node indices',
+        'verification/candidate_refinement.rs',
+        'node@ as usize)',
+        '(node@ as usize + 1) as usize)',
+        'first',
+    ),
+    (
+        'nonempty stdlib consumer cannot prove false',
+        'verification/candidate_examples.rs',
+        '    let unchanged =',
+        '    assert(false); let unchanged =',
+        'last',
+    ),
+
+    (
         'normalization clears the candidate set',
         'stockfoil-core/src/verified/candidates.rs',
         '    super::stdlib::dedup_nodes(nodes);',

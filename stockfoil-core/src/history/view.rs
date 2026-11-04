@@ -5,7 +5,7 @@
 //! permission allows it. Change planning compares two participation sets and the
 //! materializer's previously delivered history, and enumerates only the chain
 //! intervals that differ, so small updates cost about as much as they change.
-use super::clock::{self, Clock};
+use super::clock::Clock;
 use super::{Heads, History, NodeIdx};
 use crate::verified::events;
 pub use crate::verified::events::Vis;
@@ -174,15 +174,13 @@ pub(super) fn plan_changes(
     let before = participation(history, &cursor.view_point)?;
     let after = participation(history, target)?;
     let delivered_now = Clock::from_tips(&history.chain_tips);
-    let mut pending = Vec::new();
-    clock::difference(
+    let pending = crate::verified::candidates::assemble(
         &history.chain_nodes,
         &delivered_now,
         &delivered_before,
-        &mut pending,
+        &before,
+        &after,
     );
-    clock::symmetric_difference(&history.chain_nodes, &before, &after, &mut pending);
-    crate::verified::candidates::normalize(&mut pending);
     Ok(Changes {
         history: history.id,
         pending,

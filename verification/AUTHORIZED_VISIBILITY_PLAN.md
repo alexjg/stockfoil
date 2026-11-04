@@ -139,8 +139,8 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   proved exact under that predicate; empty construction and shallow cloning are
   also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
-  semantic mutations exercise these contracts. The combined suite reports
-  139 verified obligations and rejects all 47 mutations.
+  semantic mutations exercise these contracts. The clock-stage baseline reported
+  139 verified obligations and rejected all 47 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -191,7 +191,8 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   preserving prior output and chain traversal order, with safe indexing and
   termination. Symmetric difference covers both directions. Materialization and
   fragment callers use this checked output path. Table completeness/uniqueness
-  and candidate sort/dedup remain later-stage obligations. A nonempty witness and
+  remain history-stage obligations; candidate assembly and normalization are now
+  checked under the enumerated standard-library contracts. A nonempty witness and
   three mutations exercise whole-clock enumeration.
 - The actual `ClockBuilder` now composes the checked include/union contracts and
   returns the exact accumulated result. A cached-input witness and three mutations
@@ -199,11 +200,13 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   intended nodes and satisfies the builder's capacity premises.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking (#12), the clock-to-policy connection (#13), complete differences (#14), and accumulation. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking (#12), the clock-to-policy connection (#13), complete differences (#14), accumulation (#15), history identity (#16), the public API roadmap (#17), and
+the explicit standard-library contracts (#18). Candidate assembly follows those
+contracts. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
 step is proving concrete history and bound compilation establish the remaining
-hypotheses, alongside candidate sort/dedup and captured batch assembly.
+hypotheses, alongside captured batch assembly.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.
@@ -211,3 +214,14 @@ those public entry points establish their own prerequisites.
 The [public API proof boundary](PUBLIC_API_PROOF_BOUNDARY.md) records the remaining
 stack, the standard-library decision, and the history-ID exhaustion fix found
 while checking identity assumptions. The public API stages remain unchecked.
+
+Candidate assembly now lives in shared `verified/candidates.rs`. It composes the
+actual difference operations with normalization and proves exact membership and
+strict numeric ordering. `candidate_refinement.rs` connects its result to the
+existing materialization pending contract, conditional on complete/correct chain
+tables and a delivered clock covering every history node. A nonempty witness
+covers overlapping delivery/visibility reasons, a new invisible node, and an
+unchanged traversal. No concrete history invariant or public API theorem is
+claimed. The full suite now reports 147 checks with two explicit stdlib contracts;
+the original suite reports 140 checks with `--no-cheating`; 52 mutation checks
+exercise the combined suite.

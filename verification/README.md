@@ -29,14 +29,16 @@ cargo +1.99.1 test --workspace --locked
 
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 runs the original suite with `--no-cheating`, then the full suite with the
-enumerated standard-library contracts; it accepts no
-arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with forty-seven deliberate semantic errors.
+enumerated standard-library contracts. The mutation runner requires both baseline
+passes, then uses `--mutation-only` to run the complete expanded suite and audit
+on each temporary mutation without repeating the subset pass.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked proof baseline reports **139 verified, 0 errors** and rejects all
-forty-seven mutations. The authorization plan records which stage these results
-establish; the public API refinement remains unfinished.
+The original-suite baseline reports **140 verified, 0 errors**; the full suite
+reports **147 verified, 0 errors**, conditional on **two standard-library
+contracts**. These overlapping proof counts are not additive. The mutation suite
+checks 52 deliberate errors. The authorization plan records which stage these
+results establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
 proof and mutation suites, and tests the Rust workspace. Normal Cargo builds
@@ -69,6 +71,7 @@ implementations of their executable bodies:
 | `Clock::entries`, `Entries::next` | Actual Rust iterator returns precisely the remaining in-order sequence, terminates and stays exhausted. For ordered trees, the sequence contains every map entry exactly once in strictly increasing key order, with length equal to structural size. | Union, masking and interval differences |
 | `Clock::set`, `include` | Terminating path-copying replacement and pointwise maximum update preserve ordering, metadata and balance, with exact size changes and height growth at most one. Only a new coordinate needs size capacity. | Clock builders and union |
 | `Clock::balance` | Given balanced children whose heights differ by at most two, restores AVL balance while preserving ordering, the exact map and size, and valid metadata. Output height lies between the taller input child and one more than it. Explicit size/height capacity premises cover every intermediate constructor. | Path-copying insertion |
+| `candidates::assemble` | Actual difference enumeration plus normalization returns exactly new delivery union both visibility-change directions, in strictly increasing numeric order. | Concrete history table and clock premises |
 | `candidates::normalize` | Exact set preservation and strict numeric ordering, conditional on the two enumerated stdlib contracts. Production planning uses this same wrapper. | Candidate assembly and topological materialization |
 | `Clock::position`, `contains` | Terminating, exact lookup and inclusive membership in the actual tree, conditional on its BST ordering invariant. | History, permission bounds and interval differences |
 
@@ -169,7 +172,8 @@ The table rows must be sorted and every clock chain must index an existing row.
 Concrete history construction must still establish table completeness, correct
 chain membership and uniqueness. Enumeration is not globally topological across
 chains; materialization now uses checked normalization under the two standard-library
-contracts. Assembly of its input set remains a separate obligation. `batch_end` also
+contracts. Assembly now composes the checked differences and normalization; complete table
+layout and clock meaning remain concrete history obligations. `batch_end` also
 requires `next <= total`; captured traversal construction must establish this.
 
 ## Connected model theorems and refinement
@@ -181,14 +185,15 @@ production mask and connects its result to the independent graph policy.
 
 | File | Checked result | Remaining production boundary |
 | --- | --- | --- |
+| [`candidate_refinement.rs`](candidate_refinement.rs) | Production assembly establishes the existing batch model’s pending contract under explicit complete-table and delivered-clock premises. Numeric projection preserves membership; the model then gives uniqueness and topological order. A nonempty harness calls the actual assembler. | Concrete table construction, ancestry and permission clocks, captured traversal fields and public wrappers. |
 | [`tree_refinement.rs`](tree_refinement.rs) | Actual tree entries refine the coordinate model; actual lookup equals coordinate membership; actual mask output equals graph authorization under history-summary and compiled-bound premises. A nonempty witness executes the production mask with an inclusive frontier. | Concrete history construction, stored author/chain mapping, view capture and permission compilation must establish these premises. This is not a public History API proof. |
 | [`graph.rs`](graph.rs) | Independent parent-edge reachability is ordered and transitive; append preserves old reachability; same-author maximal-tip reuse preserves chain invariants; valid summaries imply exact ancestry membership. | Hash-to-index mapping, chain assignment, concrete summary construction, strict-ancestor fast path and unknown hashes. |
 | [`walk.rs`](walk.rs) | Starting, expanding parents, revisiting and substituting a complete cache preserve the walk invariant; an empty pending set yields exact history. | Stack/visited bookkeeping and termination, selective cache initialization and thread safety, accumulating the AVL summary. |
 | [`authorization.rs`](authorization.rs) | Independent policy laws: missing/denied permissions, exact unbounded permission, inclusive bounds, author isolation, available-frontier equivalence/monotonicity, and fixed-view stability under append. | Mapping commit hashes and stored authors to model nodes; view validation and concrete capture. |
 | [`visibility.rs`](visibility.rs) | Coordinate masking equals the independent parent-edge permission policy under explicit bound-compilation contracts. Unavailable frontier heads grant nothing. | Permission-map lookup, actual author labels, filtering frontier hashes, constructing bound clocks, mask iteration and AVL reconstruction. |
 | [`intervals.rs`](intervals.rs) | The shared executable interval search selects exactly the supplied chain nodes in one history and outside another, given valid summaries and correct AVL lookup results. Also states the inclusive-head-minus-boundaries fragment rule. | Complete chain tables, whole-clock enumeration, AVL lookup, fragment boundary discovery and placement checks. |
-| [`materialization.rs`](materialization.rs) | Candidate sets equal new delivery union visibility change. A batch model uses the shared boundary and classifier, emits the selected pending slice with exact fields, and consecutive slices concatenate without gaps or overlap. Sorted candidates are unique and topological; an unchanged cursor yields no candidates. | Concrete set assembly, sort/dedup, record/hash/payload mapping, history identity checks, captured heads and completed-cursor publication. |
-| [`difference_examples.rs`](difference_examples.rs) | Executes complete enumeration with two interleaved chains, reversed bounds, zero versus absence, both symmetric directions and a preexisting output marker. | Concrete history tables and candidate sort/dedup remain unproved. |
+| [`materialization.rs`](materialization.rs) | Candidate sets equal new delivery union visibility change. A batch model uses the shared boundary and classifier, emits the selected pending slice with exact fields, and consecutive slices concatenate without gaps or overlap. Sorted candidates are unique and topological; an unchanged cursor yields no candidates. | Concrete history/permission premises, record/hash/payload mapping, history identity checks, captured heads and completed-cursor publication. |
+| [`difference_examples.rs`](difference_examples.rs) | Executes complete enumeration with two interleaved chains, reversed bounds, zero versus absence, both symmetric directions and a preexisting output marker. | Concrete history table invariants remain unproved. |
 | [`examples.rs`](examples.rs) | Nonempty witnesses for chain summaries, permission masking and batches; zero versus absence, reversed bounds, maximum indices and budgets. | Specification checks, not wrapper proofs. |
 | [`authorization_tests.rs`](authorization_tests.rs) | Nonempty policy witnesses with multiple heads, cross-author bounds, denied intermediate authors, unavailable heads, and a frontier becoming known after capture. | Specification checks, not wrapper proofs. |
 | [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also uses actual construction and balancing for all four rotations, the no-rotation case, and equal-height grandchildren, with distinct tips and retained snapshots. Update witnesses also check replacement, monotone inclusion, extreme keys and retained snapshots; iteration witnesses check key/tip order, completeness and repeated exhaustion. Union witnesses cover overlapping keys, maximum tips, idempotence, both size-selection branches, empty inputs and retained snapshots. Reconstruction witnesses cover sparse/extreme keys, even sizes, empty inputs and zero tips. Mask witnesses use actual callbacks for denied, unbounded, zero and expanding bounds. The production permission callback and history callers remain unproved. |
@@ -219,7 +224,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Forty-eight mutations must be rejected: an expanding cap, exclusive membership,
+Fifty-two mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -238,7 +243,11 @@ mask bounds, dropping position zero, ignoring denied mask coordinates, shifting
 chain IDs in the model projection, dropping projected permission bounds,
 skipping selected difference nodes, emitting the wrong node, and omitting the
 reverse symmetric-difference direction, ignoring builder coordinates, discarding
-previously accumulated inputs during a merge, and dropping the finished result, and clearing the normalized candidate set.
+previously accumulated inputs during a merge, dropping the finished result,
+clearing the normalized candidate set, dropping new deliveries or visibility
+changes during candidate assembly, and shifting projected node indices. A
+nonempty consumer must also reject an inserted `assert(false)`; this checks for
+exposed inconsistency in that witness, not global consistency of the contracts.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -276,7 +285,7 @@ obligations; it is not a measure of production coverage.
    concrete cached walks produce exact summaries. Clock accumulation and
    whole-clock difference writes are now verified under their input premises.
 3. **Views and materialization:** prove permission compilation, complete chain
-   enumeration, candidate dedup/order, capture semantics, wrong-history rejection
+   enumeration premises, capture semantics, wrong-history rejection
    and cursor publication establish the model contracts.
 4. **Authentication and fragments:** verify incremental per-author coverage,
    exact depth-stopped boundary discovery, fragment placement, and compatibility
