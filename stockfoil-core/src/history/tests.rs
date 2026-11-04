@@ -581,3 +581,14 @@ fn signatures_that_cover_nothing_are_not_kept() {
     expected.sort();
     assert_eq!(signers(&h), expected);
 }
+
+#[test]
+fn history_identity_exhaustion_never_wraps_or_reuses_an_id() {
+    let counter = AtomicU64::new(u64::MAX - 1);
+    assert_eq!(allocate_history_id(&counter), u64::MAX - 1);
+    assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    for _ in 0..2 {
+        assert!(std::panic::catch_unwind(|| allocate_history_id(&counter)).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+}
