@@ -182,9 +182,12 @@ pub(super) fn plan_changes(
     let after = participation(history, target)?;
     let delivered_now = Clock::from_tips(&history.chain_tips);
     let mut pending = Vec::new();
-    clock::difference(&history.chain_nodes, &delivered_now, &delivered_before, |i| {
-        pending.push(i)
-    });
+    clock::difference(
+        &history.chain_nodes,
+        &delivered_now,
+        &delivered_before,
+        |i| pending.push(i),
+    );
     clock::symmetric_difference(&history.chain_nodes, &before, &after, |i| pending.push(i));
     pending.sort_unstable();
     pending.dedup();

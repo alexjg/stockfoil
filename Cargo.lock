@@ -622,7 +622,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sedimentree_core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "arbitrary",
  "async-lock",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "subduction_core"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "subduction_crypto"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "ed25519-dalek",
  "future_form",

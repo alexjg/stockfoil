@@ -133,7 +133,9 @@ impl Clock {
             return Self::node(chain, tip, Self::default(), Self::default());
         };
         match chain.cmp(&e.chain) {
-            Ordering::Less => Self::balance(e.chain, e.tip, e.left.set(chain, tip), e.right.clone()),
+            Ordering::Less => {
+                Self::balance(e.chain, e.tip, e.left.set(chain, tip), e.right.clone())
+            }
             Ordering::Greater => {
                 Self::balance(e.chain, e.tip, e.left.clone(), e.right.set(chain, tip))
             }
@@ -308,7 +310,10 @@ mod tests {
                 }
             }
             check(&clock);
-            assert_eq!(clock.entries().collect::<Vec<_>>(), model.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>());
+            assert_eq!(
+                clock.entries().collect::<Vec<_>>(),
+                model.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>()
+            );
             assert_eq!(clock.len(), model.len());
             for chain in 0..200 {
                 assert_eq!(clock.position(chain), model.get(&chain).copied());

@@ -6,8 +6,8 @@
 //!
 //! The header is wire v1's columnar metadata layout without the body field.
 //! Items are delimited by their storage or transport, not by this format.
-use crate::reader::Reader;
 use crate::meta::Evidence;
+use crate::reader::Reader;
 use crate::{
     Author, BundleMeta, CommitHash, Error, FormatId, FragmentRange, ItemId, Limits, MemberShape,
     ParentRef, Signature,

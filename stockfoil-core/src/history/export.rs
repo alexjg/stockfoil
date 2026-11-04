@@ -170,119 +170,123 @@ impl ExportItem {
 }
 
 pub(super) fn plan_export(history: &History, cursor: &ExportCursor) -> ExportPlan {
-        let mut added = Vec::new();
-        let mut kept = BTreeSet::new();
-        let mut retired = Vec::new();
-        for certificate in history.inventory.values() {
-            if cursor.items.contains(&certificate.id) {
-                kept.insert(certificate.id.clone());
-            } else {
-                added.push(Arc::clone(certificate));
-            }
-        }
-        for id in &cursor.items {
-            if !kept.contains(id) {
-                retired.push(id.clone());
-            }
-        }
-        // Heads in delivery order put most dependencies first. A receiver must
-        // still tolerate waiting: a dependency's covering item can come later.
-        added.sort_by_key(|c| history.by_hash[&c.id.head()]);
-        ExportPlan {
-            history: history.id,
-            acknowledged: vec![false; added.len()],
-            added,
-            retired,
-            kept,
+    let mut added = Vec::new();
+    let mut kept = BTreeSet::new();
+    let mut retired = Vec::new();
+    for certificate in history.inventory.values() {
+        if cursor.items.contains(&certificate.id) {
+            kept.insert(certificate.id.clone());
+        } else {
+            added.push(Arc::clone(certificate));
         }
     }
-
-pub(super) fn build_export_item(history: &History, plan: &ExportPlan, index: usize) -> Result<ExportItem, Error> {
-        if plan.history != history.id {
-            return Err(Error::WrongHistory);
+    for id in &cursor.items {
+        if !kept.contains(id) {
+            retired.push(id.clone());
         }
-        let certificate = plan
-            .added
-            .get(index)
-            .ok_or(Error::OutOfRange("export item"))?;
-        let members = match &certificate.id {
-            ItemId::Commit(h) => vec![history.by_hash[h]],
-            ItemId::Fragment(range) => {
-                let head = history.by_hash[&range.head];
-                let boundary: Vec<_> = range.boundary.iter().map(|b| history.by_hash[b]).collect();
-                canonical_order(history, &history.fragment_members(head, &boundary))
-            }
-        };
-        let position: HashMap<NodeIdx, usize> =
-            members.iter().enumerate().map(|(i, &m)| (m, i)).collect();
-        let shape = members
-            .iter()
-            .map(|&m| MemberShape {
-                author: history.author_of(m),
-                parents: history
-                    .parent_nodes(m)
-                    .iter()
-                    .map(|p| match position.get(p) {
-                        Some(&i) => ParentRef::Member(i),
-                        None => ParentRef::External(history.node(*p).hash),
-                    })
-                    .collect(),
-            })
-            .collect();
-        let evidence = certificate
-            .evidence
-            .iter()
-            .map(|e| Evidence {
-                author: e.author,
-                member: position[&history.by_hash[&e.commit]],
-                signature: e.signature,
-            })
-            .collect();
-        Ok(ExportItem {
-            meta: Arc::new(BundleMeta {
-                id: certificate.id.clone(),
-                members: shape,
-                evidence,
-            }),
-            members: members
+    }
+    // Heads in delivery order put most dependencies first. A receiver must
+    // still tolerate waiting: a dependency's covering item can come later.
+    added.sort_by_key(|c| history.by_hash[&c.id.head()]);
+    ExportPlan {
+        history: history.id,
+        acknowledged: vec![false; added.len()],
+        added,
+        retired,
+        kept,
+    }
+}
+
+pub(super) fn build_export_item(
+    history: &History,
+    plan: &ExportPlan,
+    index: usize,
+) -> Result<ExportItem, Error> {
+    if plan.history != history.id {
+        return Err(Error::WrongHistory);
+    }
+    let certificate = plan
+        .added
+        .get(index)
+        .ok_or(Error::OutOfRange("export item"))?;
+    let members = match &certificate.id {
+        ItemId::Commit(h) => vec![history.by_hash[h]],
+        ItemId::Fragment(range) => {
+            let head = history.by_hash[&range.head];
+            let boundary: Vec<_> = range.boundary.iter().map(|b| history.by_hash[b]).collect();
+            canonical_order(history, &history.fragment_members(head, &boundary))
+        }
+    };
+    let position: HashMap<NodeIdx, usize> =
+        members.iter().enumerate().map(|(i, &m)| (m, i)).collect();
+    let shape = members
+        .iter()
+        .map(|&m| MemberShape {
+            author: history.author_of(m),
+            parents: history
+                .parent_nodes(m)
                 .iter()
-                .map(|&m| (history.node(m).hash, history.node(m).payload))
+                .map(|p| match position.get(p) {
+                    Some(&i) => ParentRef::Member(i),
+                    None => ParentRef::External(history.node(*p).hash),
+                })
                 .collect(),
         })
-    }
+        .collect();
+    let evidence = certificate
+        .evidence
+        .iter()
+        .map(|e| Evidence {
+            author: e.author,
+            member: position[&history.by_hash[&e.commit]],
+            signature: e.signature,
+        })
+        .collect();
+    Ok(ExportItem {
+        meta: Arc::new(BundleMeta {
+            id: certificate.id.clone(),
+            members: shape,
+            evidence,
+        }),
+        members: members
+            .iter()
+            .map(|&m| (history.node(m).hash, history.node(m).payload))
+            .collect(),
+    })
+}
 
 /// Parents first; among ready members the smallest hash goes first. This
 /// order depends only on the members, not on local delivery order.
 fn canonical_order(history: &History, members: &[NodeIdx]) -> Vec<NodeIdx> {
-        let set: std::collections::HashSet<_> = members.iter().copied().collect();
-        let mut remaining = HashMap::new();
-        let mut children: HashMap<NodeIdx, Vec<NodeIdx>> = HashMap::new();
-        let mut ready = BTreeSet::new();
-        for &m in members {
-            let parents: BTreeSet<_> = history
-                .parent_nodes(m)
-                .iter()
-                .copied()
-                .filter(|p| set.contains(p))
-                .collect();
-            remaining.insert(m, parents.len());
-            if parents.is_empty() {
-                ready.insert((history.node(m).hash, m));
-            }
-            for p in parents {
-                children.entry(p).or_default().push(m);
-            }
+    let set: std::collections::HashSet<_> = members.iter().copied().collect();
+    let mut remaining = HashMap::new();
+    let mut children: HashMap<NodeIdx, Vec<NodeIdx>> = HashMap::new();
+    let mut ready = BTreeSet::new();
+    for &m in members {
+        let parents: BTreeSet<_> = history
+            .parent_nodes(m)
+            .iter()
+            .copied()
+            .filter(|p| set.contains(p))
+            .collect();
+        remaining.insert(m, parents.len());
+        if parents.is_empty() {
+            ready.insert((history.node(m).hash, m));
         }
-        let mut order = Vec::with_capacity(members.len());
-        while let Some((_, m)) = ready.pop_first() {
-            order.push(m);
-            for &c in children.get(&m).into_iter().flatten() {
-                let count = remaining.get_mut(&c).unwrap();
-                *count -= 1;
-                if *count == 0 {
-                    ready.insert((history.node(c).hash, c));
-                }
-            }
+        for p in parents {
+            children.entry(p).or_default().push(m);
         }
-        order
     }
+    let mut order = Vec::with_capacity(members.len());
+    while let Some((_, m)) = ready.pop_first() {
+        order.push(m);
+        for &c in children.get(&m).into_iter().flatten() {
+            let count = remaining.get_mut(&c).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                ready.insert((history.node(c).hash, c));
+            }
+        }
+    }
+    order
+}

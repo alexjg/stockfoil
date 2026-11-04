@@ -34,13 +34,10 @@ impl Verified {
     }
 
     pub fn parents(&self, member: usize) -> impl ExactSizeIterator<Item = CommitHash> + '_ {
-        self.meta.members[member]
-            .parents
-            .iter()
-            .map(|p| match *p {
-                ParentRef::Member(i) => self.hashes[i],
-                ParentRef::External(h) => h,
-            })
+        self.meta.members[member].parents.iter().map(|p| match *p {
+            ParentRef::Member(i) => self.hashes[i],
+            ParentRef::External(h) => h,
+        })
     }
 }
 

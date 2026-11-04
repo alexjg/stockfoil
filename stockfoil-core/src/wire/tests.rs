@@ -16,22 +16,22 @@ fn meta() -> BundleMeta {
             boundary: [x].into_iter().collect(),
         }),
         members: vec![
-                MemberShape {
-                    author: a,
-                    parents: vec![ParentRef::External(x), ParentRef::External(y)],
-                },
-                MemberShape {
-                    author: b,
-                    parents: vec![
-                        ParentRef::Member(0),
-                        ParentRef::Member(0),
-                        ParentRef::External(y),
-                    ],
-                },
-                MemberShape {
-                    author: a,
-                    parents: vec![],
-                },
+            MemberShape {
+                author: a,
+                parents: vec![ParentRef::External(x), ParentRef::External(y)],
+            },
+            MemberShape {
+                author: b,
+                parents: vec![
+                    ParentRef::Member(0),
+                    ParentRef::Member(0),
+                    ParentRef::External(y),
+                ],
+            },
+            MemberShape {
+                author: a,
+                parents: vec![],
+            },
         ],
         evidence: vec![
             Evidence {

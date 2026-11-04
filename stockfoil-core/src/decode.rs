@@ -23,10 +23,7 @@ pub enum DecodeNext<'a> {
     /// [`DecodeItem::next`] again to continue. Each wanted member is checked
     /// against its commit when it ends; on [`Error::CorruptPayload`] discard
     /// earlier chunks emitted for that member.
-    Chunk {
-        member: usize,
-        bytes: &'a [u8],
-    },
+    Chunk { member: usize, bytes: &'a [u8] },
     /// Every wanted member has been decoded and checked against its commit.
     Done,
     /// Failed.

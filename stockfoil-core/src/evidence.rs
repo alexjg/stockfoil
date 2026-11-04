@@ -36,15 +36,10 @@ pub(crate) fn reach(
         }
         count += 1;
         visit(i);
-        stack.extend(
-            meta.members[i]
-                .parents
-                .iter()
-                .filter_map(|p| match p {
-                    ParentRef::Member(j) => Some(*j),
-                    ParentRef::External(_) => None,
-                }),
-        );
+        stack.extend(meta.members[i].parents.iter().filter_map(|p| match p {
+            ParentRef::Member(j) => Some(*j),
+            ParentRef::External(_) => None,
+        }));
     }
     count
 }

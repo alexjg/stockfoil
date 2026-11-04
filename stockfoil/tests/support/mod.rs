@@ -182,8 +182,8 @@ impl<K: Clone> PayloadSource<K> {
                     let mut prefix = Vec::new();
                     let mut buf = [0u8; 4096];
                     let len = loop {
-                        if let Some(len) = header_len(&prefix, &Limits::default())
-                            .map_err(io::Error::other)?
+                        if let Some(len) =
+                            header_len(&prefix, &Limits::default()).map_err(io::Error::other)?
                             && prefix.len() >= len
                         {
                             break len;
@@ -397,5 +397,3 @@ pub fn encode_body(payloads: &[&[u8]]) -> Vec<u8> {
     }
     body
 }
-
-

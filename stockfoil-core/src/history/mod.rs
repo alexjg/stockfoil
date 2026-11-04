@@ -493,9 +493,11 @@ impl History {
             }
             // Check only this author's chains, not every chain in the history.
             let history = self.clock_for_heads(parents);
-            self.author_chains.get(&author)?.iter().copied().find(|&chain| {
-                history.contains(chain, self.chain_tips[chain as usize])
-            })
+            self.author_chains
+                .get(&author)?
+                .iter()
+                .copied()
+                .find(|&chain| history.contains(chain, self.chain_tips[chain as usize]))
         });
         if let Some(chain) = reusable {
             self.chain_tips[chain as usize] = position;

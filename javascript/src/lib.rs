@@ -597,9 +597,9 @@ impl JsHistory {
                 commit_hash(&byte_value(hash, "a commit hash")?)?,
             ));
         }
-        Ok(DecodeItem(
-            core(self.inner.decode_item(receive_options(&options)?, pairs))?,
-        ))
+        Ok(DecodeItem(core(
+            self.inner.decode_item(receive_options(&options)?, pairs),
+        )?))
     }
 
     /// Dependency checks, placement, and atomic publication. Returns a `Next`.

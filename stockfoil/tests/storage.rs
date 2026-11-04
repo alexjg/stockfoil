@@ -190,10 +190,7 @@ fn decode_item_state_machine_streams_and_stops_at_last_wanted_member() {
     let mut options = ReceiveOptions::new(format());
     options.read_size = 1;
     options.decode_capacity = 1;
-    let mut op = a
-        .history()
-        .decode_item(options, [(1, hashes[1])])
-        .unwrap();
+    let mut op = a.history().decode_item(options, [(1, hashes[1])]).unwrap();
 
     // Stale and wrong-kind replies are rejected without disturbing the operation.
     let DecodeNext::Request(ticket, Request::Read { offset, max }) = op.next() else {
@@ -201,7 +198,13 @@ fn decode_item_state_machine_streams_and_stops_at_last_wanted_member() {
     };
     assert!(matches!(op.next(), DecodeNext::AwaitReply));
     assert_eq!(
-        op.reply(Ticket::from_raw(ticket.get() + 1), Reply::Read { bytes: &item[..1], eof: false }),
+        op.reply(
+            Ticket::from_raw(ticket.get() + 1),
+            Reply::Read {
+                bytes: &item[..1],
+                eof: false
+            }
+        ),
         Err(ReplyError::Stale)
     );
     assert_eq!(

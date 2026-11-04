@@ -210,7 +210,8 @@ fn stale_duplicate_and_wrong_kind_replies_do_not_disturb_the_operation() {
     );
     // Unknown ticket.
     assert_eq!(
-        op.reply(Ticket::from_raw(u64::MAX), read.reply()).unwrap_err(),
+        op.reply(Ticket::from_raw(u64::MAX), read.reply())
+            .unwrap_err(),
         ReplyError::Stale
     );
     op.reply(first, read.reply()).unwrap();
@@ -357,9 +358,7 @@ fn dropping_an_operation_leaves_history_untouched() {
 fn tampered_items_are_rejected() {
     let (items, _) = items();
     let bytes = fragment(&items);
-    let header = header_len(&bytes, &Limits::default())
-        .unwrap()
-        .unwrap();
+    let header = header_len(&bytes, &Limits::default()).unwrap().unwrap();
 
     let mut host = Host::default();
     let mut history = History::new();
@@ -601,12 +600,20 @@ fn replies_for_another_operation_are_stale() {
     let (items, _) = items();
     let history = History::new();
     let mut host = Host::default();
-    let ids: Vec<_> = items.iter().take(2).map(|(_, b)| host.store(b.clone())).collect();
+    let ids: Vec<_> = items
+        .iter()
+        .take(2)
+        .map(|(_, b)| host.store(b.clone()))
+        .collect();
     let mut a = history.receive(options());
     let mut b = history.receive(options());
-    let Next::Request(ta, ra) = a.next() else { panic!() };
+    let Next::Request(ta, ra) = a.next() else {
+        panic!()
+    };
     let reply_a = host.execute(&ids[0], ra, &mut None);
-    let Next::Request(tb, _) = b.next() else { panic!() };
+    let Next::Request(tb, _) = b.next() else {
+        panic!()
+    };
     assert_ne!(ta, tb);
     assert_eq!(b.reply(ta, reply_a.reply()).unwrap_err(), ReplyError::Stale);
     a.reply(ta, reply_a.reply()).unwrap();

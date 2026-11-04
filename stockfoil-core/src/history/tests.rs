@@ -183,7 +183,9 @@ fn merging_many_forks_shares_clock_structure() {
     };
     let root = publish(&mut h, vec![], "root".into());
     let n = 500;
-    let forks: Vec<_> = (0..n).map(|i| publish(&mut h, vec![root], format!("f{i}"))).collect();
+    let forks: Vec<_> = (0..n)
+        .map(|i| publish(&mut h, vec![root], format!("f{i}")))
+        .collect();
     let mut tip = forks[0];
     for (i, f) in forks.iter().enumerate().skip(1) {
         tip = publish(&mut h, vec![tip, *f], format!("m{i}"));
@@ -195,7 +197,12 @@ fn merging_many_forks_shares_clock_structure() {
         }
     }
     // A full copy per merge would be about n²/2 = 125,000 entries.
-    assert!(seen.len() < 30 * h.len(), "{} clock entries for {} commits", seen.len(), h.len());
+    assert!(
+        seen.len() < 30 * h.len(),
+        "{} clock entries for {} commits",
+        seen.len(),
+        h.len()
+    );
     assert!(h.is_ancestor(&forks[n - 1], &tip) && h.is_ancestor(&root, &tip));
 }
 
@@ -222,7 +229,7 @@ fn test_format() -> crate::FormatId {
     crate::FormatId::new("stockfoil-test/v1").unwrap()
 }
 
-fn encode_test_item(meta: & crate::BundleMeta, payloads: &[&[u8]]) -> Vec<u8> {
+fn encode_test_item(meta: &crate::BundleMeta, payloads: &[&[u8]]) -> Vec<u8> {
     let mut item = crate::wire::encode_header(meta, &test_format());
     for p in payloads {
         item.extend((p.len() as u32).to_le_bytes());
@@ -361,7 +368,9 @@ fn fragments_must_sit_exactly_above_their_boundary() {
     let p0 = b0.finish();
     let c0 = p0.hash;
     receiver.publish_commit(p0, 0).unwrap();
-    receiver.sign(author(&alice), c0, sign_commit(&alice, &c0)).unwrap();
+    receiver
+        .sign(author(&alice), c0, sign_commit(&alice, &c0))
+        .unwrap();
     let b = commit(&mut receiver, &alice, vec![c0], 1, "b");
 
     let x1 = TestMember {
@@ -391,7 +400,10 @@ fn fragments_must_sit_exactly_above_their_boundary() {
         payload: h_payload.clone(),
     };
     let (bad, _) = build_fragment(&alice, &[b], &[c0_again, x1_inner, x2, h]);
-    assert_eq!(receive_test_item(&mut receiver, &bad).unwrap_err(), Error::InvalidPlacement);
+    assert_eq!(
+        receive_test_item(&mut receiver, &bad).unwrap_err(),
+        Error::InvalidPlacement
+    );
     assert!(receiver.lookup(&x1_hash).is_none());
 
     // The canonical fragment is admitted.
@@ -434,7 +446,10 @@ fn redundant_ancestor_boundaries_are_part_of_the_canonical_range() {
         ]
     };
     let (partial, _) = build_fragment(&alice, &[b1], &members());
-    assert_eq!(receive_test_item(&mut receiver, &partial).unwrap_err(), Error::InvalidPlacement);
+    assert_eq!(
+        receive_test_item(&mut receiver, &partial).unwrap_err(),
+        Error::InvalidPlacement
+    );
     let (canonical, hashes) = build_fragment(&alice, &[b0, b1], &members());
     receive_test_item(&mut receiver, &canonical).unwrap();
     assert!(hashes.iter().all(|h| receiver.is_admitted(h)));
@@ -558,8 +573,10 @@ fn signatures_that_cover_nothing_are_not_kept() {
     let p = builder.finish();
     let head = p.hash;
     h.publish_commit(p, 1).unwrap();
-    h.sign(author(&carol), head, sign_commit(&carol, &head)).unwrap();
-    h.sign(author(&bob), head, sign_commit(&bob, &head)).unwrap();
+    h.sign(author(&carol), head, sign_commit(&carol, &head))
+        .unwrap();
+    h.sign(author(&bob), head, sign_commit(&bob, &head))
+        .unwrap();
     let mut expected = vec![author(&alice), author(&bob)];
     expected.sort();
     assert_eq!(signers(&h), expected);
