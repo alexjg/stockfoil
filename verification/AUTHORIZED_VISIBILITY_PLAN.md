@@ -137,12 +137,16 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil-core/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  69 verified obligations and rejects all 16 mutations.
-- Nonempty construction and rotations still must establish ordering, balance,
-  and metadata bounds. Updates, iteration, union and masking remain unproved.
+  76 verified obligations and rejects all 19 mutations.
+- Nonempty production node construction now preserves ordering, the exact
+  coordinate map, and structural height/size under explicit child ordering,
+  metadata and capacity premises. `height`/`len` accessors are also verified.
+  Asymmetric witnesses use this actual constructor; three new mutations test it.
+- Rotation and update callers still must establish those premises and prove
+  balance. Iteration, union and masking remain unproved.
 
-Review stack: foundations (#4), authorization plan/policy (#3), then the AVL
-lookup layer. Stage 1 adds specifications and integration tests. Stage 2 has
+Review stack: foundations (#4), authorization plan/policy (#3), then AVL
+lookup (#5) and node construction. Stage 1 adds specifications and integration tests. Stage 2 has
 begun production refinement, but no complete public API authorization theorem
-exists. The next implementation step is proving nonempty node construction and
-rotations preserve the invariants needed by lookup and subsequent operations.
+exists. The next implementation step is proving rotations preserve ordering,
+metadata and balance while satisfying the constructor capacity requirements.

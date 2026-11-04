@@ -14,29 +14,9 @@ use crate::verified::clock as verified;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use crate::verified::tree::Entry;
 pub(crate) use crate::verified::tree::{ChainId, Clock};
 
 impl Clock {
-    fn height(&self) -> u8 {
-        self.0.as_ref().map_or(0, |e| e.height)
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.as_ref().map_or(0, |e| e.len as usize)
-    }
-
-    fn node(chain: ChainId, tip: NodeIdx, left: Self, right: Self) -> Self {
-        Self(Some(Arc::new(Entry {
-            chain,
-            tip,
-            height: 1 + left.height().max(right.height()),
-            len: 1 + left.len() as u32 + right.len() as u32,
-            left,
-            right,
-        })))
-    }
-
     fn balance(chain: ChainId, tip: NodeIdx, mut left: Self, mut right: Self) -> Self {
         if left.height() > right.height() + 1 {
             let l = left.0.as_ref().unwrap();
