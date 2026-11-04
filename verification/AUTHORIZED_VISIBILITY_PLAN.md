@@ -204,3 +204,7 @@ hypotheses, alongside candidate sort/dedup and captured batch assembly.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.
+
+The [public API proof boundary](PUBLIC_API_PROOF_BOUNDARY.md) records the remaining
+stack, the standard-library decision, and the history-ID exhaustion fix found
+while checking identity assumptions. The public API stages remain unchecked.
