@@ -31,14 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct NodeIdx(u32);
-
-impl NodeIdx {
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+pub(crate) use crate::verified::clock::NodeIdx;
 
 #[derive(Debug)]
 struct Node {
@@ -415,7 +408,7 @@ impl History {
         admitted: bool,
     ) -> NodeIdx {
         debug_assert!(!self.by_hash.contains_key(&hash));
-        let idx = NodeIdx(u32::try_from(self.nodes.len()).expect("node index space"));
+        let idx = NodeIdx::new(u32::try_from(self.nodes.len()).expect("node index space"));
         let parents_start = self.parent_ids.len();
         self.parent_ids
             .extend(parents.iter().map(|p| self.by_hash[p]));

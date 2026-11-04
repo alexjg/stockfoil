@@ -7,6 +7,8 @@
 //! intervals that differ, so small updates cost about as much as they change.
 use super::clock::{self, Clock};
 use super::{Heads, History, NodeIdx};
+use crate::verified::events;
+pub use crate::verified::events::Vis;
 use crate::{Author, CommitHash, Error, PayloadId, WritePermission};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -34,15 +36,6 @@ impl ViewPoint {
     pub fn write_permissions(&self) -> &WritePermissions {
         &self.write_permissions
     }
-}
-
-/// Participation of one commit in two views.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Vis {
-    Before,
-    After,
-    Both,
-    Neither,
 }
 
 /// A materializer's completed progress: the history it has been told about and
@@ -212,7 +205,7 @@ pub(super) fn emit_next_changes(
     if changes.history != history.id {
         return Err(Error::WrongHistory);
     }
-    let end = changes.pending.len().min(changes.next.saturating_add(max));
+    let end = events::batch_end(changes.next, changes.pending.len(), max);
     for &idx in &changes.pending[changes.next..end] {
         let node = history.node(idx);
         out.push(Change {
@@ -233,12 +226,7 @@ pub(super) fn emit_next_changes(
 }
 
 fn visibility(history: &History, before: &Clock, after: &Clock, idx: NodeIdx) -> Vis {
-    match (history.contains(before, idx), history.contains(after, idx)) {
-        (true, false) => Vis::Before,
-        (false, true) => Vis::After,
-        (true, true) => Vis::Both,
-        (false, false) => Vis::Neither,
-    }
+    events::classify(history.contains(before, idx), history.contains(after, idx))
 }
 
 /// The view's ancestry, with each chain capped by its author's permission.

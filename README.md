@@ -88,6 +88,7 @@ with several admissions and local edits in flight at once. The
 - [Authors, signatures, and write frontiers](design/authors_signatures_revocation.md)
 - [Ancestor clocks](design/ancestor_vectors.typ)
 - [Implementation status](IMPLEMENTATION_PROGRESS.md)
+- [Verus verification: proved contracts and remaining boundaries](verification/README.md)
 
 ## Examples
 

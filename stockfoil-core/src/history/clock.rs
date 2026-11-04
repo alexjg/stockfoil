@@ -10,6 +10,7 @@
 //! Ancestry clocks describe exact down-sets. Permission-masked clocks use the same
 //! representation but need not be parent-closed.
 use super::NodeIdx;
+use crate::verified::clock as verified;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -102,7 +103,7 @@ impl Clock {
     }
 
     pub fn contains(&self, chain: ChainId, position: NodeIdx) -> bool {
-        self.position(chain).is_some_and(|tip| tip >= position)
+        verified::contains(self.position(chain), position)
     }
 
     /// Entries in chain order.
@@ -122,7 +123,7 @@ impl Clock {
 
     /// Raise `chain`'s position to at least `position`.
     pub fn include(&mut self, chain: ChainId, position: NodeIdx) {
-        if self.position(chain).is_some_and(|old| old >= position) {
+        if verified::contains(self.position(chain), position) {
             return;
         }
         *self = self.set(chain, position);
@@ -160,7 +161,9 @@ impl Clock {
     pub fn mask(&self, mut bound: impl FnMut(ChainId, NodeIdx) -> Option<NodeIdx>) -> Self {
         let entries: Vec<_> = self
             .entries()
-            .filter_map(|(chain, tip)| bound(chain, tip).map(|limit| (chain, tip.min(limit))))
+            .filter_map(|(chain, tip)| {
+                verified::cap(tip, bound(chain, tip)).map(|limit| (chain, limit))
+            })
             .collect();
         Self::from_sorted(&entries)
     }
@@ -246,11 +249,8 @@ pub(crate) fn difference(
 ) {
     for (chain, tip) in after.entries() {
         let nodes = &chain_nodes[chain as usize];
-        let start = before
-            .position(chain)
-            .map_or(0, |pos| nodes.partition_point(|&idx| idx <= pos));
-        let end = nodes.partition_point(|&idx| idx <= tip);
-        for &idx in nodes.get(start..end).unwrap_or(&[]) {
+        let (start, end) = verified::difference_range(nodes, tip, before.position(chain));
+        for &idx in &nodes[start..end] {
             visit(idx);
         }
     }
@@ -271,6 +271,36 @@ pub(crate) fn symmetric_difference(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn interval_difference_matches_a_linear_filter() {
+        let positions = [0, 1, 3, 9, u32::MAX];
+        for size in 0..=positions.len() {
+            let nodes: Vec<_> = positions[..size]
+                .iter()
+                .copied()
+                .map(NodeIdx::new)
+                .collect();
+            for tip in positions {
+                for prior in [None, Some(0), Some(2), Some(9), Some(u32::MAX)] {
+                    let (start, end) = verified::difference_range(
+                        &nodes,
+                        NodeIdx::new(tip),
+                        prior.map(NodeIdx::new),
+                    );
+                    let expected: Vec<_> = nodes
+                        .iter()
+                        .copied()
+                        .filter(|node| {
+                            node.index() <= tip as usize
+                                && prior.is_none_or(|p| node.index() > p as usize)
+                        })
+                        .collect();
+                    assert_eq!(&nodes[start..end], expected);
+                }
+            }
+        }
+    }
 
     fn check(c: &Clock) -> u8 {
         let Some(e) = &c.0 else { return 0 };
@@ -295,7 +325,7 @@ mod tests {
             let (mut clock, mut model) = clocks[next(clocks.len() as u64) as usize].clone();
             match next(3) {
                 0 | 1 => {
-                    let (chain, tip) = (next(200) as ChainId, NodeIdx(next(10_000) as u32));
+                    let (chain, tip) = (next(200) as ChainId, NodeIdx::new(next(10_000) as u32));
                     clock.include(chain, tip);
                     let e = model.entry(chain).or_insert(tip);
                     *e = (*e).max(tip);
@@ -329,7 +359,7 @@ mod tests {
     #[test]
     fn from_sorted_is_balanced() {
         for n in 0..300u32 {
-            let entries: Vec<_> = (0..n).map(|i| (i * 3, NodeIdx(i))).collect();
+            let entries: Vec<_> = (0..n).map(|i| (i * 3, NodeIdx::new(i))).collect();
             let clock = Clock::from_sorted(&entries);
             check(&clock);
             assert_eq!(clock.entries().collect::<Vec<_>>(), entries);

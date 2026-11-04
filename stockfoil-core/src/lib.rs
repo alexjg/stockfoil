@@ -24,6 +24,7 @@ mod history;
 mod meta;
 mod reader;
 mod signature;
+mod verified;
 mod verify;
 #[cfg(feature = "fuzzing")]
 pub mod wire;

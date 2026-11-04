@@ -243,3 +243,66 @@ fn views_require_delivered_heads() {
         Error::UnknownCommit(unknown)
     );
 }
+
+#[test]
+fn zero_and_unlimited_batches_preserve_the_captured_history() {
+    let (mut history, model, keys) = random_history(902, 6);
+    // Missing permissions deny everything, but new deliveries must still appear.
+    let target = history.view_point(&HashMap::new());
+    let mut changes = history
+        .changes(&MaterializationCursor::new(), &target)
+        .unwrap();
+    let mut records = vec![];
+    assert_eq!(
+        history.next_changes(&mut changes, &mut records, 0).unwrap(),
+        Batch::More
+    );
+    assert_eq!(changes.remaining(), model.order.len());
+    assert!(records.is_empty());
+
+    let mut builder = history
+        .begin_commit(author(&keys[0]), vec![model.order[5]])
+        .unwrap();
+    builder.update(b"delivered after the traversal was captured");
+    let prepared = builder.finish();
+    let later = prepared.hash;
+    history.publish_commit(prepared, 99).unwrap();
+
+    assert_eq!(
+        history.next_changes(&mut changes, &mut records, 1).unwrap(),
+        Batch::More
+    );
+    let Batch::Complete(cursor) = history
+        .next_changes(&mut changes, &mut records, usize::MAX)
+        .unwrap()
+    else {
+        panic!("unlimited batch must finish")
+    };
+    assert_eq!(
+        records.iter().map(|e| e.hash).collect::<Vec<_>>(),
+        model.order
+    );
+    assert!(
+        records
+            .iter()
+            .all(|e| e.newly_delivered && e.visibility == Vis::Neither)
+    );
+    let count = records.len();
+    assert_eq!(
+        history.next_changes(&mut changes, &mut records, 0).unwrap(),
+        Batch::Complete(cursor.clone())
+    );
+    assert_eq!(records.len(), count);
+
+    let target = history.view_point(&HashMap::new());
+    let mut changes = history.changes(&cursor, &target).unwrap();
+    records.clear();
+    assert!(matches!(
+        history
+            .next_changes(&mut changes, &mut records, usize::MAX)
+            .unwrap(),
+        Batch::Complete(_)
+    ));
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].hash, later);
+}
