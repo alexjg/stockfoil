@@ -16,3 +16,6 @@ pub mod materialization;
 pub mod tree;
 pub mod tree_examples;
 pub mod tree_refinement;
+#[path = "../stockfoil-core/src/verified/difference.rs"]
+pub mod difference;
+pub mod difference_examples;

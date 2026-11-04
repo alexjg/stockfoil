@@ -10,6 +10,7 @@
 //! Ancestry clocks describe exact down-sets. Permission-masked clocks use the same
 //! representation but need not be parent-closed.
 use super::NodeIdx;
+#[cfg(test)]
 use crate::verified::clock as verified;
 #[cfg(test)]
 use std::sync::Arc;
@@ -63,33 +64,7 @@ impl ClockBuilder {
     }
 }
 
-/// Every node in `chain_nodes` that one clock includes and the other does not,
-/// chain by chain. With `before = None` this enumerates all of `after`.
-pub(crate) fn difference(
-    chain_nodes: &[Vec<NodeIdx>],
-    after: &Clock,
-    before: &Clock,
-    mut visit: impl FnMut(NodeIdx),
-) {
-    for (chain, tip) in after.entries() {
-        let nodes = &chain_nodes[chain as usize];
-        let (start, end) = verified::difference_range(nodes, tip, before.position(chain));
-        for &idx in &nodes[start..end] {
-            visit(idx);
-        }
-    }
-}
-
-/// Nodes included by exactly one of two clocks.
-pub(crate) fn symmetric_difference(
-    chain_nodes: &[Vec<NodeIdx>],
-    a: &Clock,
-    b: &Clock,
-    mut visit: impl FnMut(NodeIdx),
-) {
-    difference(chain_nodes, a, b, &mut visit);
-    difference(chain_nodes, b, a, &mut visit);
-}
+pub(crate) use crate::verified::difference::{difference, symmetric_difference};
 
 #[cfg(test)]
 mod tests {

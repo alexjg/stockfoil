@@ -692,6 +692,7 @@ impl Clock {
     pub fn from_tips(tips: &[NodeIdx]) -> (out: Self)
         requires tips.len() <= u32::MAX,
         ensures out.valid(), out.size() == tips.len(),
+            out.sequence() == Seq::new(tips.len() as nat, |i: int| (i as u32, tips@[i])),
             forall|c: ChainId| #[trigger] out.contents().contains_key(c) <==> c < tips.len(),
             forall|c: ChainId| c < tips.len() ==> out.contents().contains_key(c) && #[trigger] out.contents()[c] == tips[c as int],
     {

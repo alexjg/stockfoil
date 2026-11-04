@@ -179,9 +179,9 @@ pub(super) fn plan_changes(
         &history.chain_nodes,
         &delivered_now,
         &delivered_before,
-        |i| pending.push(i),
+        &mut pending,
     );
-    clock::symmetric_difference(&history.chain_nodes, &before, &after, |i| pending.push(i));
+    clock::symmetric_difference(&history.chain_nodes, &before, &after, &mut pending);
     pending.sort_unstable();
     pending.dedup();
     Ok(Changes {
