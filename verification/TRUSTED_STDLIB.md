@@ -32,13 +32,11 @@ are outside the existing milestone. No sorting performance bound is proved.
 ## Checked application layer
 
 `candidates::normalize` composes these contracts and proves exact preservation of
-the input candidate set and strict numeric ordering. `plan_changes` calls this
-same production function through `candidates::assemble`. That assembler now
-proves exact union of new delivery and visibility-change candidates, and a checked
-refinement establishes the batch model's pending contract under explicit
-complete-table and delivered-clock premises. Concrete history construction and
-permission compilation must still establish those premises; the public wrapper
-is not yet verified.
+the input set and strict numeric ordering. The production `history_clock` uses
+this function to normalize head indices. The rewritten lazy Traversal does not
+call the eager assembler. `candidates::assemble` and its batch-model refinement
+are retained only under `cfg(verus_keep_ghost)` as a reference set model, without
+claiming the new canonical traversal's ordering or memory behavior.
 The runtime regression checks the actual adapters on duplicate and extreme node
 indices against an independent set of numeric indices. Tests support review;
 they do not prove the trusted standard-library implementations.

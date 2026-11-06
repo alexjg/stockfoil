@@ -1,4 +1,4 @@
-//! Nonempty calls of the production assembly, including overlapping reasons.
+//! Nonempty calls of the reference eager assembly, including overlapping reasons.
 use vstd::prelude::*;
 use crate::clock::NodeIdx;
 use crate::tree::Clock;

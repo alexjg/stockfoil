@@ -43,7 +43,7 @@ impl std::fmt::Debug for Clock {
     }
 }
 
-pub(crate) use crate::verified::difference::{difference, symmetric_difference};
+pub(crate) use crate::verified::difference::difference;
 
 /// Nonempty per-chain intervals in `after` but not `before`. Keeping intervals
 /// instead of expanding them lets traversals retain only a frontier per chain.

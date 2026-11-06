@@ -13,6 +13,28 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'chain append records the wrong current tip',
+        'stockfoil/src/verified/chain_tables.rs',
+        'tips[chain as usize] = position;',
+        'tips[chain as usize] = NodeIdx::new(0);',
+        'last',
+    ),
+    (
+        'chain append clears existing members',
+        'stockfoil/src/verified/chain_tables.rs',
+        'tables[chain as usize].push(position);',
+        'tables[chain as usize].clear();',
+        'last',
+    ),
+    (
+        'new chain omits its initial node',
+        'stockfoil/src/verified/chain_tables.rs',
+        'let row = vec![position];',
+        'let row: Vec<NodeIdx> = Vec::new();',
+        'last',
+    ),
+
+    (
         'candidate assembly drops new invisible deliveries',
         'stockfoil/src/verified/candidates.rs',
         'difference::difference(tables, delivered, processed, &mut pending);',

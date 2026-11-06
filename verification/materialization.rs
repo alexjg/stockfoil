@@ -1,5 +1,6 @@
-//! Model of captured candidate planning and batch emission in history/view.rs.
-//! Production candidate assembly now connects to this model under explicit table
+//! Reference model of the former eager candidate planning and batch emission.
+//! The current lazy canonical Traversal and public Materialization protocol are not proved here.
+//! Reference eager candidate assembly connects to this model under explicit table
 //! and clock premises. History identity and cursor publication remain wrapper
 //! obligations. The batch boundary and classifier are shared code.
 use vstd::prelude::*;

@@ -1,4 +1,4 @@
-//! Conditional bridge from production candidate assembly to the batch model.
+//! Conditional bridge from reference eager candidate assembly to the batch model.
 //! Concrete History construction must establish the complete table layout.
 use vstd::prelude::*;
 use crate::clock::{NodeIdx, below};
@@ -92,7 +92,7 @@ pub(crate) proof fn assembly_refines_pending_contract(
     }
 }
 
-// Execute the actual production assembler and discharge the existing batch
+// Execute the reference eager assembler and discharge the existing batch
 // model's input contract. No library contract states this application result.
 pub(crate) fn assemble_for_model(
     tables: &[Vec<NodeIdx>], delivered: &Clock, processed: &Clock, before: &Clock, after: &Clock,
