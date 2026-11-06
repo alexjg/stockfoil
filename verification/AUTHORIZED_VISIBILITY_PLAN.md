@@ -137,16 +137,25 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  76 verified obligations and rejects all 19 mutations.
+  85 verified obligations and rejects all 24 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
   Asymmetric witnesses use this actual constructor; three new mutations test it.
-- Rotation and update callers still must establish those premises and prove
-  balance. Iteration, union and masking remain unproved.
+- Production balancing now verifies single and double rotations in both
+  directions and the no-rotation path. Balanced children with height difference
+  at most two produce a balanced, ordered tree with the exact coordinate map,
+  size and metadata. The proof discharges intermediate constructor bounds from
+  explicit input capacity premises and bounds the returned height.
+- Nonempty witnesses cover each rotation and equal-height grandchildren, with
+  distinct tips and retained snapshots. Five additional mutations test rotation
+  selection, double-rotation steps and key/tip association.
+- Update callers still must establish the balancing premises and capacity
+  bounds. Iteration, union and masking remain unproved.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5) and node construction. Stage 1 adds specifications and integration tests. Stage 2 has
-begun production refinement, but no complete public API authorization theorem
-exists. The next implementation step is proving rotations preserve ordering,
-metadata and balance while satisfying the constructor capacity requirements.
+lookup (#5), node construction (#6), and rotation correctness. Stage 1 adds
+specifications and integration tests. Stage 2 has begun production refinement,
+but no complete public API authorization theorem exists. The next implementation
+step is proving insertion (`set`/`include`) establishes the balancing premises
+and preserves the clock invariant, including capacity bounds.
