@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'node height uses the shorter child',
+        'stockfoil/src/verified/tree.rs',
+        'let height = 1 + if lh >= rh { lh } else { rh };',
+        'let height = 1 + if lh <= rh { lh } else { rh };',
+        'last',
+    ),
+    (
+        'node size omits the root',
+        'stockfoil/src/verified/tree.rs',
+        'let len = 1 + left.len() as u32 + right.len() as u32;',
+        'let len = left.len() as u32 + right.len() as u32;',
+        'last',
+    ),
+    (
+        'node construction swaps the children',
+        'stockfoil/src/verified/tree.rs',
+        'Entry { chain, tip, height, len, left, right }',
+        'Entry { chain, tip, height, len, left: right, right: left }',
+        'last',
+    ),
+    (
         'AVL lookup follows the wrong left subtree',
         'stockfoil/src/verified/tree.rs',
         'node = &e.left;',

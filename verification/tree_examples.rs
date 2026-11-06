@@ -8,12 +8,11 @@ verus! {
 
 fn leaf(chain: u32, tip: NodeIdx) -> (out: Clock)
     ensures out.ordered(), out.contents() == Map::<u32, NodeIdx>::empty().insert(chain, tip),
+        out.metadata(), out.size() == 1, out.depth() == 1,
 {
     let left = Clock::default();
     let right = Clock::default();
-    let out = Clock(Some(Arc::new(Entry { chain, tip, height: 1, len: 1, left, right })));
-    proof { out.unfold(); }
-    out
+    Clock::node(chain, tip, left, right)
 }
 
 pub fn lookup_on_a_nonempty_shared_tree() {
@@ -25,9 +24,10 @@ pub fn lookup_on_a_nonempty_shared_tree() {
     let last = NodeIdx::new(u32::MAX);
     let left = leaf(0, zero);
     let right = leaf(u32::MAX, last);
-    let tree = Clock(Some(Arc::new(Entry {
-        chain: 5, tip: middle, height: 2, len: 3, left, right,
-    })));
+    let tree = Clock::node(5, middle, left, right);
+    let height = tree.height();
+    let len = tree.len();
+    assert(height == 2 && len == 3);
     proof { tree.unfold(); }
     assert(tree.ordered());
     let snapshot = tree.clone();
@@ -44,6 +44,25 @@ pub fn lookup_on_a_nonempty_shared_tree() {
     let included = snapshot.contains(0, zero);
     let excluded = tree.contains(0, NodeIdx::new(1));
     assert(included && !excluded);
+}
+
+// Rotations construct temporary unbalanced nodes. Their metadata must remain
+// exact regardless of which child is taller; balancing is a separate contract.
+pub fn unbalanced_construction_has_exact_metadata() {
+    let tip = NodeIdx::new(0);
+    let a = leaf(0, tip);
+    let b = Clock::node(1, tip, a, Clock::default());
+    let left_heavy = Clock::node(2, tip, b, Clock::default());
+    let a = leaf(2, tip);
+    let b = Clock::node(1, tip, Clock::default(), a);
+    let right_heavy = Clock::node(0, tip, Clock::default(), b);
+    let lh = left_heavy.height();
+    let rh = right_heavy.height();
+    let ll = left_heavy.len();
+    let rl = right_heavy.len();
+    assert(lh == 3 && rh == 3 && ll == 3 && rl == 3);
+    let old = left_heavy.clone();
+    assert(old.metadata() && old.size() == 3 && old.depth() == 3);
 }
 
 // The ordering precondition is substantive: a left key above its parent is
