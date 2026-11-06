@@ -9,6 +9,8 @@ separately below.
 
 The next milestone is tracked in the [authorized visibility plan](AUTHORIZED_VISIBILITY_PLAN.md),
 which states the public contract, proof dependencies and completion criteria.
+The [remaining public API work](PUBLIC_API_PROOF_BOUNDARY.md) maps all five requested
+guarantees to concrete boundaries and records the pending standard-library decision.
 
 ## Run
 
