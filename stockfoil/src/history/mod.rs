@@ -664,3 +664,6 @@ mod canonical_changes_tests;
 mod reference_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod authorized_visibility;

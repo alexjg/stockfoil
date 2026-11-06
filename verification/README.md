@@ -7,6 +7,9 @@ captured materialization batches. **It does not verify the full production
 crate.** Shared executable proofs and conditional model theorems are listed
 separately below.
 
+The next milestone is tracked in the [authorized visibility plan](AUTHORIZED_VISIBILITY_PLAN.md),
+which states the public contract, proof dependencies and completion criteria.
+
 ## Run
 
 Install [Verus 0.2026.11.02.8bf68ee](https://github.com/verus-lang/verus/releases/tag/release/0.2026.11.02.8bf68ee)
@@ -24,12 +27,12 @@ cargo +1.99.1 test --workspace --locked
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with eight deliberate semantic errors.
+baseline, then checks temporary copies with twelve deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked baseline reports **47 verified, 0 errors**, rejects all eight
-mutations, and passes **86 Rust workspace tests** (one large-payload test is
-intentionally ignored).
+The checked proof baseline reports **58 verified, 0 errors** and rejects all
+twelve mutations. The authorization plan records which stage these results
+establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
 proof and mutation suites, and tests the Rust workspace. Normal Cargo builds
@@ -75,10 +78,12 @@ states.
 | --- | --- | --- |
 | [`graph.rs`](graph.rs) | Independent parent-edge reachability is ordered and transitive; append preserves old reachability; same-author maximal-tip reuse preserves chain invariants; valid summaries imply exact ancestry membership. | Hash-to-index mapping, chain assignment, concrete summary construction, strict-ancestor fast path and unknown hashes. |
 | [`walk.rs`](walk.rs) | Starting, expanding parents, revisiting and substituting a complete cache preserve the walk invariant; an empty pending set yields exact history. | Stack/visited bookkeeping and termination, selective cache initialization and thread safety, accumulating the AVL summary. |
+| [`authorization.rs`](authorization.rs) | Independent policy laws: missing/denied permissions, exact unbounded permission, inclusive bounds, author isolation, available-frontier equivalence/monotonicity, and fixed-view stability under append. | Mapping commit hashes and stored authors to model nodes; view validation and concrete capture. |
 | [`visibility.rs`](visibility.rs) | Coordinate masking equals the independent parent-edge permission policy under explicit bound-compilation contracts. Unavailable frontier heads grant nothing. | Permission-map lookup, actual author labels, filtering frontier hashes, constructing bound clocks, mask iteration and AVL reconstruction. |
 | [`intervals.rs`](intervals.rs) | The shared executable interval search selects exactly the supplied chain nodes in one history and outside another, given valid summaries and correct AVL lookup results. Also states the inclusive-head-minus-boundaries fragment rule. | Complete chain tables, whole-clock enumeration, AVL lookup, fragment boundary discovery and placement checks. |
 | [`materialization.rs`](materialization.rs) | Candidate sets equal new delivery union visibility change. A batch model uses the shared boundary and classifier, emits the selected pending slice with exact fields, and consecutive slices concatenate without gaps or overlap. Sorted candidates are unique and topological; an unchanged cursor yields no candidates. | Concrete set assembly, sort/dedup, record/hash/payload mapping, history identity checks, captured heads and completed-cursor publication. |
 | [`examples.rs`](examples.rs) | Nonempty witnesses for chain summaries, permission masking and batches; zero versus absence, reversed bounds, maximum indices and budgets. | Specification checks, not wrapper proofs. |
+| [`authorization_tests.rs`](authorization_tests.rs) | Nonempty policy witnesses with multiple heads, cross-author bounds, denied intermediate authors, unavailable heads, and a frontier becoming known after capture. | Specification checks, not wrapper proofs. |
 
 [`coordinates.rs`](coordinates.rs) supplies a mathematical sequence view of AVL
 entries. It is not an executable vector clock. Model chain labels widen `u32`
@@ -102,14 +107,19 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Eight mutations must be rejected: an expanding cap, exclusive membership,
+Twelve mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
-commits, and granting an out-of-history frontier.
+commits, granting an out-of-history frontier, defaulting missing permissions to
+unbounded, escaping the selected history, excluding the frontier itself, and
+selecting permissions by the wrong author.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
 workspace's randomized parent-walk, visibility, persistence, and replica tests.
+The [public authorization contract tests](../stockfoil/src/history/authorized_visibility.rs)
+exercise the policy through `changes`/`next_changes`, including permission
+transitions and a frontier becoming known after capture.
 These tests complement the proofs; they do not discharge model hypotheses.
 
 There are no project `assume`, `admit`, `external_body`, `assume_specification`,

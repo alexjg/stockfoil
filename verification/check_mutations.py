@@ -63,9 +63,37 @@ MUTATIONS = [
     ),
     (
         'out-of-history frontier grants permission',
-        'verification/visibility.rs',
+        'verification/authorization.rs',
         'frontier.contains(f) && h.contains(f) && reaches(g, a, f)',
         'frontier.contains(f) && reaches(g, a, f)',
+        'first',
+    ),
+    (
+        'missing permission defaults to unbounded',
+        'verification/authorization.rs',
+        'else { Permission::Denied }',
+        'else { Permission::Unbounded }',
+        'first',
+    ),
+    (
+        'unbounded permission escapes selected history',
+        'verification/authorization.rs',
+        '0 <= a < authors.len() && history(g, heads).contains(a)',
+        '0 <= a < authors.len()',
+        'first',
+    ),
+    (
+        'frontier excludes itself',
+        'verification/authorization.rs',
+        'frontier.contains(f) && h.contains(f) && reaches(g, a, f)',
+        'frontier.contains(f) && h.contains(f) && a != f && reaches(g, a, f)',
+        'first',
+    ),
+    (
+        'permission selected using the wrong author',
+        'verification/authorization.rs',
+        'permission(perms, authors[a]), a)',
+        'permission(perms, 0usize), a)',
         'first',
     ),
 ]

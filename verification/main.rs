@@ -6,6 +6,8 @@ pub mod events;
 pub mod coordinates;
 pub mod graph;
 pub mod walk;
+pub mod authorization;
+pub mod authorization_tests;
 pub mod visibility;
 pub mod examples;
 pub mod intervals;
