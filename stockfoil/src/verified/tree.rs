@@ -21,6 +21,87 @@ pub(crate) struct Entry {
     pub(crate) right: Clock,
 }
 
+pub(crate) struct Entries<'a> {
+    stack: Vec<&'a Entry>,
+    node: &'a Clock,
+}
+
+impl<'a> Entries<'a> {
+    pub closed spec fn pending_stack(stack: Seq<&Entry>) -> Seq<(ChainId, NodeIdx)>
+        decreases stack.len(),
+    {
+        if stack.len() == 0 { Seq::empty() } else {
+            let e = stack.last();
+            seq![(e.chain, e.tip)] + e.right.sequence() + Self::pending_stack(stack.drop_last())
+        }
+    }
+
+    pub closed spec fn remaining(&self) -> Seq<(ChainId, NodeIdx)> {
+        self.node.sequence() + Self::pending_stack(self.stack@)
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl<'a> vstd::std_specs::iter::IteratorSpecImpl for Entries<'a> {
+    open spec fn obeys_prophetic_iter_laws(&self) -> bool { true }
+    open spec fn remaining(&self) -> Seq<(ChainId, NodeIdx)> { Entries::remaining(self) }
+    open spec fn produces(&self) -> Seq<bool> { Seq::new(Entries::remaining(self).len(), |i: int| true) }
+    open spec fn decrease(&self) -> Option<nat> { Some(Entries::remaining(self).len()) }
+    open spec fn peek(&self, index: int) -> Option<(ChainId, NodeIdx)> {
+        if 0 <= index < Entries::remaining(self).len() { Some(Entries::remaining(self)[index]) } else { None }
+    }
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = (ChainId, NodeIdx);
+
+    fn next(&mut self) -> (out: Option<Self::Item>)
+        ensures
+            match out {
+                None => old(self).remaining().len() == 0 && final(self).remaining() == old(self).remaining(),
+                Some(item) => old(self).remaining().len() > 0 && item == old(self).remaining()[0]
+                    && final(self).remaining() == old(self).remaining().drop_first(),
+            },
+    {
+        let ghost remaining = self.remaining();
+        loop
+            invariant self.remaining() == remaining,
+            ensures self.node.0 is None, self.remaining() == remaining,
+            decreases self.node,
+        {
+            match &self.node.0 {
+                None => break,
+                Some(e) => {
+                    let ghost stack = self.stack@;
+                    self.stack.push(&**e);
+                    assert(self.stack@.last() == &**e);
+                    assert(self.stack@.drop_last() =~= stack);
+                    assert(Self::pending_stack(self.stack@) =~= seq![(e.chain, e.tip)] + e.right.sequence() + Self::pending_stack(stack));
+                    self.node = &e.left;
+                    assert(self.remaining() =~= remaining);
+                }
+            }
+        }
+        assert(self.node.sequence() == Seq::<(ChainId, NodeIdx)>::empty());
+        let ghost stack = self.stack@;
+        assert(remaining == Self::pending_stack(stack));
+        let e = match self.stack.pop() {
+            None => {
+                assert(stack.len() == 0);
+                assert(remaining.len() == 0);
+                return None;
+            },
+            Some(e) => e,
+        };
+        assert(stack.last() == e);
+        assert(stack.drop_last() =~= self.stack@);
+        assert(remaining == seq![(e.chain, e.tip)] + e.right.sequence() + Self::pending_stack(self.stack@));
+        self.node = &e.right;
+        assert(self.remaining() =~= remaining.drop_first());
+        Some((e.chain, e.tip))
+    }
+}
+
 impl Default for Clock {
     fn default() -> (out: Self)
         ensures out.ordered(), out.contents() == Map::<ChainId, NodeIdx>::empty(),
@@ -42,6 +123,77 @@ impl Clone for Clock {
 }
 
 impl Clock {
+    pub closed spec fn sequence(&self) -> Seq<(ChainId, NodeIdx)>
+        decreases self,
+    {
+        match self.0 {
+            None => Seq::empty(),
+            Some(e) => e.left.sequence() + seq![(e.chain, e.tip)] + e.right.sequence(),
+        }
+    }
+
+    pub(crate) proof fn sequence_correct(&self)
+        requires self.ordered(),
+        ensures
+            self.sequence().len() == self.size(),
+            forall|i: int| 0 <= i < self.sequence().len() ==>
+                self.contents().contains_key(#[trigger] self.sequence()[i].0)
+                && self.contents()[self.sequence()[i].0] == self.sequence()[i].1,
+            forall|c: ChainId| self.contents().contains_key(c) ==>
+                exists|i: int| 0 <= i < self.sequence().len() && self.sequence()[i].0 == c,
+            forall|i: int, j: int| 0 <= i < j < self.sequence().len() ==>
+                self.sequence()[i].0 < self.sequence()[j].0,
+        decreases self,
+    {
+        self.unfold();
+        if let Some(e) = self.0 {
+            e.left.sequence_correct();
+            e.right.sequence_correct();
+            let l = e.left.sequence();
+            let r = e.right.sequence();
+            let s = self.sequence();
+            assert(s =~= l + seq![(e.chain, e.tip)] + r);
+            assert forall|i: int| 0 <= i < s.len() implies
+                self.contents().contains_key(#[trigger] s[i].0) && self.contents()[s[i].0] == s[i].1 by {
+                if i < l.len() {
+                    assert(s[i] == l[i]);
+                } else if i == l.len() {
+                    assert(s[i] == (e.chain, e.tip));
+                } else {
+                    assert(s[i] == r[i - l.len() - 1]);
+                }
+            }
+            assert forall|c: ChainId| self.contents().contains_key(c) implies
+                exists|i: int| 0 <= i < s.len() && s[i].0 == c by {
+                if c == e.chain {
+                    assert(s[l.len() as int].0 == c);
+                } else if e.left.contents().contains_key(c) {
+                    let i = choose|i: int| 0 <= i < l.len() && l[i].0 == c;
+                    assert(s[i].0 == c);
+                } else {
+                    let i = choose|i: int| 0 <= i < r.len() && r[i].0 == c;
+                    assert(s[i + l.len() + 1].0 == c);
+                }
+            }
+            assert forall|i: int, j: int| 0 <= i < j < s.len() implies s[i].0 < s[j].0 by {
+                if j < l.len() {
+                    assert(s[i] == l[i] && s[j] == l[j]);
+                } else if i > l.len() {
+                    assert(s[i] == r[i - l.len() - 1] && s[j] == r[j - l.len() - 1]);
+                } else {
+                    if i < l.len() { assert(s[i] == l[i]); }
+                    if j > l.len() { assert(s[j] == r[j - l.len() - 1]); }
+                }
+            }
+        }
+    }
+
+    pub fn entries(&self) -> (out: Entries<'_>)
+        ensures out.remaining() == self.sequence(),
+    {
+        Entries { stack: Vec::new(), node: self }
+    }
+
     pub closed spec fn size(&self) -> nat
         decreases self,
     {
