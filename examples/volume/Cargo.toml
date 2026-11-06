@@ -1,0 +1,15 @@
+[package]
+name = "stockfoil-volume"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+blake3 = "1.8.7"
+ed25519-dalek = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+stockfoil = { path = "../../stockfoil" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
