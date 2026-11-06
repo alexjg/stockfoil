@@ -93,6 +93,14 @@ pub enum Heads {
 
 static NEXT_HISTORY_ID: AtomicU64 = AtomicU64::new(1);
 
+// History identity guards captured traversals and export plans. Exhaustion must
+// leave the counter unchanged so a later allocation cannot reuse an old ID.
+fn allocate_history_id(counter: &AtomicU64) -> u64 {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("history id space")
+}
+
 /// An authenticated commit history. See the [crate documentation](crate).
 #[derive(Debug)]
 pub struct History {
@@ -123,7 +131,7 @@ impl Default for History {
 impl History {
     pub fn new() -> Self {
         Self {
-            id: NEXT_HISTORY_ID.fetch_add(1, Ordering::Relaxed),
+            id: allocate_history_id(&NEXT_HISTORY_ID),
             nodes: Vec::new(),
             parent_ids: Vec::new(),
             by_hash: HashMap::new(),
