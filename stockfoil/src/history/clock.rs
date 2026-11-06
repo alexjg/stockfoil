@@ -14,7 +14,7 @@ use crate::verified::clock as verified;
 #[cfg(test)]
 use std::sync::Arc;
 
-pub(crate) use crate::verified::tree::{ChainId, Clock};
+pub(crate) use crate::verified::tree::{ChainId, Clock, ClockBuilder};
 
 impl Clock {
     /// Visit every tree entry, identified by address, for memory accounting.
@@ -40,26 +40,6 @@ impl Eq for Clock {}
 impl std::fmt::Debug for Clock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.entries()).finish()
-    }
-}
-
-/// Accumulates a union of clocks and single coordinates.
-#[derive(Default)]
-pub(crate) struct ClockBuilder {
-    clock: Clock,
-}
-
-impl ClockBuilder {
-    pub fn include(&mut self, chain: ChainId, position: NodeIdx) {
-        self.clock.include(chain, position);
-    }
-
-    pub fn merge(&mut self, clock: &Clock) {
-        self.clock = self.clock.union(clock);
-    }
-
-    pub fn finish(self) -> Clock {
-        self.clock
     }
 }
 

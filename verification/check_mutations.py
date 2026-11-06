@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'builder ignores a coordinate',
+        'stockfoil/src/verified/tree.rs',
+        'self.clock.include(chain, position);',
+        'let _ = (chain, position);',
+        'last',
+    ),
+    (
+        'builder discards accumulated inputs on merge',
+        'stockfoil/src/verified/tree.rs',
+        'self.clock = self.clock.union(clock);',
+        'self.clock = clock.clone();',
+        'last',
+    ),
+    (
+        'builder finish drops its result',
+        'stockfoil/src/verified/tree.rs',
+        '    {\n        self.clock\n    }\n}',
+        '    {\n        Clock::default()\n    }\n}',
+        'last',
+    ),
+    (
         'difference drops the first selected node',
         'stockfoil/src/verified/difference.rs',
         'let mut i = start;',
