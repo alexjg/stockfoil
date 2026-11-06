@@ -19,3 +19,11 @@ pub mod tree_refinement;
 #[path = "../stockfoil/src/verified/difference.rs"]
 pub mod difference;
 pub mod difference_examples;
+
+// The original suite also runs without these modules, with --no-cheating.
+#[cfg(stockfoil_stdlib)]
+#[path = "../stockfoil/src/verified/stdlib.rs"]
+pub mod stdlib;
+#[cfg(stockfoil_stdlib)]
+#[path = "../stockfoil/src/verified/candidates.rs"]
+pub mod candidates;

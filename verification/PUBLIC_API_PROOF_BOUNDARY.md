@@ -44,12 +44,12 @@ when their stages begin.
 6. Extend the invariant and proofs through certificate coverage, compaction and
    export/admission transitions for the remaining three goals.
 
-## Standard-library boundary decision
+## Accepted standard-library boundary
 
-The current [runner](verify.sh) uses `--no-cheating`. The
-[authorized visibility plan](AUTHORIZED_VISIBILITY_PLAN.md#completion-criteria)
-requires that check, and the current suite contains no project `assume`, `admit`,
-`external_body`, `assume_specification` or custom axioms.
+The selected route is explicit, narrowly scoped standard-library contracts.
+See [TRUSTED_STDLIB.md](TRUSTED_STDLIB.md) for the enabled contracts and audit.
+The runner retains `--no-cheating` for the original suite and separately checks
+the full suite with those contracts. Application logic may not add assumptions.
 
 The pinned Verus standard-library specifications do not cover the production
 sorting calls or `std::sync::OnceLock`. Those operations occur on the path to the
@@ -57,15 +57,15 @@ public guarantees. This is a proof-tool boundary, not evidence that those Rust
 operations are incorrect. Existing vstd specifications already form part of the
 trusted base for operations such as `Arc::clone` and vector manipulation.
 
-Two routes need different implementation and review work:
+The alternatives considered were:
 
 | Route | Concrete effect |
 | --- | --- |
 | Explicit standard-library contracts | Preserve production algorithms and synchronization. Add a separately reviewed, enumerated trusted-library boundary and update the verification plan/CI to make that boundary visible. Application logic must remain checked; a bare success count must not conceal trusted wrappers. |
 | Preserve the current no-new-axioms boundary | Replace unsupported operations with implementations or wrappers whose behavior can be checked using existing Verus primitives. Prove sorting and cache invariants, retain thread-safety/structural sharing, and check performance and API compatibility. |
 
-No new trusted declarations are enabled by this document. The intended minimal
-contracts for the first route would be:
+Sorting and deduplication are now enabled through two thin adapters. The other
+contracts below remain future obligations, not declarations enabled in the suite:
 
 - **Sorting:** return a permutation of the original nodes in nondecreasing
   `NodeIdx` order. It must neither invent nor lose an element. The relation

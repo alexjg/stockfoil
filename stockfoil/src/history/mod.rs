@@ -619,8 +619,7 @@ impl History {
             .iter()
             .map(|h| self.by_hash.get(h).copied().ok_or(Error::UnknownCommit(*h)))
             .collect::<Result<Vec<_>, _>>()?;
-        indices.sort_unstable();
-        indices.dedup();
+        crate::verified::candidates::normalize(&mut indices);
         if indices.len() == self.heads.len()
             && indices
                 .iter()

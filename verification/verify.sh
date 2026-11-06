@@ -15,5 +15,17 @@ if ! grep -Eq "^[[:space:]]*Version: ${expected//./\\.}$" <<< "$version"; then
     exit 1
 fi
 
-exec "$verus_bin" --crate-type lib --edition 2024 --no-cheating --triggers-mode silent \
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != --mutation-only ) ]]; then
+    echo "Usage: $0 [--mutation-only]" >&2
+    exit 2
+fi
+python3 "$root/verification/check_trusted.py"
+if [[ $# -eq 0 ]]; then
+    echo "Verifying original suite with --no-cheating"
+    "$verus_bin" --crate-type lib --edition 2024 --no-cheating --triggers-mode silent \
+        "$root/verification/main.rs"
+fi
+
+echo "Verifying full suite with the enumerated standard-library contracts"
+exec "$verus_bin" --crate-type lib --edition 2024 --cfg stockfoil_stdlib --triggers-mode silent \
     "$root/verification/main.rs"
