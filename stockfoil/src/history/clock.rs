@@ -17,19 +17,6 @@ use std::sync::Arc;
 pub(crate) use crate::verified::tree::{ChainId, Clock};
 
 impl Clock {
-    /// The pointwise maximum, sharing the larger side's structure.
-    pub fn union(&self, other: &Self) -> Self {
-        let (mut big, small) = if self.len() >= other.len() {
-            (self.clone(), other)
-        } else {
-            (other.clone(), self)
-        };
-        for (chain, tip) in small.entries() {
-            big.include(chain, tip);
-        }
-        big
-    }
-
     /// Cap each coordinate at its bound, or drop it for `None`.
     pub fn mask(&self, mut bound: impl FnMut(ChainId, NodeIdx) -> Option<NodeIdx>) -> Self {
         let entries: Vec<_> = self

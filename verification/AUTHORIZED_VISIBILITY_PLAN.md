@@ -137,7 +137,7 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  99 verified obligations and rejects all 30 mutations.
+  104 verified obligations and rejects all 33 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -160,13 +160,20 @@ Stage 2 progress (still incomplete):
 - The actual Rust iterator now verifies exact ordered enumeration, termination
   and stable exhaustion. A structural lemma connects its in-order sequence to
   every map entry exactly once. Three mutations and a nonempty exhaustion
-  witness exercise the iterator. Union and masking remain unproved.
+  witness exercise the iterator.
+- Union now composes verified iteration and inclusion to compute exactly the
+  pointwise maximum and union of keys, preserving the tree invariant. A
+  cardinality proof connects structural size to distinct keys and establishes
+  intermediate capacity from the final union's key count. Witnesses cover
+  overlap, idempotence, empty inputs and both size-selection branches; three
+  mutations test union. Masked reconstruction remains unproved.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), and ordered iteration. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), and union. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
-step is proving union and masked reconstruction using the checked iterator.
+step is proving masked reconstruction using the checked iterator and sorted
+construction.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.
