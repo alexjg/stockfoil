@@ -8,6 +8,8 @@
 use super::clock::Clock;
 use super::traversal::Traversal;
 use super::{Heads, History, NodeIdx};
+use crate::verified::events;
+pub use crate::verified::events::Vis;
 use crate::{Author, CommitHash, Error, PayloadId, WritePermission};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -83,15 +85,6 @@ pub(super) fn encode_hashes(out: &mut Vec<u8>, hashes: &[CommitHash]) {
     for hash in hashes {
         out.extend(hash.as_bytes());
     }
-}
-
-/// Participation of one commit in two views.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Vis {
-    Before,
-    After,
-    Both,
-    Neither,
 }
 
 /// A materializer's completed progress: the history it has been told about and
@@ -258,7 +251,7 @@ pub(super) fn emit_next_changes(
     if changes.history != history.id {
         return Err(Error::WrongHistory);
     }
-    for _ in 0..max.min(changes.remaining()) {
+    for _ in 0..events::batch_end(0, changes.remaining(), max) {
         let idx = changes
             .traversal
             .next(history)
@@ -281,12 +274,7 @@ pub(super) fn emit_next_changes(
 }
 
 fn visibility(history: &History, before: &Clock, after: &Clock, idx: NodeIdx) -> Vis {
-    match (history.contains(before, idx), history.contains(after, idx)) {
-        (true, false) => Vis::Before,
-        (false, true) => Vis::After,
-        (true, true) => Vis::Both,
-        (false, false) => Vis::Neither,
-    }
+    events::classify(history.contains(before, idx), history.contains(after, idx))
 }
 
 /// Whether already delivered commits change participation (new deliveries

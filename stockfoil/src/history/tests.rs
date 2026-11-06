@@ -63,7 +63,7 @@ fn fragment_members_are_ancestry_differences() {
         let level = (i % 11 == 5) as usize;
         tips.push(commit(&mut h, k, parents, level, &format!("c{i}")));
     }
-    for idx in (0..h.len()).map(|i| NodeIdx(i as u32)) {
+    for idx in (0..h.len()).map(|i| NodeIdx::new(i as u32)) {
         let level = h.node(idx).depth as usize;
         if level == 0 {
             continue;

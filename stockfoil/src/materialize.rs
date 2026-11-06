@@ -678,21 +678,14 @@ pub enum Event<P> {
     /// A previously delivered commit has entered the active view (for example,
     /// after a permission grant or branch change). Only emitted when
     /// `supports_visibility_changes` is `true`.
-    Activate {
-        hash: CommitHash,
-    },
+    Activate { hash: CommitHash },
     /// A previously active commit has left the active view (for example, after
     /// a write-frontier revocation, branch change, or cascading payload
     /// rejection). Only emitted when `supports_visibility_changes` is `true`.
-    Retract {
-        hash: CommitHash,
-    },
+    Retract { hash: CommitHash },
     /// Delivers the payload of an older commit that the application requested
     /// via [`Applied::wanted`] in the preceding batch round.
-    Payload {
-        hash: CommitHash,
-        payload: P,
-    },
+    Payload { hash: CommitHash, payload: P },
 }
 impl<P> Event<P> {
     pub fn map_payload<Q>(self, f: impl FnOnce(P) -> Q) -> Event<Q> {

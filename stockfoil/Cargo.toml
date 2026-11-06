@@ -14,6 +14,11 @@ bijoux = "0.3.2"
 blake3 = "1.8.7"
 hexane = "=1.0.0-alpha.5"
 
+verus_builtin_macros = "=0.0.0-2026-11-01-0251"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }
+
 [dev-dependencies]
 blake3 = "1.8.7"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

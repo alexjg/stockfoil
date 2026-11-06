@@ -209,6 +209,8 @@ while let Some(mut batch) = checkout.plan(&ledger, 64)? {
   lazy historical reads, and crash-recoverable redo journaling.
 - [JavaScript/Wasm bindings](javascript) and [Subduction adapter](subduction).
 
+- [Verus verification](verification/README.md)
+
 ## Development
 
 ```sh
