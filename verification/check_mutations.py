@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'difference drops the first selected node',
+        'stockfoil/src/verified/difference.rs',
+        'let mut i = start;',
+        'let mut i = end;',
+        'last',
+    ),
+    (
+        'difference emits the wrong node',
+        'stockfoil/src/verified/difference.rs',
+        'out.push(nodes[i]);',
+        'out.push(nodes[start]);',
+        'last',
+    ),
+    (
+        'symmetric difference omits the reverse direction',
+        'stockfoil/src/verified/difference.rs',
+        'difference(chain_nodes, b, a, out);',
+        'difference(chain_nodes, a, b, out);',
+        'last',
+    ),
+    (
         'coordinate refinement shifts chain ids',
         'verification/tree_refinement.rs',
         '(e.0 as usize, e.1)',

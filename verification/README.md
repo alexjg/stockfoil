@@ -27,11 +27,11 @@ cargo +1.99.1 test --workspace --locked
 `VERUS_BIN` defaults to `verus` on PATH. The runner checks the exact version,
 verifies every module in `main.rs`, and enables `--no-cheating`; it accepts no
 arguments that could skip proofs. The mutation runner requires a passing
-baseline, then checks temporary copies with forty-one deliberate semantic errors.
+baseline, then checks temporary copies with forty-four deliberate semantic errors.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The checked proof baseline reports **123 verified, 0 errors** and rejects all
-forty-one mutations. The authorization plan records which stage these results
+The checked proof baseline reports **134 verified, 0 errors** and rejects all
+forty-four mutations. The authorization plan records which stage these results
 establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -52,6 +52,7 @@ implementations of their executable bodies:
 | `cap` | Exact prefix intersection, including absent and zero bounds. | `Clock::mask` |
 | `upper_bound` | Terminates and returns exactly the first index above a bound in a nondecreasing slice; arithmetic and indexing are safe. | Interval difference |
 | `difference_range` | Valid half-open slice containing exactly the nodes in the after-prefix and outside the before-prefix. Reversed bounds give an empty slice. | `clock::difference`, hence fragment membership and materialization planning |
+| [`difference.rs`](../stockfoil/src/verified/difference.rs): `difference`, `symmetric_difference` | Append exactly every selected chain-table node, preserving the existing output prefix and chain traversal order; prove indexing and termination. Sorted tables and clock-chain index bounds remain explicit premises. | Materialization candidates and fragment members |
 | [`events.rs`](../stockfoil/src/verified/events.rs): `classify` | Both visibility bits are represented exactly by `Vis`. | Materialization record emission |
 | `batch_end` | Advances by `min(max, remaining)` without overflow. Positive budgets make progress; zero budgets preserve position. | `emit_next_changes` |
 | [`tree.rs`](../stockfoil/src/verified/tree.rs): `Clock::default`, `clone` | Empty clocks are ordered and have an empty coordinate map; cloning preserves the logical tree using `Arc::clone`. | Clock construction and snapshots |
@@ -144,12 +145,19 @@ existence for all visited coordinates is established by the actual calls, and
 uniqueness is an explicit premise. No callback outcome is assumed without a
 call. Its executable interface remains `FnMut`, allowing the existing bound cache.
 
-The binary search requires a sorted chain-node slice, and `batch_end` requires
-`next <= total`. The wrappers maintain these by construction and have regression
-tests, but their invariant maintenance remains a formal proof obligation.
-Strict ordering and unique chain membership are additionally needed for unique
-whole-history enumeration. The helpers add no staging allocation and retain
-logarithmic interval search.
+Whole-clock difference enumeration now composes actual tree iteration, lookup
+and interval search. It appends exactly the selected nodes to the existing
+output vector, in chain traversal order, and preserves the previous prefix.
+A membership lemma states precisely which table nodes occur. Symmetric difference
+appends both directions. The private callback interface is replaced by a direct
+vector argument at materialization and fragment callers, so the proof covers the
+actual output writes; no staging allocation or whole-history scan is added.
+
+The table rows must be sorted and every clock chain must index an existing row.
+Concrete history construction must still establish table completeness, correct
+chain membership and uniqueness. Enumeration is not globally topological across
+chains; materialization's sort/dedup remains to be proved. `batch_end` also
+requires `next <= total`; captured traversal construction must establish this.
 
 ## Connected model theorems and refinement
 
@@ -167,6 +175,7 @@ production mask and connects its result to the independent graph policy.
 | [`visibility.rs`](visibility.rs) | Coordinate masking equals the independent parent-edge permission policy under explicit bound-compilation contracts. Unavailable frontier heads grant nothing. | Permission-map lookup, actual author labels, filtering frontier hashes, constructing bound clocks, mask iteration and AVL reconstruction. |
 | [`intervals.rs`](intervals.rs) | The shared executable interval search selects exactly the supplied chain nodes in one history and outside another, given valid summaries and correct AVL lookup results. Also states the inclusive-head-minus-boundaries fragment rule. | Complete chain tables, whole-clock enumeration, AVL lookup, fragment boundary discovery and placement checks. |
 | [`materialization.rs`](materialization.rs) | Candidate sets equal new delivery union visibility change. A batch model uses the shared boundary and classifier, emits the selected pending slice with exact fields, and consecutive slices concatenate without gaps or overlap. Sorted candidates are unique and topological; an unchanged cursor yields no candidates. | Concrete set assembly, sort/dedup, record/hash/payload mapping, history identity checks, captured heads and completed-cursor publication. |
+| [`difference_examples.rs`](difference_examples.rs) | Executes complete enumeration with two interleaved chains, reversed bounds, zero versus absence, both symmetric directions and a preexisting output marker. | Concrete history tables and candidate sort/dedup remain unproved. |
 | [`examples.rs`](examples.rs) | Nonempty witnesses for chain summaries, permission masking and batches; zero versus absence, reversed bounds, maximum indices and budgets. | Specification checks, not wrapper proofs. |
 | [`authorization_tests.rs`](authorization_tests.rs) | Nonempty policy witnesses with multiple heads, cross-author bounds, denied intermediate authors, unavailable heads, and a frontier becoming known after capture. | Specification checks, not wrapper proofs. |
 | [`tree_examples.rs`](tree_examples.rs) | Actual shared tree witnesses exercise both search directions, absent keys, zero/maximum IDs, clones and membership. A malformed tree fails the ordering predicate. | Also uses actual construction and balancing for all four rotations, the no-rotation case, and equal-height grandchildren, with distinct tips and retained snapshots. Update witnesses also check replacement, monotone inclusion, extreme keys and retained snapshots; iteration witnesses check key/tip order, completeness and repeated exhaustion. Union witnesses cover overlapping keys, maximum tips, idempotence, both size-selection branches, empty inputs and retained snapshots. Reconstruction witnesses cover sparse/extreme keys, even sizes, empty inputs and zero tips. Mask witnesses use actual callbacks for denied, unbounded, zero and expanding bounds. The production permission callback and history callers remain unproved. |
@@ -197,7 +206,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Forty-one mutations must be rejected: an expanding cap, exclusive membership,
+Forty-four mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -213,7 +222,9 @@ ignoring the smaller union input, replacing union tips with zero, and discarding
 the larger initial tree, replacing reconstructed tips with zero, swapping
 reconstructed children, shifting tip-table chain IDs, failing to cap expanding
 mask bounds, dropping position zero, ignoring denied mask coordinates, shifting
-chain IDs in the model projection, and dropping projected permission bounds.
+chain IDs in the model projection, dropping projected permission bounds,
+skipping selected difference nodes, emitting the wrong node, and omitting the
+reverse symmetric-difference direction.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -246,7 +257,9 @@ obligations; it is not a measure of production coverage.
    Preserve structural sharing and account for `u32`/`u8` limits rather than
    assuming they cannot overflow.
 2. **History refinement:** prove insertion and author-chain selection preserve
-   the chain invariant, and that concrete cached walks produce exact summaries.
+   the chain invariant, table completeness and unique membership, and that
+   concrete cached walks produce exact summaries. Whole-clock difference writes
+   are now verified under the table and clock premises.
 3. **Views and materialization:** prove permission compilation, complete chain
    enumeration, candidate dedup/order, capture semantics, wrong-history rejection
    and cursor publication establish the model contracts.

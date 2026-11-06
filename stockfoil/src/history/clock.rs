@@ -63,20 +63,7 @@ impl ClockBuilder {
     }
 }
 
-/// Every node in `chain_nodes` that one clock includes and the other does not,
-/// chain by chain. With `before = None` this enumerates all of `after`.
-pub(crate) fn difference(
-    chain_nodes: &[Vec<NodeIdx>],
-    after: &Clock,
-    before: &Clock,
-    mut visit: impl FnMut(NodeIdx),
-) {
-    difference_intervals(chain_nodes, after, before, |chain, range| {
-        for &idx in &chain_nodes[chain as usize][range] {
-            visit(idx);
-        }
-    });
-}
+pub(crate) use crate::verified::difference::{difference, symmetric_difference};
 
 /// Nonempty per-chain intervals in `after` but not `before`. Keeping intervals
 /// instead of expanding them lets traversals retain only a frontier per chain.

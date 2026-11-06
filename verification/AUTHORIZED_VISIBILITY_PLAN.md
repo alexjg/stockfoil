@@ -137,7 +137,7 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   also verified. See [`tree.rs`](../stockfoil/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  123 verified obligations and rejects all 41 mutations.
+  134 verified obligations and rejects all 44 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -184,13 +184,19 @@ Stage 2 evidence (conditional operation contracts; caller premises remain in lat
   excludes a later commit. Two mutations test the coordinate/bound projections.
   Concrete history summaries, author mapping and compiled bounds remain premises
   to discharge in stages 3 and 4; no public API proof is claimed.
+- Production difference enumeration now appends the exact selected table nodes,
+  preserving prior output and chain traversal order, with safe indexing and
+  termination. Symmetric difference covers both directions. Materialization and
+  fragment callers use this checked output path. Table completeness/uniqueness
+  and candidate sort/dedup remain later-stage obligations. A nonempty witness and
+  three mutations exercise whole-clock enumeration.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking, and the clock-to-policy connection. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), insertion (#8), ordered iteration (#9), union (#10), reconstruction (#11), masking (#12), the clock-to-policy connection (#13), and complete differences. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
 step is proving concrete history and bound compilation establish the remaining
-hypotheses, alongside complete difference enumeration and captured batch assembly.
+hypotheses, alongside candidate sort/dedup and captured batch assembly.
 The remaining stages continue through concrete history/view construction and
 `History::changes`/`History::next_changes`; this stack is not complete until
 those public entry points establish their own prerequisites.

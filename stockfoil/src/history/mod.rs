@@ -650,9 +650,7 @@ impl History {
         let included = self.clock(head);
         let excluded = self.clock_for_heads(boundary);
         let mut members = Vec::new();
-        clock::difference(&self.chain_nodes, included, &excluded, |idx| {
-            members.push(idx)
-        });
+        clock::difference(&self.chain_nodes, included, &excluded, &mut members);
         members.sort_unstable();
         members
     }
