@@ -1,6 +1,7 @@
 //! Model of captured candidate planning and batch emission in history/view.rs.
-//! Set assembly, sort/dedup, History identity checks and cursor publication are
-//! still wrapper obligations. The batch boundary and classifier are shared code.
+//! Production candidate assembly now connects to this model under explicit table
+//! and clock premises. History identity and cursor publication remain wrapper
+//! obligations. The batch boundary and classifier are shared code.
 use vstd::prelude::*;
 use crate::events::{self, Vis};
 use crate::graph::*;

@@ -27,6 +27,11 @@ impl NodeIdx {
         ensures out == self@,
     { self.0 as usize }
 
+    pub proof fn same_index(a: Self, b: Self)
+        requires a@ == b@,
+        ensures a == b,
+    {}
+
     pub closed spec fn spec_new(index: u32) -> Self { Self(index) }
 
     pub proof fn spec_new_index(index: u32)

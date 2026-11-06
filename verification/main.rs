@@ -27,3 +27,7 @@ pub mod stdlib;
 #[cfg(stockfoil_stdlib)]
 #[path = "../stockfoil/src/verified/candidates.rs"]
 pub mod candidates;
+#[cfg(stockfoil_stdlib)]
+pub mod candidate_refinement;
+#[cfg(stockfoil_stdlib)]
+pub mod candidate_examples;

@@ -15,7 +15,7 @@ not formal proofs of their wrappers.
 | Goal | Public boundary and intended property | Remaining work |
 | --- | --- | --- |
 | Authorized visibility | `History::changes` / `next_changes`: each before/after visibility bit equals the permission policy for its captured view, including inclusive and unavailable frontiers. | Concrete history/author mapping, ancestry summaries, permission compilation and emitter refinement. |
-| Consistent materialization | Every required change appears exactly once in topological order; batches preserve captured state, wrong-history traversals fail, and completion publishes the matching cursor. | Table completeness, candidate assembly/sort/dedup, record mapping, history identity and cursor publication. |
+| Consistent materialization | Every required change appears exactly once in topological order; batches preserve captured state, wrong-history traversals fail, and completion publishes the matching cursor. | Table completeness and clock meaning, record mapping, history identity and cursor publication. |
 | Compaction | Certificate retirement preserves delivered/admitted history and the evidence required to export it. | `history/admit.rs::add_certificate`, canonical fragment containment, inventory coverage and evidence retention. |
 | Sync convergence to minimal trees | Equivalent logical histories converge to the same irredundant canonical inventory under sufficient delivery/acknowledgment. | Specify minimality precisely over fragment coverage, prove canonical nesting/retirement and export/admission transitions, and state fairness assumptions. Successful delivery alone must not be treated as an acknowledgment. |
 | Attestation completion | Complete evidence and admitted dependencies cause eligible signed drafts to be admitted; incomplete evidence never does. | `History::sign` / admission advancement, `coverage`, `assemble`, fixed-point progress and signature assumptions. |
@@ -35,9 +35,10 @@ when their stages begin.
 3. Verify view-head resolution and the production permission callback. Filter
    unavailable frontier heads before ancestry, select the stored author and
    discharge `compiled_bounds` from real maps and arrays.
-4. Verify candidate assembly, sorting/deduplication and captured traversal
-   construction. Complete difference enumeration is already checked against the
-   supplied tables; their concrete completeness still comes from step 1.
+4. Candidate assembly and sorting/deduplication now establish the batch model's
+   pending contract under explicit table/clock premises. Prove captured traversal
+   construction establishes those premises and captures the matching fields.
+   Concrete table completeness still comes from step 1.
 5. Verify the actual emitter's hash/payload mapping, visibility, progress,
    wrong-history rejection and completed-cursor publication. Compose these with
    the public `History::changes` / `next_changes` wrappers.
