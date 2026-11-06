@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'sorted reconstruction replaces a tip with zero',
+        'stockfoil/src/verified/tree.rs',
+        'let (chain, tip) = entries[mid];',
+        'let (chain, _) = entries[mid]; let tip = NodeIdx::new(0);',
+        'last',
+    ),
+    (
+        'sorted reconstruction swaps children',
+        'stockfoil/src/verified/tree.rs',
+        'let out = Self::node(chain, tip, left, right);',
+        'let out = Self::node(chain, tip, right, left);',
+        'last',
+    ),
+    (
+        'tip table shifts chain ids',
+        'stockfoil/src/verified/tree.rs',
+        'entries.push((i as ChainId, tips[i]));',
+        'entries.push(((i + 1) as ChainId, tips[i]));',
+        'last',
+    ),
+    (
         'union ignores the smaller tree',
         'stockfoil/src/verified/tree.rs',
         'let next = iter.next();',

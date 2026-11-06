@@ -28,31 +28,6 @@ impl Clock {
         Self::from_sorted(&entries)
     }
 
-    /// A clock containing every node, from a table of chain tips.
-    pub fn from_tips(tips: &[NodeIdx]) -> Self {
-        let entries: Vec<_> = tips
-            .iter()
-            .enumerate()
-            .map(|(chain, &tip)| (chain as ChainId, tip))
-            .collect();
-        Self::from_sorted(&entries)
-    }
-
-    /// A balanced tree from entries sorted by chain, in linear time.
-    fn from_sorted(entries: &[(ChainId, NodeIdx)]) -> Self {
-        if entries.is_empty() {
-            return Self::default();
-        }
-        let mid = entries.len() / 2;
-        let (chain, tip) = entries[mid];
-        Self::node(
-            chain,
-            tip,
-            Self::from_sorted(&entries[..mid]),
-            Self::from_sorted(&entries[mid + 1..]),
-        )
-    }
-
     /// Visit every tree entry, identified by address, for memory accounting.
     #[cfg(test)]
     pub fn for_each_entry(&self, visit: &mut impl FnMut(*const ()) -> bool) {

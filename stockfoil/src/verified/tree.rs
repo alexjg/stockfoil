@@ -617,6 +617,107 @@ impl Clock {
         big
     }
 
+    pub open spec fn sorted_entries(entries: Seq<(ChainId, NodeIdx)>) -> bool {
+        forall|i: int, j: int| 0 <= i < j < entries.len() ==> entries[i].0 < entries[j].0
+    }
+
+    pub closed spec fn reconstructed_height(n: nat) -> nat
+        decreases n,
+    {
+        if n == 0 { 0 } else { 1 + Self::reconstructed_height(n / 2) }
+    }
+
+    proof fn reconstructed_height_step(n: nat)
+        ensures Self::reconstructed_height(n) <= Self::reconstructed_height(n + 1)
+            <= Self::reconstructed_height(n) + 1,
+        decreases n,
+    {
+        if n > 0 {
+            Self::reconstructed_height_step(n / 2);
+            assert(n / 2 <= (n + 1) / 2 <= n / 2 + 1);
+        }
+    }
+
+    /// Build a balanced tree from strictly sorted entries in linear time.
+    #[verifier::rlimit(30)]
+    pub(crate) fn from_sorted(entries: &[(ChainId, NodeIdx)]) -> (out: Self)
+        requires Self::sorted_entries(entries@), entries.len() <= u32::MAX,
+        ensures out.valid(), out.sequence() == entries@, out.size() == entries.len(),
+            out.depth() == Self::reconstructed_height(entries.len() as nat),
+        decreases entries.len(),
+    {
+        if entries.is_empty() {
+            return Self::default();
+        }
+        let mid = entries.len() / 2;
+        let (chain, tip) = entries[mid];
+        let left = Self::from_sorted(&entries[..mid]);
+        let right = Self::from_sorted(&entries[mid + 1..]);
+        proof {
+            left.sequence_correct(); right.sequence_correct();
+            left.height_fits(); right.height_fits();
+            if mid > 0 { Self::reconstructed_height_step((mid - 1) as nat); }
+            assert forall|c: ChainId| left.contents().contains_key(c) implies c < chain by {
+                let i = choose|i: int| 0 <= i < left.sequence().len() && left.sequence()[i].0 == c;
+                assert(entries@[i].0 == c);
+            }
+            assert forall|c: ChainId| right.contents().contains_key(c) implies chain < c by {
+                let i = choose|i: int| 0 <= i < right.sequence().len() && right.sequence()[i].0 == c;
+                assert(entries@[i + mid + 1].0 == c);
+            }
+        }
+        let out = Self::node(chain, tip, left, right);
+        assert(out.sequence() =~= entries@);
+        out
+    }
+
+    proof fn tip_table_contents(&self, tips: Seq<NodeIdx>, c: ChainId)
+        requires self.ordered(), tips.len() <= u32::MAX,
+            self.sequence() == Seq::new(tips.len(), |i: int| (i as u32, tips[i])),
+        ensures self.contents().contains_key(c) <==> c < tips.len(),
+            c < tips.len() ==> self.contents().contains_key(c) && self.contents()[c] == tips[c as int],
+    {
+        self.sequence_correct();
+        if c < tips.len() {
+            assert(self.sequence()[c as int] == (c, tips[c as int]));
+            assert(self.contents().contains_key(self.sequence()[c as int].0));
+            assert(self.contents()[self.sequence()[c as int].0] == self.sequence()[c as int].1);
+        } else if self.contents().contains_key(c) {
+            let i = choose|i: int| 0 <= i < self.sequence().len() && self.sequence()[i].0 == c;
+            assert(self.sequence()[i] == (i as u32, tips[i]));
+        }
+    }
+
+    /// A clock containing every node, from a table of chain tips.
+    pub fn from_tips(tips: &[NodeIdx]) -> (out: Self)
+        requires tips.len() <= u32::MAX,
+        ensures out.valid(), out.size() == tips.len(),
+            forall|c: ChainId| #[trigger] out.contents().contains_key(c) <==> c < tips.len(),
+            forall|c: ChainId| c < tips.len() ==> out.contents().contains_key(c) && #[trigger] out.contents()[c] == tips[c as int],
+    {
+        let mut entries = Vec::with_capacity(tips.len());
+        let mut i = 0;
+        while i < tips.len()
+            invariant i <= tips.len(), tips.len() <= u32::MAX, entries.len() == i,
+                forall|j: int| 0 <= j < entries.len() ==> entries[j] == (j as u32, tips[j]),
+            decreases tips.len() - i,
+        {
+            entries.push((i as ChainId, tips[i]));
+            i += 1;
+        }
+        let out = Self::from_sorted(&entries);
+        proof {
+            assert(out.sequence() =~= Seq::new(tips.len() as nat, |i: int| (i as u32, tips@[i])));
+            assert forall|c: ChainId| #[trigger] out.contents().contains_key(c) <==> c < tips.len() by {
+                out.tip_table_contents(tips@, c);
+            }
+            assert forall|c: ChainId| c < tips.len() implies out.contents().contains_key(c) && #[trigger] out.contents()[c] == tips[c as int] by {
+                out.tip_table_contents(tips@, c);
+            }
+        }
+        out
+    }
+
     pub closed spec fn contents(&self) -> Map<ChainId, NodeIdx>
         decreases self,
     {
