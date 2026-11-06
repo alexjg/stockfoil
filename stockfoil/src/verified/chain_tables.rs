@@ -27,6 +27,44 @@ pub(crate) open spec fn extended(tables: Seq<Seq<NodeIdx>>, chain: u32, position
     else { tables.push(seq![position]) }
 }
 
+pub(crate) open spec fn table_layout(tables: Seq<Seq<NodeIdx>>, chains: Seq<u32>) -> bool {
+    &&& forall|c: int, node: NodeIdx| 0 <= c < tables.len() && tables[c].contains(node)
+        ==> node@ < chains.len() && chains[node@ as int] == c
+    &&& forall|node: NodeIdx| node@ < chains.len() ==> chains[node@ as int] < tables.len()
+        && tables[chains[node@ as int] as int].contains(node)
+}
+
+pub(crate) proof fn extension_preserves_layout(
+    tables: Seq<Seq<NodeIdx>>, chains: Seq<u32>, chain: u32, position: NodeIdx,
+)
+    requires table_layout(tables, chains), chain <= tables.len(), position@ == chains.len(),
+    ensures table_layout(extended(tables, chain, position), chains.push(chain)),
+{
+    broadcast use vstd::seq_lib::lemma_seq_contains_after_push;
+    let next = extended(tables, chain, position);
+    let labels = chains.push(chain);
+    assert forall|c: int, node: NodeIdx| 0 <= c < next.len() && next[c].contains(node) implies
+        node@ < labels.len() && labels[node@ as int] == c by {
+        if node == position {
+            if c != chain { assert(tables[c].contains(node)); }
+        } else {
+            assert(c < tables.len() && tables[c].contains(node));
+            assert(node@ < chains.len() && chains[node@ as int] == c);
+        }
+    }
+    assert forall|node: NodeIdx| node@ < labels.len() implies labels[node@ as int] < next.len()
+        && next[labels[node@ as int] as int].contains(node) by {
+        if node@ == chains.len() {
+            NodeIdx::same_index(node, position);
+            assert(next[chain as int].contains(position));
+        } else {
+            let c = chains[node@ as int];
+            assert(c < tables.len() && tables[c as int].contains(node));
+            assert(next[c as int].contains(node));
+        }
+    }
+}
+
 proof fn row_append(row: Seq<NodeIdx>, position: NodeIdx)
     requires row_ordered(row), row.len() > 0, row.last()@ < position@,
     ensures row_ordered(row.push(position)),

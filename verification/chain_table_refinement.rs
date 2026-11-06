@@ -1,44 +1,13 @@
 //! Checked table updates establish the candidate model's complete-table layout.
-//! History must still connect the ghost chain labels to its actual stored nodes.
+//! Storage now supplies these chain labels from its actual stored nodes.
 use vstd::prelude::*;
 use crate::clock::{NodeIdx, below};
-use crate::chain_tables::{self, valid, extended};
+use crate::chain_tables::{self, valid, extension_preserves_layout};
 use crate::difference::tables_view;
 use crate::candidate_refinement::{table_layout, members};
 use crate::tree::Clock;
 
 verus! {
-
-pub(crate) proof fn extension_preserves_layout(
-    tables: Seq<Seq<NodeIdx>>, chains: Seq<u32>, chain: u32, position: NodeIdx,
-)
-    requires table_layout(tables, chains), chain <= tables.len(), position@ == chains.len(),
-    ensures table_layout(extended(tables, chain, position), chains.push(chain)),
-{
-    broadcast use vstd::seq_lib::lemma_seq_contains_after_push;
-    let next = extended(tables, chain, position);
-    let labels = chains.push(chain);
-    assert forall|c: int, node: NodeIdx| 0 <= c < next.len() && next[c].contains(node) implies
-        node@ < labels.len() && labels[node@ as int] == c by {
-        if node == position {
-            if c != chain { assert(tables[c].contains(node)); }
-        } else {
-            assert(c < tables.len() && tables[c].contains(node));
-            assert(node@ < chains.len() && chains[node@ as int] == c);
-        }
-    }
-    assert forall|node: NodeIdx| node@ < labels.len() implies labels[node@ as int] < next.len()
-        && next[labels[node@ as int] as int].contains(node) by {
-        if node@ == chains.len() {
-            NodeIdx::same_index(node, position);
-            assert(next[chain as int].contains(position));
-        } else {
-            let c = chains[node@ as int];
-            assert(c < tables.len() && tables[c as int].contains(node));
-            assert(next[c as int].contains(node));
-        }
-    }
-}
 
 pub(crate) fn append_for_layout(
     tips: &mut Vec<NodeIdx>, tables: &mut Vec<Vec<NodeIdx>>, chain: u32, position: NodeIdx,

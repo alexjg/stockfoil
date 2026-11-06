@@ -15,6 +15,21 @@ commits onto the new root; it does not reintroduce the removed stockfoil-core cr
 - Head-index normalization uses the same two explicit sorting/dedup contracts.
 - Checked history-ID allocation and its exhaustion regression remain in place.
 
+## Subsequent storage layer
+
+`verified/storage.rs` now owns the actual node representation, parameterized over
+opaque hash/payload/cache fields. History uses its checked empty construction,
+node append and parent-slice accessor. The append proof connects complete ordered
+chain tables to the labels in the stored nodes, preserves earlier nodes and parent
+slices, and establishes the new node's exact parent span with every parent earlier
+than the child. Its graph projection is a DAG; appending preserves old reachability.
+No duplicate topology representation or runtime graph scan was introduced.
+
+This closes the stored-label/fresh-index portion of the table boundary. It does
+not prove hash resolution, same-author ancestral chain selection, cache contents,
+permission compilation or the public wrappers. These remain caller obligations,
+along with explicit finite-capacity bounds. No new library contracts were added.
+
 ## Coverage changed by the rewrite
 
 `history/traversal.rs` now retains chain intervals and emits ancestors first,

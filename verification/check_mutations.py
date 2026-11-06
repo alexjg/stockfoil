@@ -13,6 +13,48 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'storage overwrites the parent span start',
+        'stockfoil/src/verified/storage.rs',
+        'node.parents_start = ids.len();',
+        'node.parents_start = 0;',
+        'last',
+    ),
+    (
+        'storage drops the parent span length',
+        'stockfoil/src/verified/storage.rs',
+        'node.parents_len = incoming.len() as u32;',
+        'node.parents_len = 0;',
+        'last',
+    ),
+    (
+        'storage inserts a self-parent',
+        'stockfoil/src/verified/storage.rs',
+        'ids.push(incoming[i]);',
+        'ids.push(position);',
+        'last',
+    ),
+    (
+        'storage overwrites the selected chain',
+        'stockfoil/src/verified/storage.rs',
+        '    nodes.push(node);',
+        '    node.chain = 0; nodes.push(node);',
+        'last',
+    ),
+    (
+        'storage clears previously delivered nodes',
+        'stockfoil/src/verified/storage.rs',
+        '    nodes.push(node);',
+        '    nodes.clear(); nodes.push(node);',
+        'last',
+    ),
+    (
+        'parent slice reads a different node span',
+        'stockfoil/src/verified/storage.rs',
+        '&ids[node.parents_start..node.parents_start + node.parents_len as usize]',
+        '&ids[0..node.parents_len as usize]',
+        'last',
+    ),
+    (
         'chain append records the wrong current tip',
         'stockfoil/src/verified/chain_tables.rs',
         'tips[chain as usize] = position;',

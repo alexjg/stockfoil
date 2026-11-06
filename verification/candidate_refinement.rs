@@ -4,15 +4,9 @@ use vstd::prelude::*;
 use crate::clock::{NodeIdx, below};
 use crate::tree::Clock;
 use crate::{candidates, difference, materialization};
+pub(crate) use crate::chain_tables::table_layout;
 
 verus! {
-
-pub(crate) open spec fn table_layout(tables: Seq<Seq<NodeIdx>>, chains: Seq<u32>) -> bool {
-    &&& forall|c: int, node: NodeIdx| 0 <= c < tables.len() && tables[c].contains(node)
-        ==> node@ < chains.len() && chains[node@ as int] == c
-    &&& forall|node: NodeIdx| node@ < chains.len() ==> chains[node@ as int] < tables.len()
-        && tables[chains[node@ as int] as int].contains(node)
-}
 
 pub(crate) open spec fn members(clock: &Clock, chains: Seq<u32>) -> ISet<int> {
     ISet::new(|a: int| 0 <= a < chains.len() && below(clock.lookup(chains[a]), a as usize))

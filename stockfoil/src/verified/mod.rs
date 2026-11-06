@@ -5,4 +5,5 @@ pub(crate) mod clock;
 pub(crate) mod difference;
 pub(crate) mod events;
 pub(crate) mod stdlib;
+pub(crate) mod storage;
 pub(crate) mod tree;

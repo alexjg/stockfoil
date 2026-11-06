@@ -38,21 +38,7 @@ use std::sync::{Arc, OnceLock};
 
 pub(crate) use crate::verified::clock::NodeIdx;
 
-#[derive(Debug)]
-struct Node {
-    hash: CommitHash,
-    payload: PayloadId,
-    parents_start: usize,
-    parents_len: u32,
-    chain: ChainId,
-    depth: u8,
-    admitted: bool,
-    /// Member of some admitted fragment certificate.
-    in_fragment: bool,
-    /// Longest path since a node with an eagerly cached clock.
-    uncached_depth: u8,
-    clock: OnceLock<Arc<Clock>>,
-}
+type Node = crate::verified::storage::Node<CommitHash, PayloadId, OnceLock<Arc<Clock>>>;
 
 /// Signature evidence retained for export: `author` signed `commit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,14 +116,15 @@ impl Default for History {
 
 impl History {
     pub fn new() -> Self {
+        let (nodes, parent_ids, chain_tips, chain_nodes) = crate::verified::storage::empty();
         Self {
             id: allocate_history_id(&NEXT_HISTORY_ID),
-            nodes: Vec::new(),
-            parent_ids: Vec::new(),
+            nodes,
+            parent_ids,
             by_hash: HashMap::new(),
-            chain_tips: Vec::new(),
+            chain_tips,
             chain_authors: Vec::new(),
-            chain_nodes: Vec::new(),
+            chain_nodes,
             author_chains: HashMap::new(),
             heads: BTreeSet::new(),
             admitted_heads: BTreeSet::new(),
@@ -462,7 +449,7 @@ impl History {
 
     fn parent_nodes(&self, idx: NodeIdx) -> &[NodeIdx] {
         let node = self.node(idx);
-        &self.parent_ids[node.parents_start..node.parents_start + node.parents_len as usize]
+        crate::verified::storage::parent_slice(node, &self.parent_ids)
     }
 
     fn bump_epoch(&mut self) {
@@ -479,12 +466,14 @@ impl History {
         admitted: bool,
     ) -> NodeIdx {
         debug_assert!(!self.by_hash.contains_key(&hash));
-        let idx = NodeIdx::new(u32::try_from(self.nodes.len()).expect("node index space"));
-        let parents_start = self.parent_ids.len();
+        u32::try_from(self.nodes.len()).expect("node index space");
+        let parent_nodes: Vec<_> = parents.iter().map(|p| self.by_hash[p]).collect();
+        u32::try_from(parent_nodes.len()).expect("parent count");
         self.parent_ids
-            .extend(parents.iter().map(|p| self.by_hash[p]));
-        let parent_nodes = self.parent_ids[parents_start..].to_vec();
-        let chain = self.assign_chain(author, &parent_nodes, idx);
+            .len()
+            .checked_add(parent_nodes.len())
+            .expect("parent space");
+        let chain = self.assign_chain(author, &parent_nodes);
         let depth = depth(&hash);
         let uncached_depth = parent_nodes
             .iter()
@@ -496,18 +485,21 @@ impl History {
             self.heads.remove(p);
         }
         self.heads.insert(hash);
-        self.nodes.push(Node {
-            hash,
-            payload,
-            parents_start,
-            parents_len: u32::try_from(parent_nodes.len()).expect("parent count"),
-            chain,
-            depth: depth as u8,
-            admitted: false,
-            in_fragment: false,
-            uncached_depth: if cache_clock { 0 } else { uncached_depth },
-            clock: OnceLock::new(),
-        });
+        let idx = crate::verified::storage::append(
+            &mut self.nodes,
+            &mut self.parent_ids,
+            &mut self.chain_tips,
+            &mut self.chain_nodes,
+            &parent_nodes,
+            Node::new(
+                hash,
+                payload,
+                chain,
+                depth as u8,
+                if cache_clock { 0 } else { uncached_depth },
+                OnceLock::new(),
+            ),
+        );
         self.by_hash.insert(hash, idx);
         if cache_clock {
             self.clock(idx);
@@ -539,7 +531,7 @@ impl History {
         self.admitted_heads.insert(self.node(idx).hash);
     }
 
-    fn assign_chain(&mut self, author: Author, parents: &[NodeIdx], position: NodeIdx) -> ChainId {
+    fn assign_chain(&mut self, author: Author, parents: &[NodeIdx]) -> ChainId {
         // Ordinary sequential edits extend a direct parent's chain.
         let direct = parents
             .iter()
@@ -564,21 +556,9 @@ impl History {
                 .find(|&chain| history.contains(chain, self.chain_tips[chain as usize]))
         });
         if let Some(chain) = reusable {
-            crate::verified::chain_tables::append(
-                &mut self.chain_tips,
-                &mut self.chain_nodes,
-                chain,
-                position,
-            );
             chain
         } else {
             let chain = ChainId::try_from(self.chain_tips.len()).expect("chain space");
-            crate::verified::chain_tables::append(
-                &mut self.chain_tips,
-                &mut self.chain_nodes,
-                chain,
-                position,
-            );
             self.chain_authors.push(author);
             self.author_chains.entry(author).or_default().push(chain);
             chain

@@ -134,6 +134,41 @@ fn random_view(rng: &mut StdRng, model: &Model, keys: &[ed25519_dalek::SigningKe
 }
 
 #[test]
+fn stored_topology_matches_hash_graph() {
+    for seed in 0..8 {
+        let (history, model, _) = random_history(seed, 48);
+        let mut end = 0;
+        for (i, node) in history.nodes.iter().enumerate() {
+            assert_eq!(node.parents_start, end);
+            end += node.parents_len as usize;
+            let parents = &history.parent_ids[node.parents_start..end];
+            assert!(parents.iter().all(|p| p.index() < i));
+            let hashes: HashSet<_> = parents.iter().map(|p| history.node(*p).hash).collect();
+            assert_eq!(hashes, model.parents[&node.hash].iter().copied().collect());
+            assert_eq!(node.hash, model.order[i]);
+            assert_eq!(node.payload, i as PayloadId);
+            assert_eq!(
+                history.chain_authors[node.chain as usize],
+                model.authors[&node.hash]
+            );
+        }
+        assert_eq!(end, history.parent_ids.len());
+        assert_eq!(history.chain_tips.len(), history.chain_nodes.len());
+        for (chain, row) in history.chain_nodes.iter().enumerate() {
+            let expected: Vec<_> = history
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.chain as usize == chain)
+                .map(|(i, _)| super::NodeIdx::new(i as u32))
+                .collect();
+            assert_eq!(row, &expected);
+            assert_eq!(row.last(), Some(&history.chain_tips[chain]));
+        }
+    }
+}
+
+#[test]
 fn topology_queries_match_the_model() {
     for seed in 0..20 {
         let (history, model, _) = random_history(seed, 120);

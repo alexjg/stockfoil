@@ -232,7 +232,8 @@ the original suite reports 140 checks with `--no-cheating`; 52 mutation checks
 exercise the combined suite.
 
 The next construction layer moves actual chain-tip and row updates into
-`verified/chain_tables.rs`, called by both branches of `assign_chain`. It proves
+`verified/chain_tables.rs`, originally called by both branches of `assign_chain`
+and now called by `verified/storage.rs::append`. It proves
 exact writes and preservation of nonempty strictly increasing rows with their
 last node as tip. A refinement proves that appending a fresh node preserves the
 candidate model's complete table layout, and that `Clock::from_tips` over valid
@@ -245,3 +246,18 @@ stored nodes, verify chain selection and author mappings, establish fresh indice
 and capacity, and verify the actual cached walk. The latest baseline is 143 strict
 checks and 154 full-suite checks with the same two stdlib contracts. Three table
 mutations bring the mutation suite to 55 cases.
+
+The subsequent storage layer verifies the actual generic node representation,
+empty construction, packed parent writes, node append and parent-slice access.
+Chain labels are projected from stored nodes, rather than supplied as an unrelated
+ghost sequence. Appending preserves complete sorted chain tables, the exact new
+metadata, earlier nodes and parent slices, and parents-before-child order. The
+stored graph is a DAG, and append preserves every old reachability relation.
+History uses these checked functions directly; hashes, payload IDs and cache
+values are opaque fields preserved by the storage proof.
+
+Stage 3 still needs hash-map resolution, chain selection and author invariants,
+capacity discharge at callers, and the concrete cached walk. The latest baseline
+is 153 strict checks and 163 full-suite checks with the same two stdlib contracts.
+Six new mutations bring the suite to 61 cases; the nine storage/table mutations
+were rerun for this layer, not the entire mutation sweep.

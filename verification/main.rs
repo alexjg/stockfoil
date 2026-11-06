@@ -35,3 +35,7 @@ pub mod candidate_examples;
 pub mod chain_tables;
 #[cfg(stockfoil_stdlib)]
 pub mod chain_table_refinement;
+
+#[path = "../stockfoil/src/verified/storage.rs"]
+pub mod storage;
+pub mod storage_refinement;

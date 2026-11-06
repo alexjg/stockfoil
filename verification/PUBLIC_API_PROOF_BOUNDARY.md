@@ -34,9 +34,10 @@ when their stages begin.
 1. Establish the concrete `History` invariant: parent indices precede children,
    hash lookup matches nodes, authors and chains agree, chain tables are complete
    and unique, and all counts satisfy the checked clock capacity contracts.
-   Actual table append now preserves a complete layout and valid tips, given a
-   fresh node index and correct prior labels; connect those labels and premises
-   to History's stored nodes and construction paths.
+   Actual storage initialization and append now preserve packed parent topology,
+   complete tables and valid tips using the actual stored node labels. Fresh
+   indices come from the node vector length. Hash lookup, selected-chain semantics,
+   author mapping and caller capacity bounds remain unverified.
 2. Verify chain selection and append preserve that invariant. Prove the actual
    cached walk and multi-head summary builder summarize precisely parent-edge
    ancestry, including reuse after append.
