@@ -718,6 +718,180 @@ impl Clock {
         out
     }
 
+    pub open spec fn masked_value(tip: NodeIdx, bound: Option<NodeIdx>) -> Option<NodeIdx> {
+        match bound {
+            None => None,
+            Some(limit) => Some(if tip@ <= limit@ { tip } else { limit }),
+        }
+    }
+
+    pub closed spec fn masked_prefix(source: Seq<(ChainId, NodeIdx)>, policy: spec_fn(ChainId, NodeIdx) -> Option<NodeIdx>, n: nat) -> Seq<(ChainId, NodeIdx)>
+        recommends n <= source.len(),
+        decreases n,
+    {
+        if n == 0 { Seq::empty() } else {
+            let entry = source[(n - 1) as int];
+            let previous = Self::masked_prefix(source, policy, (n - 1) as nat);
+            match Self::masked_value(entry.1, policy(entry.0, entry.1)) {
+                None => previous,
+                Some(tip) => previous.push((entry.0, tip)),
+            }
+        }
+    }
+
+    proof fn masked_prefix_sorted(source: Seq<(ChainId, NodeIdx)>, policy: spec_fn(ChainId, NodeIdx) -> Option<NodeIdx>, n: nat)
+        requires Self::sorted_entries(source), n <= source.len(),
+        ensures Self::sorted_entries(Self::masked_prefix(source, policy, n)),
+            Self::masked_prefix(source, policy, n).len() <= n,
+            forall|j: int| 0 <= j < Self::masked_prefix(source, policy, n).len() && n < source.len() ==>
+                Self::masked_prefix(source, policy, n)[j].0 < source[n as int].0,
+        decreases n,
+    {
+        if n > 0 {
+            Self::masked_prefix_sorted(source, policy, (n - 1) as nat);
+            let previous = Self::masked_prefix(source, policy, (n - 1) as nat);
+            let out = Self::masked_prefix(source, policy, n);
+            assert forall|i: int, j: int| 0 <= i < j < out.len() implies out[i].0 < out[j].0 by {
+                if j < previous.len() { assert(out[i] == previous[i] && out[j] == previous[j]); }
+                else { assert(out[i] == previous[i] && out[j].0 == source[(n - 1) as int].0); }
+            }
+            assert forall|j: int| 0 <= j < out.len() && n < source.len() implies out[j].0 < source[n as int].0 by {
+                if j < previous.len() { assert(out[j] == previous[j]); }
+                else { assert(out[j].0 == source[(n - 1) as int].0); }
+            }
+        }
+    }
+
+    pub open spec fn kept_entry(source: Seq<(ChainId, NodeIdx)>, policy: spec_fn(ChainId, NodeIdx) -> Option<NodeIdx>, n: nat, chain: ChainId, value: NodeIdx) -> bool {
+        exists|i: int| 0 <= i < n && source[i].0 == chain
+            && Self::masked_value(source[i].1, policy(source[i].0, source[i].1)) == Some(value)
+    }
+
+    proof fn masked_prefix_membership(source: Seq<(ChainId, NodeIdx)>, policy: spec_fn(ChainId, NodeIdx) -> Option<NodeIdx>, n: nat, chain: ChainId, value: NodeIdx)
+        requires n <= source.len(),
+        ensures Self::masked_prefix(source, policy, n).contains((chain, value)) == Self::kept_entry(source, policy, n, chain, value),
+        decreases n,
+    {
+        broadcast use vstd::seq_lib::lemma_seq_contains_after_push;
+        if n > 0 {
+            Self::masked_prefix_membership(source, policy, (n - 1) as nat, chain, value);
+            let out = Self::masked_prefix(source, policy, n);
+            let previous = Self::masked_prefix(source, policy, (n - 1) as nat);
+            let last = source[(n - 1) as int];
+            assert(Self::kept_entry(source, policy, n, chain, value) ==
+                (Self::kept_entry(source, policy, (n - 1) as nat, chain, value) ||
+                    (last.0 == chain && Self::masked_value(last.1, policy(last.0, last.1)) == Some(value)))) by {
+                if Self::kept_entry(source, policy, n, chain, value) {
+                    let i = choose|i: int| 0 <= i < n && source[i].0 == chain
+                        && Self::masked_value(source[i].1, policy(source[i].0, source[i].1)) == Some(value);
+                    if i < n - 1 { assert(Self::kept_entry(source, policy, (n - 1) as nat, chain, value)); }
+                }
+                if Self::kept_entry(source, policy, (n - 1) as nat, chain, value) {
+                    let i = choose|i: int| 0 <= i < n - 1 && source[i].0 == chain
+                        && Self::masked_value(source[i].1, policy(source[i].0, source[i].1)) == Some(value);
+                    assert(Self::kept_entry(source, policy, n, chain, value));
+                }
+            }
+        }
+    }
+
+    proof fn mask_coordinate(&self, out: &Self, policy: spec_fn(ChainId, NodeIdx) -> Option<NodeIdx>, c: ChainId)
+        requires self.ordered(), out.ordered(),
+            out.sequence() == Self::masked_prefix(self.sequence(), policy, self.sequence().len()),
+        ensures out.contents().contains_key(c) <==> self.contents().contains_key(c) && policy(c, self.contents()[c]) is Some,
+            out.contents().contains_key(c) ==> out.contents()[c] == Self::masked_value(self.contents()[c], policy(c, self.contents()[c])).unwrap(),
+    {
+        self.sequence_correct(); out.sequence_correct();
+        let source = self.sequence();
+        if out.contents().contains_key(c) {
+            let j = choose|j: int| 0 <= j < out.sequence().len() && out.sequence()[j].0 == c;
+            let value = out.sequence()[j].1;
+            assert(out.sequence().contains((c, value)));
+            Self::masked_prefix_membership(source, policy, source.len(), c, value);
+            let i = choose|i: int| 0 <= i < source.len() && source[i].0 == c
+                && Self::masked_value(source[i].1, policy(source[i].0, source[i].1)) == Some(value);
+            assert(self.contents()[c] == source[i].1);
+        } else if self.contents().contains_key(c) && policy(c, self.contents()[c]) is Some {
+            let i = choose|i: int| 0 <= i < source.len() && source[i].0 == c;
+            let value = Self::masked_value(self.contents()[c], policy(c, self.contents()[c])).unwrap();
+            assert(Self::masked_value(source[i].1, policy(source[i].0, source[i].1)) == Some(value));
+            Self::masked_prefix_membership(source, policy, source.len(), c, value);
+            let j = choose|j: int| 0 <= j < out.sequence().len() && out.sequence()[j] == (c, value);
+            assert(out.contents().contains_key(out.sequence()[j].0));
+        }
+    }
+
+    pub open spec fn callback_bound<F: FnMut(ChainId, NodeIdx) -> Option<NodeIdx>>(bound: F, c: ChainId, tip: NodeIdx) -> Option<NodeIdx> {
+        choose|r: Option<NodeIdx>| bound.ensures((c, tip), r)
+    }
+
+    /// Cap coordinates using the callback, preserving exact prefix membership.
+    pub fn mask<F: FnMut(ChainId, NodeIdx) -> Option<NodeIdx>>(
+        &self, mut bound: F,
+    ) -> (out: Self)
+        requires self.valid(),
+            forall|c: ChainId, p: NodeIdx| self.contents().contains_key(c) && self.contents()[c] == p ==> bound.requires((c, p)),
+            forall|c: ChainId, p: NodeIdx, a: Option<NodeIdx>, b: Option<NodeIdx>|
+                bound.ensures((c, p), a) && bound.ensures((c, p), b) ==> a == b,
+        ensures out.valid(), out.size() <= self.size(),
+            forall|c: ChainId| self.contents().contains_key(c) ==> bound.ensures((c, self.contents()[c]), Self::callback_bound(bound, c, self.contents()[c])),
+            out.sequence() == Self::masked_prefix(self.sequence(), |c: ChainId, p: NodeIdx| Self::callback_bound(bound, c, p), self.sequence().len()),
+            forall|c: ChainId| #[trigger] out.contents().contains_key(c) <==> self.contents().contains_key(c) && Self::callback_bound(bound, c, self.contents()[c]) is Some,
+            forall|c: ChainId| out.contents().contains_key(c) ==> #[trigger] out.contents()[c] == Self::masked_value(self.contents()[c], Self::callback_bound(bound, c, self.contents()[c])).unwrap(),
+    {
+        let ghost original_bound = bound;
+        let ghost policy = |c: ChainId, p: NodeIdx| Self::callback_bound(original_bound, c, p);
+        proof { self.sequence_correct(); }
+        let mut entries = Vec::new();
+        let mut iter = self.entries();
+        let ghost mut done: nat = 0;
+        loop
+            invariant self.valid(), done <= self.sequence().len(), iter.remaining() == self.sequence().skip(done as int),
+                entries@ == Self::masked_prefix(self.sequence(), policy, done),
+                forall|c: ChainId, p: NodeIdx| self.contents().contains_key(c) && self.contents()[c] == p ==> bound.requires((c, p)),
+                forall|c: ChainId, p: NodeIdx, r: Option<NodeIdx>| bound.ensures((c, p), r) ==> r == policy(c, p),
+                forall|c: ChainId, p: NodeIdx, r: Option<NodeIdx>| bound.ensures((c, p), r) == original_bound.ensures((c, p), r),
+                forall|i: int| 0 <= i < done ==> original_bound.ensures((self.sequence()[i].0, self.sequence()[i].1), policy(self.sequence()[i].0, self.sequence()[i].1)),
+            ensures entries@ == Self::masked_prefix(self.sequence(), policy, self.sequence().len()),
+                forall|i: int| 0 <= i < self.sequence().len() ==> original_bound.ensures((self.sequence()[i].0, self.sequence()[i].1), policy(self.sequence()[i].0, self.sequence()[i].1)),
+            decreases iter.remaining().len(),
+        {
+            let coordinate = iter.next();
+            match coordinate {
+                None => break,
+                Some((chain, tip)) => {
+                    proof {
+                        self.sequence_correct();
+                        assert(self.sequence()[done as int] == (chain, tip));
+                    }
+                    let limit = bound(chain, tip);
+                    if let Some(value) = super::clock::cap(tip, limit) {
+                        entries.push((chain, value));
+                    }
+                    proof { done = done + 1; }
+                },
+            }
+        }
+        proof {
+            self.sequence_correct();
+            Self::masked_prefix_sorted(self.sequence(), policy, self.sequence().len());
+        }
+        let out = Self::from_sorted(&entries);
+        proof {
+            assert forall|c: ChainId| self.contents().contains_key(c) implies original_bound.ensures((c, self.contents()[c]), policy(c, self.contents()[c])) by {
+                let i = choose|i: int| 0 <= i < self.sequence().len() && self.sequence()[i].0 == c;
+                assert(self.sequence()[i] == (c, self.contents()[c]));
+            }
+            assert forall|c: ChainId| #[trigger] out.contents().contains_key(c) <==> self.contents().contains_key(c) && policy(c, self.contents()[c]) is Some by {
+                self.mask_coordinate(&out, policy, c);
+            }
+            assert forall|c: ChainId| out.contents().contains_key(c) implies #[trigger] out.contents()[c] == Self::masked_value(self.contents()[c], policy(c, self.contents()[c])).unwrap() by {
+                self.mask_coordinate(&out, policy, c);
+            }
+        }
+        out
+    }
+
     pub closed spec fn contents(&self) -> Map<ChainId, NodeIdx>
         decreases self,
     {
