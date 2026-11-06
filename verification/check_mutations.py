@@ -13,6 +13,20 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'coordinate refinement shifts chain ids',
+        'verification/tree_refinement.rs',
+        '(e.0 as usize, e.1)',
+        '((e.0 as usize + 1) as usize, e.1)',
+        'last',
+    ),
+    (
+        'coordinate bounds drop every permission',
+        'verification/tree_refinement.rs',
+        'policy(e.0, e.1))',
+        'None)',
+        'last',
+    ),
+    (
         'mask fails to cap expanding bounds',
         'stockfoil/src/verified/tree.rs',
         'if let Some(value) = super::clock::cap(tip, limit) {',

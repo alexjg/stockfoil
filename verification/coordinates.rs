@@ -1,5 +1,5 @@
-//! Mathematical view of persistent AVL clock entries. Establishing this view
-//! for tree operations remains a production refinement obligation.
+//! Mathematical view of persistent AVL clock entries. `tree_refinement` connects
+//! this view to actual tree lookup and masking; history callers remain to prove.
 use vstd::prelude::*;
 pub(crate) use crate::clock::NodeIdx;
 use crate::clock::below;

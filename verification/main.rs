@@ -15,3 +15,4 @@ pub mod materialization;
 #[path = "../stockfoil/src/verified/tree.rs"]
 pub mod tree;
 pub mod tree_examples;
+pub mod tree_refinement;
