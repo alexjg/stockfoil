@@ -485,11 +485,13 @@ impl History {
             self.heads.remove(p);
         }
         self.heads.insert(hash);
-        let idx = crate::verified::storage::append(
+        let new_chain = chain as usize == self.chain_tips.len();
+        let idx = crate::verified::chain_selection::append(
             &mut self.nodes,
             &mut self.parent_ids,
             &mut self.chain_tips,
             &mut self.chain_nodes,
+            &mut self.chain_authors,
             &parent_nodes,
             Node::new(
                 hash,
@@ -499,7 +501,11 @@ impl History {
                 if cache_clock { 0 } else { uncached_depth },
                 OnceLock::new(),
             ),
+            author,
         );
+        if new_chain {
+            self.author_chains.entry(author).or_default().push(chain);
+        }
         self.by_hash.insert(hash, idx);
         if cache_clock {
             self.clock(idx);
@@ -531,17 +537,15 @@ impl History {
         self.admitted_heads.insert(self.node(idx).hash);
     }
 
-    fn assign_chain(&mut self, author: Author, parents: &[NodeIdx]) -> ChainId {
+    fn assign_chain(&self, author: Author, parents: &[NodeIdx]) -> ChainId {
         // Ordinary sequential edits extend a direct parent's chain.
-        let direct = parents
-            .iter()
-            .filter_map(|&p| {
-                let chain = self.node(p).chain;
-                (self.chain_authors[chain as usize] == author
-                    && self.chain_tips[chain as usize] == p)
-                    .then_some(chain)
-            })
-            .min();
+        let direct = crate::verified::chain_selection::direct(
+            &self.nodes,
+            &self.chain_tips,
+            &self.chain_authors,
+            parents,
+            &author,
+        );
         // Any same-author tip in the parents' down-set can precede this node.
         let reusable = direct.or_else(|| {
             if parents.is_empty() {
@@ -549,19 +553,16 @@ impl History {
             }
             // Check only this author's chains, not every chain in the history.
             let history = self.clock_for_heads(parents);
-            self.author_chains
-                .get(&author)?
-                .iter()
-                .copied()
-                .find(|&chain| history.contains(chain, self.chain_tips[chain as usize]))
+            crate::verified::chain_selection::ancestral(
+                self.author_chains.get(&author)?,
+                &self.chain_tips,
+                &history,
+            )
         });
         if let Some(chain) = reusable {
             chain
         } else {
-            let chain = ChainId::try_from(self.chain_tips.len()).expect("chain space");
-            self.chain_authors.push(author);
-            self.author_chains.entry(author).or_default().push(chain);
-            chain
+            ChainId::try_from(self.chain_tips.len()).expect("chain space")
         }
     }
 

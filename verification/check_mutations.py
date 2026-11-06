@@ -13,6 +13,62 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'author identity ignores the last byte',
+        'stockfoil/src/verified/author.rs',
+        'while i < 32',
+        'while i < 31',
+        'last',
+    ),
+    (
+        'direct selection ignores author identity',
+        'stockfoil/src/verified/chain_selection.rs',
+        'owners[chain as usize].same_as(author)',
+        'true',
+        'last',
+    ),
+    (
+        'direct selection reuses a stale chain member',
+        'stockfoil/src/verified/chain_selection.rs',
+        'tip.index() == parent.index()',
+        'true',
+        'last',
+    ),
+    (
+        'direct selection prefers the largest chain',
+        'stockfoil/src/verified/chain_selection.rs',
+        'if chain < c { chain } else { c }',
+        'if chain > c { chain } else { c }',
+        'last',
+    ),
+    (
+        'ancestral selection ignores tip coverage',
+        'stockfoil/src/verified/chain_selection.rs',
+        'if reached.contains(chain, tips[chain as usize])',
+        'if true',
+        'last',
+    ),
+    (
+        'ancestral selection skips later candidates',
+        'stockfoil/src/verified/chain_selection.rs',
+        '        i += 1;',
+        '        i = chains.len();',
+        'last',
+    ),
+    (
+        'chain registration omits the new author',
+        'stockfoil/src/verified/chain_selection.rs',
+        'owners.push(author);',
+        'let _ = author;',
+        'last',
+    ),
+    (
+        'chain registration stores the wrong author',
+        'stockfoil/src/verified/chain_selection.rs',
+        'owners.push(author);',
+        'owners.push(Author([0u8; 32]));',
+        'last',
+    ),
+    (
         'storage overwrites the parent span start',
         'stockfoil/src/verified/storage.rs',
         'node.parents_start = ids.len();',

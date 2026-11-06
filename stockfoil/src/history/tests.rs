@@ -116,6 +116,31 @@ fn an_author_reuses_one_chain_across_interleaved_authors() {
 }
 
 #[test]
+fn chain_selection_prefers_direct_tips_then_the_smallest_chain() {
+    let alice = key(1);
+    let bob = key(2);
+    let mut h = History::new();
+    let a = commit(&mut h, &alice, vec![], 0, "a-root");
+    let b = commit(&mut h, &alice, vec![], 0, "b-root");
+    let relay = commit(&mut h, &bob, vec![a, b], 0, "relay");
+    let chain = |h: &History, hash: &CommitHash| h.node(h.by_hash[hash]).chain;
+    assert!(chain(&h, &a) < chain(&h, &b));
+
+    // Both Alice tips are ancestors, but only b is a direct parent.
+    let direct = commit(&mut h, &alice, vec![relay, b], 0, "direct");
+    assert_eq!(chain(&h, &direct), chain(&h, &b));
+
+    // With two direct tips, the smallest chain ID wins.
+    let merge = commit(&mut h, &alice, vec![direct, a], 0, "merge");
+    assert_eq!(chain(&h, &merge), chain(&h, &a));
+
+    // A historical member cannot replace the current tip of its chain.
+    let fork = commit(&mut h, &alice, vec![a], 0, "fork");
+    assert_ne!(chain(&h, &fork), chain(&h, &a));
+    assert_ne!(chain(&h, &fork), chain(&h, &b));
+}
+
+#[test]
 fn drafts_admit_standalone_when_fragment_evidence_lies_elsewhere() {
     // Found by fuzzing: `a` is admitted only through Alice's signature on `h1`.
     // Carol's depth-1 draft on `a` has the canonical fragment {a, d}, which no

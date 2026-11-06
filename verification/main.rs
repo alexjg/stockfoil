@@ -39,3 +39,9 @@ pub mod chain_table_refinement;
 #[path = "../stockfoil/src/verified/storage.rs"]
 pub mod storage;
 pub mod storage_refinement;
+
+#[path = "../stockfoil/src/verified/author.rs"]
+pub mod author;
+#[path = "../stockfoil/src/verified/chain_selection.rs"]
+pub mod chain_selection;
+pub mod chain_selection_refinement;

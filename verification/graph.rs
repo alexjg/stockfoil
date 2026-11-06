@@ -156,7 +156,7 @@ pub proof fn expand_head(g: Graph, head: int)
     }
 }
 
-pub open spec fn chain_invariant(g: Graph, chains: Seq<usize>, authors: Seq<usize>) -> bool {
+pub open spec fn chain_invariant<A>(g: Graph, chains: Seq<usize>, authors: Seq<A>) -> bool {
     &&& dag(g)
     &&& chains.len() == g.len()
     &&& authors.len() == g.len()
@@ -200,9 +200,9 @@ pub proof fn clock_matches_history(
 
 // Reusing a same-author maximal chain tip in the parents' history preserves the
 // invariant, whether that tip is a direct parent or an indirect ancestor.
-pub proof fn extend_chain(
-    g: Graph, chains: Seq<usize>, authors: Seq<usize>, parents: ISet<int>,
-    chain: usize, author: usize, reuse: Option<int>,
+pub proof fn extend_chain<A>(
+    g: Graph, chains: Seq<usize>, authors: Seq<A>, parents: ISet<int>,
+    chain: usize, author: A, reuse: Option<int>,
 )
     requires
         chain_invariant(g, chains, authors),

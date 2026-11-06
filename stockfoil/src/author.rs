@@ -1,5 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Author([u8; 32]);
+pub use crate::verified::author::Author;
 
 impl Author {
     pub fn as_slice(&self) -> &[u8] {
@@ -51,5 +50,25 @@ impl std::error::Error for InvalidAuthor {}
 impl std::fmt::Display for InvalidAuthor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Author;
+
+    #[test]
+    fn checked_identity_comparison_covers_every_byte() {
+        let bytes = [0xa5; 32];
+        let author = Author::from(bytes);
+        assert!(author.same_as(&author));
+        for position in 0..32 {
+            let mut other = bytes;
+            other[position] ^= 0xff;
+            let other = Author::from(other);
+            assert_ne!(author, other);
+            assert!(!author.same_as(&other));
+            assert!(!other.same_as(&author));
+        }
     }
 }

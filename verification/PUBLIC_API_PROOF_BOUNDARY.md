@@ -19,7 +19,7 @@ not formal proofs of their wrappers.
 
 | Goal | Public boundary and intended property | Remaining work |
 | --- | --- | --- |
-| Authorized visibility | `History::changes` / `next_changes`: each before/after visibility bit equals the permission policy for its captured view, including inclusive and unavailable frontiers. | Concrete history/author mapping, ancestry summaries, permission compilation and emitter refinement. |
+| Authorized visibility | `Ancestry::participates` and events planned by `Materialization`: membership/visibility equals the permission policy for the captured view, including inclusive and unavailable frontiers. | Concrete history/author mapping, ancestry summaries, permission compilation and emitter refinement. |
 | Consistent materialization | Every required change appears exactly once in topological order; batches preserve captured state, wrong-history traversals fail, and completion publishes the matching cursor. | Table completeness and clock meaning, record mapping, history identity and cursor publication. |
 | Compaction | Certificate retirement preserves delivered/admitted history and the evidence required to export it. | `history/admit.rs::add_certificate`, canonical fragment containment, inventory coverage and evidence retention. |
 | Sync convergence to minimal trees | Equivalent logical histories converge to the same irredundant canonical inventory under sufficient delivery/acknowledgment. | Specify minimality precisely over fragment coverage, prove canonical nesting/retirement and export/admission transitions, and state fairness assumptions. Successful delivery alone must not be treated as an acknowledgment. |
@@ -36,21 +36,24 @@ when their stages begin.
    and unique, and all counts satisfy the checked clock capacity contracts.
    Actual storage initialization and append now preserve packed parent topology,
    complete tables and valid tips using the actual stored node labels. Fresh
-   indices come from the node vector length. Hash lookup, selected-chain semantics,
-   author mapping and caller capacity bounds remain unverified.
-2. Verify chain selection and append preserve that invariant. Prove the actual
-   cached walk and multi-head summary builder summarize precisely parent-edge
-   ancestry, including reuse after append.
+   indices come from the node vector length. Chain selection and author registration
+   now have checked contracts; hash lookup, the author-to-chain index, ancestry-clock
+   inputs and caller capacity bounds remain unverified.
+2. Chain search and append now preserve the single-author chain ancestry invariant
+   under explicit selector inputs. Prove the actual author-to-chain index and
+   cached walk/multi-head summary builder establish those inputs, including cache
+   reuse after append.
 3. Verify view-head resolution and the production permission callback. Filter
    unavailable frontier heads before ancestry, select the stored author and
    discharge `compiled_bounds` from real maps and arrays.
-4. Candidate assembly and sorting/deduplication now establish the batch model's
-   pending contract under explicit table/clock premises. Prove captured traversal
-   construction establishes those premises and captures the matching fields.
-   Concrete table completeness still comes from step 1.
-5. Verify the actual emitter's hash/payload mapping, visibility, progress,
-   wrong-history rejection and completed-cursor publication. Compose these with
-   the public `History::changes` / `next_changes` wrappers.
+4. The reference eager assembler establishes the old batch model's pending
+   contract under explicit table/clock premises. Prove the production lazy
+   Traversal's completeness, uniqueness, canonical ordering, progress and capture
+   semantics. The reference assembler is not a proof of that implementation.
+5. Verify the actual emitter's hash/payload mapping, visibility and progress;
+   compose these with `Materialization::plan`, `complete`, `step`, `update` and
+   Ledger/Document integration. Cover wrong-history/stale completion rejection,
+   checkpoints and publication of matching progress.
 6. Extend the invariant and proofs through certificate coverage, compaction and
    export/admission transitions for the remaining three goals.
 

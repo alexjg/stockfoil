@@ -26,9 +26,26 @@ than the child. Its graph projection is a DAG; appending preserves old reachabil
 No duplicate topology representation or runtime graph scan was introduced.
 
 This closes the stored-label/fresh-index portion of the table boundary. It does
-not prove hash resolution, same-author ancestral chain selection, cache contents,
-permission compilation or the public wrappers. These remain caller obligations,
-along with explicit finite-capacity bounds. No new library contracts were added.
+not by itself prove hash resolution, chain selection, cache contents, permission
+compilation or public wrappers. The subsequent selection layer is described below.
+No new library contracts were added.
+
+## Subsequent chain-selection layer
+
+The direct-parent and fallback searches now execute checked code in
+`verified/chain_selection.rs`. Direct selection compares all author bytes and
+requires a current tip, choosing the smallest eligible chain ID. Fallback keeps
+the supplied author's chain-list order and chooses its first clock-covered tip.
+Author registration is checked together with storage append. The graph refinement
+uses actual stored tables to prove maximality and freshness, then composes selection
+and append with the single-author chain ancestry theorem, now generic over the
+real Author type. Nonempty witnesses cover direct/indirect reuse, stale parents,
+fresh chains and a merge with reordered/repeated parents.
+
+The fallback still requires a correct author-to-chain index and an ancestry clock
+that represents the parents' causal past. Hash resolution, cached-walk correctness,
+caller capacity, permission compilation, traversal and public APIs remain open.
+The existing two stdlib assumptions are unchanged.
 
 ## Coverage changed by the rewrite
 

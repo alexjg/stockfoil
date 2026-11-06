@@ -124,6 +124,7 @@ pub(crate) fn append<H, P, C>(nodes: &mut Vec<Node<H, P, C>>, ids: &mut Vec<Node
         forall|i: int| 0 <= i < incoming.len() ==> incoming[i]@ < old(nodes).len(),
     ensures valid(final(nodes)@, final(ids)@, final(tips)@, tables_view(final(tables)@)),
         position@ == old(nodes).len(),
+        final(tips)@ == if node.chain < old(tips).len() { old(tips)@.update(node.chain as int, position) } else { old(tips)@.push(position) },
         final(nodes)@ == old(nodes)@.push(with_span(node, old(ids).len(), incoming.len() as u32)),
         final(ids)@ == old(ids)@ + incoming@,
         tables_view(final(tables)@) == chain_tables::extended(tables_view(old(tables)@), node.chain, position),

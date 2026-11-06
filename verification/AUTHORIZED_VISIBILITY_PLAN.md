@@ -261,3 +261,19 @@ capacity discharge at callers, and the concrete cached walk. The latest baseline
 is 153 strict checks and 163 full-suite checks with the same two stdlib contracts.
 Six new mutations bring the suite to 61 cases; the nine storage/table mutations
 were rerun for this layer, not the entire mutation sweep.
+
+The chain-selection layer verifies both production searches. The direct path
+checks actual author identity and current-tip equality and selects the smallest
+eligible chain. The fallback chooses the first clock-covered tip in the supplied
+chain list. Author registration and topology append now compose in checked code.
+A refinement derives maximal tips and fresh chain IDs from stored tables and
+proves preservation of the graph's single-author ancestry invariant. The graph
+chain theorem is generic over actual Author values; no identity or cryptographic
+axiom was introduced. Witnesses exercise direct reuse, indirect reuse through a
+different author, stale parents, fresh chains and merge ordering.
+
+Stage 3 still needs the actual author-to-chain map and cached ancestry computation
+to discharge the fallback's inputs, plus hash resolution and caller capacity.
+The baseline is 170 strict and 180 full-suite checks with the same two stdlib
+contracts. Eight new mutations bring the suite to 69; the eight new checks and
+three table mutations were rerun, not the full sweep.

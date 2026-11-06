@@ -40,10 +40,10 @@ passes, then uses `--mutation-only` to run the complete expanded suite and audit
 on each temporary mutation without repeating the subset pass.
 Compilation or tool setup failures do not count as mutation rejection.
 
-The original-suite baseline reports **153 verified, 0 errors**; the full suite
-reports **163 verified, 0 errors**, conditional on **two standard-library
+The original-suite baseline reports **170 verified, 0 errors**; the full suite
+reports **180 verified, 0 errors**, conditional on **two standard-library
 contracts**. These overlapping proof counts are not additive. The mutation suite
-contains 61 deliberate errors. The authorization plan records which stage these
+contains 69 deliberate errors. The authorization plan records which stage these
 results establish; the public API refinement remains unfinished.
 
 [CI](../.github/workflows/verus.yml) pins the Verus archive and SHA-256, runs the
@@ -77,6 +77,7 @@ implementations of their executable bodies:
 | `Clock::entries`, `Entries::next` | Actual Rust iterator returns precisely the remaining in-order sequence, terminates and stays exhausted. For ordered trees, the sequence contains every map entry exactly once in strictly increasing key order, with length equal to structural size. | Union, masking and interval differences |
 | `Clock::set`, `include` | Terminating path-copying replacement and pointwise maximum update preserve ordering, metadata and balance, with exact size changes and height growth at most one. Only a new coordinate needs size capacity. | Clock builders and union |
 | `Clock::balance` | Given balanced children whose heights differ by at most two, restores AVL balance while preserving ordering, the exact map and size, and valid metadata. Output height lies between the taller input child and one more than it. Explicit size/height capacity premises cover every intermediate constructor. | Path-copying insertion |
+| [`chain_selection.rs`](../stockfoil/src/verified/chain_selection.rs): `direct`, `ancestral`, `register`, `append` | Direct search returns the smallest same-author current-parent chain; fallback returns the first covered tip in the supplied list. Registration and append preserve chain authors and exact storage updates. [`Author::same_as`](../stockfoil/src/verified/author.rs) checks all 32 bytes. | `History::assign_chain` and `insert`; author-list and ancestry-clock correctness remain caller obligations |
 | [`storage.rs`](../stockfoil/src/verified/storage.rs): `empty`, `Node::new`, `append`, `parent_slice` | Actual node storage starts valid; append preserves packed parent spans, parents-before-child order, existing nodes, exact new metadata and chain-table membership derived from the stored node labels. Parent slicing returns exactly the stored span. Capacity, resolved-parent validity and selected-chain bounds are explicit premises. | `History::new`, `insert`, `parent_nodes` |
 | `chain_tables::append` | Actual writes to tips and rows preserve nonempty strictly ordered rows and exact last-node tips; extend precisely the selected row or allocate the next contiguous row. | `storage::append` derives labels and fresh indices; History still selects the chain |
 | `candidates::normalize` | Exact set preservation and strict numeric ordering, conditional on the two enumerated stdlib contracts. History head-index resolution uses this same wrapper. | History::history_clock |
@@ -192,8 +193,9 @@ production mask and connects its result to the independent graph policy.
 
 | File | Checked result | Remaining production boundary |
 | --- | --- | --- |
+| [`chain_selection_refinement.rs`](chain_selection_refinement.rs) | Actual selectors yield sound same-author ancestral reuse under their input premises. Stored table tips are maximal; fresh IDs are unused. Actual append preserves the graph's single-author chain ancestry invariant. Fork, merge and cross-author relay witnesses compose the production functions. | The fallback's actual author-to-chain map and ancestry clock, hash resolution, capacity and public wrappers remain unverified. |
 | [`storage_refinement.rs`](storage_refinement.rs) | Packed parent links project to a parent-edge DAG. Append adds exactly the supplied parents and preserves every old reachability relation. A fork/merge witness executes the actual append with repeated parents. | Hash identity, same-author ancestral chain selection, cache values and admission/public API semantics remain separate. |
-| [`chain_table_refinement.rs`](chain_table_refinement.rs) | Actual table append preserves complete/correct node membership from the empty layout. Valid table tips produce a delivered clock covering every recorded node. | `storage::append` now connects labels and fresh indices to actual nodes; History still must establish hash resolution, chain selection, author/ancestry invariants and capacity. |
+| [`chain_table_refinement.rs`](chain_table_refinement.rs) | Actual table append preserves complete/correct node membership from the empty layout. Valid table tips produce a delivered clock covering every recorded node. | Storage supplies actual labels and fresh indices; selection refinement supplies maximal-tip reuse. History still must establish hash resolution, the author index, ancestry summaries and capacity. |
 | [`candidate_refinement.rs`](candidate_refinement.rs) | Reference eager assembly establishes the old batch model’s pending contract under explicit complete-table and delivered-clock premises. Numeric projection preserves membership; the model then gives uniqueness and topological order. A nonempty harness calls that reference assembler; it does not execute Traversal. | Concrete table construction, ancestry and permission clocks, captured traversal fields and public wrappers. |
 | [`tree_refinement.rs`](tree_refinement.rs) | Actual tree entries refine the coordinate model; actual lookup equals coordinate membership; actual mask output equals graph authorization under history-summary and compiled-bound premises. A nonempty witness executes the production mask with an inclusive frontier. | Concrete history construction, stored author/chain mapping, view capture and permission compilation must establish these premises. This is not a public History API proof. |
 | [`graph.rs`](graph.rs) | Independent parent-edge reachability is ordered and transitive; append preserves old reachability; same-author maximal-tip reuse preserves chain invariants; valid summaries imply exact ancestry membership. | Hash-to-index mapping, chain assignment, concrete summary construction, strict-ancestor fast path and unknown hashes. |
@@ -233,7 +235,7 @@ budgets to finish a nonempty traversal. Later deliveries require a new traversal
 
 ## Validation and trust
 
-Sixty-one mutations must be rejected: an expanding cap, exclusive membership,
+Sixty-nine mutations must be rejected: an expanding cap, exclusive membership,
 exclusive upper-bound search, dropping position zero for an absent clock,
 failure to advance a positive batch, swapped visibility, omitted new invisible
 commits, granting an out-of-history frontier, defaulting missing permissions to
@@ -260,8 +262,11 @@ exposed inconsistency in that witness, not global consistency of the contracts.
 Three table mutations change the current tip, clear existing members, or omit the
 first node of a newly allocated chain. Six storage mutations corrupt parent spans,
 insert a self-parent, overwrite a chain, clear previous nodes, or read the wrong
-parent slice. The storage layer reran these nine mutations; the full 61-case sweep
-was not rerun for this layer.
+parent slice. Eight selection/identity mutations drop the final author byte,
+ignore author identity or tip freshness, reverse direct selection order, bypass
+ancestry coverage, skip fallback candidates, or omit/corrupt author registration.
+The selection layer reran these eight plus the three table mutations; the full
+69-case sweep was not rerun for this layer.
 
 The ordinary tests compare interval results with an independent linear filter,
 exercise zero/unlimited batches and delivery after capture, and retain the
@@ -299,8 +304,10 @@ obligations; it is not a measure of production coverage.
    the chain invariant, table completeness and unique membership, and that
    concrete cached walks produce exact summaries. Actual storage initialization and
    append now establish packed parent topology and complete tables using actual stored
-   node labels. The hash map, selected chain, author mapping, capacity and resolved
-   parent premises still require verification through History's construction paths.
+   node labels. Actual chain searches and author registration now connect to the
+   graph invariant under explicit author-list and ancestry-clock premises. Prove
+   the author-to-chain index, hash map, cached walks and caller capacity obligations
+   through History's construction paths.
    Valid table tips discharge delivered-clock coverage. Clock accumulation and
    whole-clock difference writes are now verified under their input premises.
 3. **Views and materialization:** prove permission compilation, complete chain
