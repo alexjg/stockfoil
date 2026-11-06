@@ -154,6 +154,38 @@ pub fn no_rotation_and_equal_height_grandchildren() {
     assert(tree.balanced() && tree.size() == 3);
 }
 
+// These use the actual update entry points: no hand-built invariant is assumed.
+pub fn updates_preserve_snapshots_and_take_maximum() {
+    let mut tree = Clock::default();
+    let a = NodeIdx::new(10);
+    let b = NodeIdx::new(20);
+    tree.include(2, a);
+    tree.include(0, a);
+    let snapshot = tree.clone();
+    tree.include(1, b); // left-right rotation
+    tree.include(1, a); // lowering an existing tip is a no-op
+    tree.include(2, b);
+    assert(tree.valid() && tree.size() == 3);
+    assert(tree.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, a).insert(1, b).insert(2, b));
+    assert(snapshot.valid() && snapshot.size() == 2);
+    assert(snapshot.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, a).insert(2, a));
+    proof { tree.height_fits(); }
+    assert(tree.depth() < 65);
+}
+
+pub fn replacement_and_extreme_keys() {
+    let mut tree = Clock::default();
+    let zero = NodeIdx::new(0);
+    let last = NodeIdx::new(u32::MAX);
+    tree.include(0, zero);
+    tree.include(u32::MAX, last);
+    tree.include(1, last); // right-left rotation
+    let replacement = tree.set(u32::MAX, zero);
+    assert(replacement.valid() && replacement.size() == 3);
+    assert(replacement.contents() =~= Map::<u32, NodeIdx>::empty().insert(0, zero).insert(1, last).insert(u32::MAX, zero));
+    assert(tree.contents()[u32::MAX] == last);
+}
+
 // The ordering precondition is substantive: a left key above its parent is
 // rejected even if the height and size metadata look reasonable.
 pub fn malformed_tree_does_not_satisfy_the_invariant() {

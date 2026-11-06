@@ -137,7 +137,7 @@ Stage 2 progress (still incomplete):
   also verified. See [`tree.rs`](../stockfoil/src/verified/tree.rs).
 - Actual tree witnesses, a structural-sharing regression and four additional
   semantic mutations exercise these contracts. The combined suite reports
-  85 verified obligations and rejects all 24 mutations.
+  92 verified obligations and rejects all 27 mutations.
 - Nonempty production node construction now preserves ordering, the exact
   coordinate map, and structural height/size under explicit child ordering,
   metadata and capacity premises. `height`/`len` accessors are also verified.
@@ -150,12 +150,19 @@ Stage 2 progress (still incomplete):
 - Nonempty witnesses cover each rotation and equal-height grandchildren, with
   distinct tips and retained snapshots. Five additional mutations test rotation
   selection, double-rotation steps and key/tip association.
-- Update callers still must establish the balancing premises and capacity
-  bounds. Iteration, union and masking remain unproved.
+- Actual `set`/`include` now preserve the tree invariant and exact coordinate
+  semantics, with terminating recursion, exact size changes and height growth
+  at most one. A structural counting proof derives height below 65 from balance
+  and valid `u32` size metadata; only new-key size capacity remains a premise.
+- Update witnesses cover replacement, pointwise maximum, extreme keys and old
+  snapshots; three new mutations test updates. Whole-clock callers still must
+  establish validity and size capacity. Iteration, union and masking remain unproved.
 
 Review stack: foundations (#4), authorization plan/policy (#3), then AVL
-lookup (#5), node construction (#6), and rotation correctness. Stage 1 adds
+lookup (#5), node construction (#6), rotation correctness (#7), and insertion. Stage 1 adds
 specifications and integration tests. Stage 2 has begun production refinement,
 but no complete public API authorization theorem exists. The next implementation
-step is proving insertion (`set`/`include`) establishes the balancing premises
-and preserves the clock invariant, including capacity bounds.
+step is proving complete ordered iteration, then union and masked reconstruction.
+The remaining stages continue through concrete history/view construction and
+`History::changes`/`History::next_changes`; this stack is not complete until
+those public entry points establish their own prerequisites.

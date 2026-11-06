@@ -138,6 +138,8 @@ impl Clock {
             left.depth() < u8::MAX, right.depth() < u8::MAX,
             left.depth() <= right.depth() + 2, right.depth() <= left.depth() + 2,
         ensures
+            (left.depth() <= right.depth() + 1 && right.depth() <= left.depth() + 1) ==>
+                out.depth() == 1 + if left.depth() >= right.depth() { left.depth() } else { right.depth() },
             out.ordered(), out.metadata(), out.balanced(),
             out.contents() == left.contents().union_prefer_right(right.contents()).insert(chain, tip),
             out.size() == 1 + left.size() + right.size(),
@@ -257,6 +259,93 @@ impl Clock {
             Self::node(chain, tip, left, r.left.clone()),
             r.right.clone(),
         );
+    }
+
+    // A deliberately loose lower bound, sufficient to rule out u8 overflow
+    // for any balanced tree whose cached node count fits u32.
+    pub closed spec fn minimum_size(height: nat) -> nat
+        decreases height,
+    {
+        if height <= 1 { height } else { 1 + 2 * Self::minimum_size((height - 2) as nat) }
+    }
+
+    proof fn tall_tree_has_nodes(&self, height: nat)
+        requires self.balanced(), self.depth() >= height,
+        ensures self.size() >= Self::minimum_size(height),
+        decreases height,
+    {
+        self.unfold();
+        if height > 0 {
+            let e = self.0.unwrap();
+            if height > 1 {
+                e.left.tall_tree_has_nodes((height - 2) as nat);
+                e.right.tall_tree_has_nodes((height - 2) as nat);
+            }
+        }
+    }
+
+    pub(crate) proof fn height_fits(&self)
+        requires self.balanced(), self.metadata(),
+        ensures self.depth() < 65,
+    {
+        self.unfold();
+        if self.depth() >= 65 {
+            self.tall_tree_has_nodes(65);
+            assert(Self::minimum_size(65) == 8589934591nat) by (compute);
+        }
+    }
+
+    pub open spec fn valid(&self) -> bool {
+        self.ordered() && self.metadata() && self.balanced()
+    }
+
+    pub(crate) fn set(&self, chain: ChainId, tip: NodeIdx) -> (out: Self)
+        requires self.valid(),
+            self.size() + (if self.contents().contains_key(chain) { 0nat } else { 1nat }) <= u32::MAX,
+        ensures out.valid(), out.contents() == self.contents().insert(chain, tip),
+            out.size() == self.size() + (if self.contents().contains_key(chain) { 0nat } else { 1nat }),
+            self.depth() <= out.depth() <= self.depth() + 1,
+        decreases self,
+    {
+        proof { self.unfold(); self.height_fits(); }
+        let Some(e) = &self.0 else {
+            return Self::node(chain, tip, Self::default(), Self::default());
+        };
+        if chain < e.chain {
+            let left = e.left.set(chain, tip);
+            proof { left.height_fits(); }
+            let out = Self::balance(e.chain, e.tip, left, e.right.clone());
+            assert(out.contents() =~= self.contents().insert(chain, tip));
+            out
+        } else if chain > e.chain {
+            let right = e.right.set(chain, tip);
+            proof { right.height_fits(); }
+            let out = Self::balance(e.chain, e.tip, e.left.clone(), right);
+            assert(out.contents() =~= self.contents().insert(chain, tip));
+            out
+        } else {
+            Self::node(chain, tip, e.left.clone(), e.right.clone())
+        }
+    }
+
+    pub open spec fn raised(&self, chain: ChainId, position: NodeIdx) -> Map<ChainId, NodeIdx> {
+        if self.contents().contains_key(chain) && position@ <= self.contents()[chain]@ {
+            self.contents()
+        } else { self.contents().insert(chain, position) }
+    }
+
+    /// Raise a chain prefix without lowering an existing tip.
+    pub fn include(&mut self, chain: ChainId, position: NodeIdx)
+        requires old(self).valid(),
+            old(self).size() + (if old(self).contents().contains_key(chain) { 0nat } else { 1nat }) <= u32::MAX,
+        ensures final(self).valid(), final(self).contents() == old(self).raised(chain, position),
+            final(self).size() == old(self).size() + (if old(self).contents().contains_key(chain) { 0nat } else { 1nat }),
+            old(self).depth() <= final(self).depth() <= old(self).depth() + 1,
+    {
+        if super::clock::contains(self.position(chain), position) {
+            return;
+        }
+        *self = self.set(chain, position);
     }
 
     pub closed spec fn contents(&self) -> Map<ChainId, NodeIdx>
