@@ -1,0 +1,22 @@
+[package]
+name = "stockfoil-mv-register"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+eyre = "0.6.14"
+rand = "0.10.2"
+stockfoil = { path = "../../stockfoil" }
+
+[dev-dependencies]
+async-channel = "2"
+future_form = "0.3"
+futures = "0.3"
+sedimentree_core = { version = "0.17.0", features = ["std"] }
+stockfoil = { path = "../../stockfoil", features = ["sedimentree"] }
+subduction_core = { version = "0.21.0", features = ["std"] }
+subduction_crypto = { version = "0.12.0", features = ["std"] }
+subduction_tokio = "0.1.0"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

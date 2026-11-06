@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+THIS_SCRIPT="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+cd "$THIS_SCRIPT/../.."
+repo_root="$PWD"
+
+# Package into a temporary directory outside the checkout so missing files
+# cannot accidentally resolve against workspace siblings.
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+cargo package -p stockfoil --all-features --allow-dirty --target-dir "$scratch"
+
+manifests=("$scratch"/package/stockfoil-*/Cargo.toml)
+if [[ "${#manifests[@]}" -ne 1 || ! -f "${manifests[0]}" ]]; then
+    echo "expected exactly one extracted stockfoil package" >&2
+    exit 1
+fi
+manifest="${manifests[0]}"
+package_dir="$(dirname "$manifest")"
+for file in README.md LICENSE design/architecture.md design/permissions.md design/spec.md; do
+    test -s "$package_dir/$file"
+done
+# The repository and published crate must carry the same license notice.
+cmp LICENSE "$package_dir/LICENSE"
+cmp README.md "$package_dir/README.md"
+
+# Reuse compilation artifacts, but build and test the extracted source, not a
+# workspace member. cargo test includes the documentation examples.
+cargo test --manifest-path "$manifest" --locked --no-default-features \
+    --target-dir "$repo_root/target"
+cargo test --manifest-path "$manifest" --locked --features sedimentree \
+    --target-dir "$repo_root/target"
+RUSTDOCFLAGS="-D rustdoc::broken-intra-doc-links -D warnings" \
+    cargo doc --manifest-path "$manifest" --locked --no-deps --features sedimentree \
+    --target-dir "$repo_root/target"

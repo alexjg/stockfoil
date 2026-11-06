@@ -1,0 +1,37 @@
+[package]
+name = "stockfoil"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Authenticated commit graphs, compaction, and incremental materialization for local-first data structures"
+license = "MIT"
+repository = "https://github.com/alexjg/stockfoil"
+documentation = "https://docs.rs/stockfoil"
+readme = "../README.md"
+keywords = ["crdt", "local-first", "replication", "sedimentree"]
+categories = ["data-structures"]
+
+[package.metadata.docs.rs]
+features = ["sedimentree"]
+
+[lib]
+
+[features]
+fuzzing = []
+sedimentree = ["dep:sedimentree_core"]
+
+[dependencies]
+ed25519-dalek = "2"
+bijoux = "0.3.2"
+blake3 = "1.8.7"
+hexane = "=1.0.0-alpha.5"
+sedimentree_core = { version = "0.17.0", optional = true, features = ["std"] }
+
+[dev-dependencies]
+blake3 = "1.8.7"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.10.2"
+
+[[bench]]
+name = "history"
+harness = false

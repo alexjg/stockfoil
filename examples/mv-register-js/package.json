@@ -1,0 +1,13 @@
+{
+  "name": "stockfoil-mv-register-js",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "pretest": "test -f ../../javascript/dist/stockfoil.wasm || npm --prefix ../../javascript run build",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "stockfoil": "file:../../javascript"
+  }
+}

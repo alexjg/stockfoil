@@ -1,0 +1,3 @@
+[workspace]
+members = ["stockfoil", "javascript", "examples/mv-register", "examples/volume"]
+resolver = "3"

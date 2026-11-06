@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+THIS_SCRIPT="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+cd "$THIS_SCRIPT/../.."
+
+cargo test -p stockfoil --no-default-features
+cargo test -p stockfoil --features sedimentree
+cargo test --workspace
+./scripts/ci/test-package

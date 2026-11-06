@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+THIS_SCRIPT="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+cd "$THIS_SCRIPT/../.."
+
+cargo check --manifest-path fuzz/Cargo.toml --bins
+cargo test --manifest-path fuzz/Cargo.toml --lib

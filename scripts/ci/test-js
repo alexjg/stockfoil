@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+THIS_SCRIPT="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+cd "$THIS_SCRIPT/../.."
+
+npm --prefix javascript ci --ignore-scripts
+npm --prefix javascript test
+npm --prefix javascript run typecheck
+
+npm --prefix examples/mv-register-js ci --ignore-scripts
+npm --prefix examples/mv-register-js test

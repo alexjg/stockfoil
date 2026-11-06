@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+THIS_SCRIPT="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+cd "$THIS_SCRIPT/../.."
+
+RUSTDOCFLAGS="-D rustdoc::broken-intra-doc-links -D warnings" \
+  cargo doc --workspace --no-deps --features stockfoil/sedimentree
+cargo test --doc --workspace
