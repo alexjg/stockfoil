@@ -13,6 +13,34 @@ ROOT = Path(__file__).resolve().parent.parent
 # detect its disagreement with the intended out-of-history-frontier behavior.
 MUTATIONS = [
     (
+        'AVL lookup follows the wrong left subtree',
+        'stockfoil/src/verified/tree.rs',
+        'node = &e.left;',
+        'node = &e.right;',
+        'last',
+    ),
+    (
+        'AVL lookup follows the wrong right subtree',
+        'stockfoil/src/verified/tree.rs',
+        'node = &e.right;',
+        'node = &e.left;',
+        'last',
+    ),
+    (
+        'AVL lookup omits a matching root',
+        'stockfoil/src/verified/tree.rs',
+        'return Some(e.tip);',
+        'return None;',
+        'last',
+    ),
+    (
+        'clock clone drops the shared tree',
+        'stockfoil/src/verified/tree.rs',
+        'Some(e) => Self(Some(Arc::clone(e))),',
+        'Some(e) => Self(None),',
+        'last',
+    ),
+    (
         'cap expands permission',
         'stockfoil/src/verified/clock.rs',
         'Some(limit) => Some(if tip.index() <= limit.index() { tip } else { limit }),',
@@ -131,7 +159,7 @@ def main():
             output = result.stdout + result.stderr
             if result.returncode == 0 or not any(
                 message in output
-                for message in ("assertion failed", "postcondition not satisfied")
+                for message in ("assertion failed", "postcondition not satisfied", "invariant not satisfied")
             ):
                 raise SystemExit(f"Expected a proof failure for {name}:\n{output}")
             print(f"Rejected: {name}", flush=True)

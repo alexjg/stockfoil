@@ -12,3 +12,6 @@ pub mod visibility;
 pub mod examples;
 pub mod intervals;
 pub mod materialization;
+#[path = "../stockfoil/src/verified/tree.rs"]
+pub mod tree;
+pub mod tree_examples;
