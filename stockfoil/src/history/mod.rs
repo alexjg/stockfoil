@@ -24,50 +24,29 @@ pub use export::{ExportCursor, ExportItem, ExportPlan};
 pub use local::{CommitBuilder, PayloadCheck, Prepared};
 pub use publish::Receipt;
 pub(crate) use publish::{Readiness, publish_verified, readiness};
-pub use view::{Batch, Change, Changes, MaterializationCursor, ViewPoint, Vis, WritePermissions};
+#[cfg(any(test, feature = "fuzzing"))]
+pub use view::MaterializationCursor;
+#[cfg(any(test, feature = "fuzzing"))]
+pub use view::Vis;
+#[cfg(any(test, feature = "fuzzing"))]
+pub use view::{Batch, Change, Changes};
+pub use view::{ViewPoint, WritePermissions};
 
 use crate::meta::depth;
 use crate::{
     Admission, Author, CommitHash, DecodeItem, Error, ItemId, Next, PayloadId, ReceiveOptions,
     Signature,
 };
-use clock::{ChainId, Clock, ClockBuilder};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use clock::Clock;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct NodeIdx(u32);
+pub(crate) use crate::verified::clock::NodeIdx;
 
-impl NodeIdx {
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+type Node =
+    crate::verified::storage::Node<CommitHash, PayloadId, crate::verified::ancestry_cache::Cache>;
 
-#[derive(Debug)]
-struct Node {
-    hash: CommitHash,
-    payload: PayloadId,
-    parents_start: usize,
-    parents_len: u32,
-    chain: ChainId,
-    depth: u8,
-    admitted: bool,
-    /// Member of some admitted fragment certificate.
-    in_fragment: bool,
-    /// Longest path since a node with an eagerly cached clock.
-    uncached_depth: u8,
-    clock: OnceLock<Arc<Clock>>,
-}
-
-/// Signature evidence retained for export: `author` signed `commit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SignatureEvidence {
-    pub author: Author,
-    pub commit: CommitHash,
-    pub signature: Signature,
-}
+pub(crate) use crate::verified::history_data::SignatureEvidence;
 
 /// What a commit hash is associated with in this history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,15 +58,7 @@ pub struct CommitInfo {
     pub admitted: bool,
 }
 
-/// One commit's delivery outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Delivered {
-    pub hash: CommitHash,
-    /// The retained payload ID. For a duplicate this is the earlier delivery's ID.
-    pub payload: PayloadId,
-    /// Whether this call delivered the commit to the history for the first time.
-    pub newly_delivered: bool,
-}
+pub use crate::verified::publication::Delivered;
 
 /// Which heads a view starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,103 +69,51 @@ pub enum Heads {
     Admitted,
 }
 
-static NEXT_HISTORY_ID: AtomicU64 = AtomicU64::new(1);
-
-/// An authenticated commit history. See the [crate documentation](crate).
-#[derive(Debug)]
-pub struct History {
-    id: u64,
-    nodes: Vec<Node>,
-    parent_ids: Vec<NodeIdx>,
-    by_hash: HashMap<CommitHash, NodeIdx>,
-    chain_tips: Vec<NodeIdx>,
-    chain_authors: Vec<Author>,
-    chain_nodes: Vec<Vec<NodeIdx>>,
-    author_chains: HashMap<Author, Vec<ChainId>>,
-    heads: BTreeSet<CommitHash>,
-    admitted_heads: BTreeSet<CommitHash>,
-    /// Delivered local commits that are not yet admitted.
-    drafts: BTreeSet<NodeIdx>,
-    signed_drafts: BTreeSet<NodeIdx>,
-    signatures: HashMap<NodeIdx, BTreeMap<Author, Signature>>,
-    inventory: BTreeMap<export::Key, Arc<export::Certificate>>,
-    epoch: u64,
-}
-
-impl Default for History {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use crate::verified::history::History;
 
 impl History {
-    pub fn new() -> Self {
-        Self {
-            id: NEXT_HISTORY_ID.fetch_add(1, Ordering::Relaxed),
-            nodes: Vec::new(),
-            parent_ids: Vec::new(),
-            by_hash: HashMap::new(),
-            chain_tips: Vec::new(),
-            chain_authors: Vec::new(),
-            chain_nodes: Vec::new(),
-            author_chains: HashMap::new(),
-            heads: BTreeSet::new(),
-            admitted_heads: BTreeSet::new(),
-            drafts: BTreeSet::new(),
-            signed_drafts: BTreeSet::new(),
-            signatures: HashMap::new(),
-            inventory: BTreeMap::new(),
-            epoch: 0,
-        }
-    }
-
     // ---- topology queries ----
 
     /// Number of delivered commits, drafts included.
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.topology.nodes().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-
-    /// Increments whenever anything is delivered or admitted. An operation
-    /// waiting for a dependency only needs retrying after this changes.
-    pub fn epoch(&self) -> u64 {
-        self.epoch
+        self.topology.nodes().is_empty()
     }
 
     pub fn lookup(&self, hash: &CommitHash) -> Option<CommitInfo> {
-        let node = &self.nodes[self.by_hash.get(hash)?.index()];
+        let node = &self.topology.nodes()[self.topology.by_hash().get(hash)?.index()];
         Some(CommitInfo {
             payload: node.payload,
-            author: self.chain_authors[node.chain as usize],
+            author: self.topology.chain_authors()[node.chain as usize],
             admitted: node.admitted,
         })
     }
 
     /// Whether `hash` is authenticated history (not merely a local draft).
     pub fn is_admitted(&self, hash: &CommitHash) -> bool {
-        self.by_hash
+        self.topology
+            .by_hash()
             .get(hash)
-            .is_some_and(|&idx| self.nodes[idx.index()].admitted)
+            .is_some_and(|&idx| self.topology.nodes()[idx.index()].admitted)
     }
 
     /// Ordered parents, including repeats.
     pub fn parents(&self, hash: &CommitHash) -> Option<impl ExactSizeIterator<Item = CommitHash>> {
-        let idx = *self.by_hash.get(hash)?;
+        let idx = *self.topology.by_hash().get(hash)?;
         Some(
             self.parent_nodes(idx)
                 .iter()
-                .map(|&p| self.nodes[p.index()].hash),
+                .map(|&p| self.topology.nodes()[p.index()].hash),
         )
     }
 
     /// Delivered or admitted heads, in hash order.
     pub fn heads(&self, which: Heads) -> impl Iterator<Item = CommitHash> + '_ {
         match which {
-            Heads::Delivered => self.heads.iter(),
+            Heads::Delivered => self.topology.heads().iter(),
             Heads::Admitted => self.admitted_heads.iter(),
         }
         .copied()
@@ -202,103 +121,17 @@ impl History {
 
     /// Unadmitted local commits, parents first.
     pub fn drafts(&self) -> impl Iterator<Item = CommitHash> + '_ {
-        self.drafts.iter().map(|idx| self.nodes[idx.index()].hash)
-    }
-
-    /// Whether `ancestor` is a strict ancestor of `descendant`.
-    pub fn is_ancestor(&self, ancestor: &CommitHash, descendant: &CommitHash) -> bool {
-        let (Some(&a), Some(&d)) = (self.by_hash.get(ancestor), self.by_hash.get(descendant))
-        else {
-            return false;
-        };
-        if a >= d {
-            return false;
-        }
-        let chain = self.nodes[a.index()].chain;
-        chain == self.nodes[d.index()].chain || self.clock(d).contains(chain, a)
+        self.drafts
+            .iter()
+            .map(|idx| self.topology.nodes()[idx.index()].hash)
     }
 
     /// Every delivered commit, parents first, drafts included.
     pub fn traverse(&self) -> impl Iterator<Item = CommitHash> + '_ {
-        self.nodes.iter().map(|n| n.hash)
-    }
-
-    /// Capture the causal past of `heads`, inclusive, and its participation
-    /// under `permissions`. Every head must already be delivered.
-    ///
-    /// The owned handle shares clock structure, not a copy of the graph.
-    /// Later deliveries or changes to the supplied permissions do not alter
-    /// it. Use its membership queries to filter a CRDT's own indexes for
-    /// historical reads, without materializing a second copy of its state.
-    pub fn ancestry(
-        &self,
-        heads: &[CommitHash],
-        permissions: &WritePermissions,
-    ) -> Result<Ancestry, Error> {
-        Ancestry::new(self, heads, permissions)
-    }
-
-    /// Delivered commits outside the causal past of `heads`, drafts included
-    /// and regardless of permissions. Every head must already be delivered;
-    /// an unknown head is an error rather than silently resending everything.
-    ///
-    /// Lazy, exact-sized, and in canonical ancestor-first order (smallest hash
-    /// first among ready selected commits). No result list is expanded up front.
-    pub fn commits_since(&self, heads: &[CommitHash]) -> Result<Commits<'_>, Error> {
-        let before = self.history_clock(heads)?;
-        let after = Clock::from_tips(&self.chain_tips);
-        Ok(Commits::new(self, &after, &before))
+        self.topology.nodes().iter().map(|n| n.hash)
     }
 
     // ---- local commits, signing, and payload checks ----
-
-    /// Start a local commit. Every parent must already be delivered (drafts
-    /// included). Parent order and repeats are preserved in the identity.
-    pub fn begin_commit(
-        &self,
-        author: Author,
-        parents: Vec<CommitHash>,
-    ) -> Result<CommitBuilder, Error> {
-        if let Some(missing) = parents.iter().find(|p| !self.by_hash.contains_key(*p)) {
-            return Err(Error::MissingParent(*missing));
-        }
-        Ok(CommitBuilder::new(author, parents))
-    }
-
-    /// Deliver an unadmitted local commit (see [`CommitBuilder`]).
-    pub fn publish_commit(
-        &mut self,
-        prepared: Prepared,
-        payload: PayloadId,
-    ) -> Result<Delivered, Error> {
-        if let Some(info) = self.lookup(&prepared.hash) {
-            return Ok(Delivered {
-                hash: prepared.hash,
-                payload: info.payload,
-                newly_delivered: false,
-            });
-        }
-        if let Some(missing) = prepared
-            .parents
-            .iter()
-            .find(|p| !self.by_hash.contains_key(*p))
-        {
-            return Err(Error::MissingParent(*missing));
-        }
-        self.insert(
-            prepared.hash,
-            prepared.author,
-            &prepared.parents,
-            payload,
-            false,
-        );
-        self.bump_epoch();
-        Ok(Delivered {
-            hash: prepared.hash,
-            payload,
-            newly_delivered: true,
-        })
-    }
 
     /// Attach `author`'s signature to an unadmitted local commit, then admit
     /// every signed draft whose certificate is now complete. Returns what was
@@ -309,7 +142,11 @@ impl History {
         hash: CommitHash,
         signature: Signature,
     ) -> Result<Vec<ItemId>, Error> {
-        let idx = *self.by_hash.get(&hash).ok_or(Error::UnknownCommit(hash))?;
+        let idx = *self
+            .topology
+            .by_hash()
+            .get(&hash)
+            .ok_or(Error::UnknownCommit(hash))?;
         if self.node(idx).admitted {
             return Err(Error::NotDraft(hash));
         }
@@ -340,7 +177,7 @@ impl History {
     /// Start receiving one stored item (header and body, as one blob). The
     /// host that answers the operation's requests decides which item that is.
     pub fn receive(&self, options: ReceiveOptions) -> Admission {
-        Admission::new(self.id, options)
+        Admission::new(self.id(), options)
     }
 
     /// Do the history-dependent work of an admission: check dependencies and
@@ -423,7 +260,7 @@ impl History {
     }
 
     /// Append up to `max` records to `out`.
-    #[cfg(not(feature = "fuzzing"))]
+    #[cfg(all(test, not(feature = "fuzzing")))]
     pub(crate) fn next_changes(
         &self,
         changes: &mut Changes,
@@ -447,21 +284,17 @@ impl History {
 
     // ---- internal topology ----
 
-    pub(crate) fn id(&self) -> u64 {
-        self.id
-    }
-
     fn node(&self, idx: NodeIdx) -> &Node {
-        &self.nodes[idx.index()]
+        &self.topology.nodes()[idx.index()]
     }
 
     fn author_of(&self, idx: NodeIdx) -> Author {
-        self.chain_authors[self.node(idx).chain as usize]
+        self.topology.chain_authors()[self.node(idx).chain as usize]
     }
 
     fn parent_nodes(&self, idx: NodeIdx) -> &[NodeIdx] {
         let node = self.node(idx);
-        &self.parent_ids[node.parents_start..node.parents_start + node.parents_len as usize]
+        crate::verified::storage::parent_slice(node, self.topology.parent_ids())
     }
 
     fn bump_epoch(&mut self) {
@@ -477,40 +310,18 @@ impl History {
         payload: PayloadId,
         admitted: bool,
     ) -> NodeIdx {
-        debug_assert!(!self.by_hash.contains_key(&hash));
-        let idx = NodeIdx(u32::try_from(self.nodes.len()).expect("node index space"));
-        let parents_start = self.parent_ids.len();
-        self.parent_ids
-            .extend(parents.iter().map(|p| self.by_hash[p]));
-        let parent_nodes = self.parent_ids[parents_start..].to_vec();
-        let chain = self.assign_chain(author, &parent_nodes, idx);
-        let depth = depth(&hash);
-        let uncached_depth = parent_nodes
-            .iter()
-            .map(|&p| self.node(p).uncached_depth)
-            .max()
-            .map_or(1, |d| d.saturating_add(1));
-        let cache_clock = depth > 0 || parent_nodes.len() > 1 || uncached_depth >= 128;
-        for p in parents {
-            self.heads.remove(p);
-        }
-        self.heads.insert(hash);
-        self.nodes.push(Node {
-            hash,
-            payload,
-            parents_start,
-            parents_len: u32::try_from(parent_nodes.len()).expect("parent count"),
-            chain,
-            depth: depth as u8,
-            admitted: false,
-            in_fragment: false,
-            uncached_depth: if cache_clock { 0 } else { uncached_depth },
-            clock: OnceLock::new(),
-        });
-        self.by_hash.insert(hash, idx);
-        if cache_clock {
-            self.clock(idx);
-        }
+        let idx = self
+            .topology
+            .insert(hash, author, parents, payload, depth(&hash) as u8)
+            .unwrap_or_else(|error| match error {
+                crate::verified::topology::InsertError::Missing(parent) => {
+                    panic!("undelivered parent: {parent:?}")
+                }
+                crate::verified::topology::InsertError::Duplicate => {
+                    panic!("commit already delivered")
+                }
+                crate::verified::topology::InsertError::Capacity => panic!("topology capacity"),
+            });
         if admitted {
             self.mark_admitted(idx);
         } else {
@@ -528,106 +339,25 @@ impl History {
                 .iter()
                 .all(|&p| self.node(p).admitted)
         );
-        self.nodes[idx.index()].admitted = true;
+        self.topology.mark_admitted(idx);
         self.drafts.remove(&idx);
         self.signed_drafts.remove(&idx);
         for i in 0..self.node(idx).parents_len as usize {
-            let parent = self.parent_ids[self.node(idx).parents_start + i];
-            self.admitted_heads.remove(&self.nodes[parent.index()].hash);
+            let parent = self.topology.parent_ids()[self.node(idx).parents_start + i];
+            self.admitted_heads
+                .remove(&self.topology.nodes()[parent.index()].hash);
         }
         self.admitted_heads.insert(self.node(idx).hash);
-    }
-
-    fn assign_chain(&mut self, author: Author, parents: &[NodeIdx], position: NodeIdx) -> ChainId {
-        // Ordinary sequential edits extend a direct parent's chain.
-        let direct = parents
-            .iter()
-            .filter_map(|&p| {
-                let chain = self.node(p).chain;
-                (self.chain_authors[chain as usize] == author
-                    && self.chain_tips[chain as usize] == p)
-                    .then_some(chain)
-            })
-            .min();
-        // Any same-author tip in the parents' down-set can precede this node.
-        let reusable = direct.or_else(|| {
-            if parents.is_empty() {
-                return None;
-            }
-            // Check only this author's chains, not every chain in the history.
-            let history = self.clock_for_heads(parents);
-            self.author_chains
-                .get(&author)?
-                .iter()
-                .copied()
-                .find(|&chain| history.contains(chain, self.chain_tips[chain as usize]))
-        });
-        if let Some(chain) = reusable {
-            self.chain_tips[chain as usize] = position;
-            self.chain_nodes[chain as usize].push(position);
-            chain
-        } else {
-            let chain = ChainId::try_from(self.chain_tips.len()).expect("chain space");
-            self.chain_tips.push(position);
-            self.chain_authors.push(author);
-            self.chain_nodes.push(vec![position]);
-            self.author_chains.entry(author).or_default().push(chain);
-            chain
-        }
     }
 
     /// The ancestry (inclusive) of one node, cached on nodes that are merges,
     /// checkpoints, or the end of a long uncached run.
     fn clock(&self, head: NodeIdx) -> &Arc<Clock> {
-        self.node(head).clock.get_or_init(|| {
-            let mut builder = ClockBuilder::default();
-            let mut stack = vec![head];
-            let mut visited = std::collections::HashSet::new();
-            while let Some(idx) = stack.pop() {
-                if !visited.insert(idx) {
-                    continue;
-                }
-                let node = self.node(idx);
-                if idx != head
-                    && let Some(clock) = node.clock.get()
-                {
-                    builder.merge(clock);
-                } else {
-                    builder.include(node.chain, idx);
-                    stack.extend(self.parent_nodes(idx));
-                }
-            }
-            Arc::new(builder.finish())
-        })
+        self.topology.clock(head)
     }
 
     fn clock_for_heads(&self, heads: &[NodeIdx]) -> Arc<Clock> {
-        if let [head] = heads {
-            return Arc::clone(self.clock(*head));
-        }
-        let mut builder = ClockBuilder::default();
-        for &head in heads {
-            builder.merge(self.clock(head));
-        }
-        Arc::new(builder.finish())
-    }
-
-    /// The ancestry of `heads`; every head must be delivered.
-    fn history_clock(&self, heads: &[CommitHash]) -> Result<Arc<Clock>, Error> {
-        let mut indices = heads
-            .iter()
-            .map(|h| self.by_hash.get(h).copied().ok_or(Error::UnknownCommit(*h)))
-            .collect::<Result<Vec<_>, _>>()?;
-        indices.sort_unstable();
-        indices.dedup();
-        if indices.len() == self.heads.len()
-            && indices
-                .iter()
-                .all(|&i| self.heads.contains(&self.node(i).hash))
-        {
-            return Ok(Arc::new(Clock::from_tips(&self.chain_tips)));
-        }
-        Ok(self.clock_for_heads(&indices))
+        self.topology.clock_for_heads(heads)
     }
 
     fn contains(&self, clock: &Clock, idx: NodeIdx) -> bool {
@@ -657,9 +387,12 @@ impl History {
         let included = self.clock(head);
         let excluded = self.clock_for_heads(boundary);
         let mut members = Vec::new();
-        clock::difference(&self.chain_nodes, included, &excluded, |idx| {
-            members.push(idx)
-        });
+        clock::difference(
+            self.topology.chain_nodes(),
+            included,
+            &excluded,
+            &mut members,
+        );
         members.sort_unstable();
         members
     }
@@ -671,3 +404,6 @@ mod canonical_changes_tests;
 mod reference_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod authorized_visibility;

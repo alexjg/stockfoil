@@ -1,5 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CommitHash([u8; 32]);
+pub use crate::verified::commit_hash::CommitHash;
 
 impl CommitHash {
     pub fn as_slice(&self) -> &[u8] {

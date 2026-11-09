@@ -38,7 +38,7 @@ pub(crate) fn readiness(history: &History, verified: &Verified) -> Result<Readin
         undelivered: verified
             .hashes
             .iter()
-            .any(|h| !history.by_hash.contains_key(h)),
+            .any(|h| !history.topology.by_hash().contains_key(h)),
     })
 }
 
@@ -50,11 +50,16 @@ fn check_placement(
     members: &[CommitHash],
     external: &BTreeSet<CommitHash>,
 ) -> Result<(), Error> {
-    let boundary: Vec<_> = range.boundary.iter().map(|h| history.by_hash[h]).collect();
+    let boundary: Vec<_> = range
+        .boundary
+        .iter()
+        .map(|h| history.topology.by_hash().delivered(h))
+        .collect();
     let excluded = history.clock_for_heads(&boundary);
     let below = |hash: &CommitHash| {
         history
-            .by_hash
+            .topology
+            .by_hash()
             .get(hash)
             .is_some_and(|&idx| history.contains(&excluded, idx))
     };
@@ -66,7 +71,7 @@ fn check_placement(
         if !below(hash) {
             return Err(Error::InvalidPlacement);
         }
-        stack.push(history.by_hash[hash]);
+        stack.push(history.topology.by_hash().delivered(hash));
     }
     let level = depth(&range.head);
     let mut stops = BTreeSet::new();
@@ -97,7 +102,7 @@ pub(crate) fn publish_verified(
     let mut members = Vec::with_capacity(verified.hashes.len());
     let mut indices = Vec::with_capacity(verified.hashes.len());
     for (i, &hash) in verified.hashes.iter().enumerate() {
-        let delivered = if let Some(&idx) = history.by_hash.get(&hash) {
+        let delivered = if let Some(&idx) = history.topology.by_hash().get(&hash) {
             history.mark_admitted(idx);
             indices.push(idx);
             Delivered {

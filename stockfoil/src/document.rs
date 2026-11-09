@@ -1,28 +1,12 @@
 use crate::{
     Author, Bytes, Codec, CommitHash, DecodeStatus, Draft, Error, ExportCursor, ExportPlan,
-    ExportedItem, Heads, History, ItemId, Ledger, Limits, Next, PayloadId, Received, Reply,
-    Request, Signature, Signed, Signer, WritePermissions,
+    ExportedItem, Heads, ItemId, Ledger, Limits, Next, PayloadId, Received, Reply, Request,
+    Signature, Signed, Signer, WritePermissions,
 };
 use std::collections::HashMap;
 
-struct Staged {
-    members: Vec<Bytes>,
-    references: usize,
-}
-
-/// A ledger with canonical payloads in memory and a pure bundle codec.
-///
-/// Nothing does I/O or awaits: this is the small-document path. For storage
-/// elsewhere use [`Ledger`] directly, assigning payload IDs as bytes stream
-/// through caller-controlled buffers. Graph queries and advanced operations
-/// remain available through [`ledger`](Self::ledger).
-pub struct Document<C: Codec> {
-    ledger: Ledger,
-    codec: C,
-    payloads: Vec<Bytes>,
-    index: HashMap<CommitHash, PayloadId>,
-    staged: HashMap<ItemId, Staged>,
-}
+pub use crate::verified::document::Document;
+use crate::verified::document::Staged;
 impl<C: Codec> Document<C> {
     pub fn new(codec: C, author: Author) -> Self {
         Self {
@@ -45,9 +29,6 @@ impl<C: Codec> Document<C> {
         self.ledger = self.ledger.with_max_parked(max);
         self
     }
-    pub fn ledger(&self) -> &Ledger {
-        &self.ledger
-    }
     /// Primarily for policy and queries. Raw commits/admissions bypass the
     /// payload table: use document methods for operations involving bytes.
     pub fn ledger_mut(&mut self) -> &mut Ledger {
@@ -58,9 +39,6 @@ impl<C: Codec> Document<C> {
     }
     pub fn author(&self) -> Author {
         self.ledger.author()
-    }
-    pub fn history(&self) -> &History {
-        self.ledger.history()
     }
     pub fn heads(&self, which: Heads) -> Vec<CommitHash> {
         self.ledger.heads(which)
@@ -77,34 +55,12 @@ impl<C: Codec> Document<C> {
     pub fn has_drafts(&self) -> bool {
         self.ledger.has_drafts()
     }
-    pub fn commit(
-        &mut self,
-        canonical: impl Into<Bytes>,
-        parents: Option<Vec<CommitHash>>,
-    ) -> Result<Draft, Error> {
-        let bytes = canonical.into();
-        let mut builder = self.ledger.begin_commit(parents)?;
-        builder.update(&bytes);
-        let prepared = builder.finish();
-        let id = *self.index.entry(prepared.hash).or_insert_with(|| {
-            let id = self.payloads.len() as PayloadId;
-            self.payloads.push(bytes);
-            id
-        });
-        self.ledger.commit(prepared, id)
-    }
     pub fn payload(&self, hash: &CommitHash) -> Result<Bytes, Error> {
         let id = self
             .ledger
             .payload_id(hash)
             .ok_or(Error::UnknownCommit(*hash))?;
         self.payload_by_id(id)
-    }
-    pub(crate) fn payload_by_id(&self, id: PayloadId) -> Result<Bytes, Error> {
-        self.payloads
-            .get(id as usize)
-            .cloned()
-            .ok_or_else(|| Error::Storage("unknown in-memory payload ID".into()))
     }
     pub fn sign_drafts(&mut self, signer: &impl Signer) -> Result<Signed, Error> {
         let (payloads, index, staged) = (&mut self.payloads, &mut self.index, &self.staged);

@@ -18,7 +18,7 @@ pub(super) fn add_certificate(
     members: &[NodeIdx],
 ) {
     for e in &evidence {
-        let idx = history.by_hash[&e.commit];
+        let idx = history.topology.by_hash().delivered(&e.commit);
         history
             .signatures
             .entry(idx)
@@ -33,7 +33,7 @@ pub(super) fn add_certificate(
     if let ItemId::Fragment(range) = &id {
         let covering: HashSet<NodeIdx> = members.iter().copied().collect();
         for &m in members {
-            history.nodes[m.index()].in_fragment = true;
+            history.topology.mark_in_fragment(m);
             let hash = history.node(m).hash;
             history.inventory.remove(&Key::Commit(hash));
             if hash == range.head || history.node(m).depth == 0 {
@@ -45,7 +45,7 @@ pub(super) fn add_certificate(
                 let boundary: Vec<_> = inner_range
                     .boundary
                     .iter()
-                    .map(|b| history.by_hash[b])
+                    .map(|b| history.topology.by_hash().delivered(b))
                     .collect();
                 if history
                     .fragment_members(m, &boundary)

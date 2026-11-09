@@ -18,6 +18,77 @@ fn commit(history: &mut History, who: Author, parents: &[CommitHash], tag: u64) 
 }
 
 #[test]
+fn normalized_heads_keep_redundant_ancestors_and_share_storage_on_clone() {
+    let mut history = History::new();
+    let root = commit(&mut history, author(1), &[], 0);
+    let child = commit(&mut history, author(1), &[root], 1);
+    let unrelated = commit(&mut history, author(2), &[], 2);
+    let requested = [unrelated, child, root, child, root, unrelated];
+    let captured = history
+        .ancestry(&requested, &WritePermissions::new())
+        .unwrap();
+    let mut expected = vec![root, child, unrelated];
+    expected.sort_unstable();
+    assert_eq!(captured.heads(), expected);
+    let cloned = captured.clone();
+    assert!(std::ptr::eq(captured.heads(), cloned.heads()));
+    drop(captured);
+    assert_eq!(cloned.heads(), expected);
+    assert!(cloned.contains(&history, &root).unwrap());
+    assert!(!cloned.participates(&history, &root).unwrap());
+}
+
+#[test]
+fn delivered_head_shortcut_preserves_exact_requested_ancestry() {
+    let mut history = History::new();
+    let permissions = WritePermissions::new();
+    let empty = history.ancestry(&[], &permissions).unwrap();
+    let root = commit(&mut history, author(1), &[], 10);
+    let unrelated = commit(&mut history, author(2), &[], 11);
+    let child = commit(&mut history, author(1), &[root, root], 12);
+    let mut expected_heads = vec![child, unrelated];
+    expected_heads.sort_unstable();
+    assert_eq!(
+        history.heads(Heads::Delivered).collect::<Vec<_>>(),
+        expected_heads
+    );
+    assert_eq!(
+        history.parents(&child).unwrap().collect::<Vec<_>>(),
+        vec![root, root]
+    );
+    assert!(!empty.contains(&history, &root).unwrap());
+
+    // Each request has the same raw length as the delivered head set. Neither
+    // duplicates nor a redundant ancestor may substitute for the unrelated head.
+    for requested in [vec![child, child], vec![child, root]] {
+        let at = history.ancestry(&requested, &permissions).unwrap();
+        assert!(at.contains(&history, &root).unwrap());
+        assert!(at.contains(&history, &child).unwrap());
+        assert!(!at.contains(&history, &unrelated).unwrap());
+        assert_eq!(
+            history
+                .commits_since(&requested)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![unrelated]
+        );
+    }
+    for requested in [vec![child, unrelated, child], vec![root, unrelated, child]] {
+        let at = history.ancestry(&requested, &permissions).unwrap();
+        for hash in [root, unrelated, child] {
+            assert!(at.contains(&history, &hash).unwrap());
+        }
+    }
+    let unknown = CommitHash::from([0xff; 32]);
+    assert!(matches!(history.ancestry(&[child, unknown], &permissions),
+        Err(Error::UnknownCommit(hash)) if hash == unknown));
+    let saved = history.ancestry(&expected_heads, &permissions).unwrap();
+    let later = commit(&mut history, author(3), &[], 13);
+    assert!(!saved.contains(&history, &later).unwrap());
+    assert!(history.heads(Heads::Delivered).any(|hash| hash == later));
+}
+
+#[test]
 fn causal_membership_includes_hidden_ancestors_of_visible_descendants() {
     let mut history = History::new();
     let hidden = commit(&mut history, author(1), &[], 0);
@@ -127,6 +198,9 @@ fn wrong_histories_are_rejected_even_when_they_contain_the_same_hashes() {
     let r = right.ancestry(&[hash], &WritePermissions::new()).unwrap();
     assert_eq!(l.contains(&right, &hash), Err(Error::WrongHistory));
     assert_eq!(l.participates(&right, &hash), Err(Error::WrongHistory));
+    let unknown = CommitHash::from([0xff; 32]);
+    assert_eq!(l.contains(&right, &unknown), Err(Error::WrongHistory));
+    assert_eq!(l.participates(&right, &unknown), Err(Error::WrongHistory));
     assert_eq!(l.difference(&r, &left).unwrap_err(), Error::WrongHistory);
     assert_eq!(l.difference(&l, &right).unwrap_err(), Error::WrongHistory);
     assert_eq!(r.difference(&l, &left).unwrap_err(), Error::WrongHistory);

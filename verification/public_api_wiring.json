@@ -1,0 +1,18 @@
+{
+  "stockfoil/src/document.rs": "ae4cc1e500f546ed2f4ca97d75b789e0f1a1a647e4a2d42fdfc152ca4f0b3fe1",
+  "stockfoil/src/drive_error.rs": "246f8ff120c196d042bf16b1a0a46a1b0099c4200738d8d9eadd806ee9a3bfd9",
+  "stockfoil/src/error.rs": "a5ba3a3edcd47c6cb71a13790f9fda44c09e7b7d0067fcb9c7c6ab239040eec5",
+  "stockfoil/src/history/ancestry.rs": "fe2e892708ad12673c0fe4dbc3683c10d7aeb6c3ab0f4706a63f8d628f0ba4ed",
+  "stockfoil/src/history/checkpoint.rs": "5c37b3d3e0c35abef6b8143f48be222467a529f4881adaef3df8c28c430117cc",
+  "stockfoil/src/history/clock.rs": "667ce641f5134774c3c9062331a5bec448e225001ee3b288138f1b23fae566a0",
+  "stockfoil/src/history/local.rs": "bbce7c714bf912d8a205a031410ce48a92d8f9befd644969a0cb3f4b1215273b",
+  "stockfoil/src/history/mod.rs": "659d55a7e74e7ef81410484e0a1cd826c2922bc37f014d14cd7d1c88ef81a3e4",
+  "stockfoil/src/history/traversal.rs": "960e572bf05677ebb115e34d258506d4004942489df4511b10a53fbe5d18ba74",
+  "stockfoil/src/history/view.rs": "ffd216b7d55a165c6babd671a0960cef0a4c3308d23eb38cb17a1247b56e2ba2",
+  "stockfoil/src/ledger.rs": "c7eb09d8ca4fe3f831c6919acea84b002776b041e4c62ea84cb4fe0285082695",
+  "stockfoil/src/lib.rs": "4e707a1ada1de92667433309b5e138155bfcf252f214f03ec0f1645f94a88493",
+  "stockfoil/src/materialize.rs": "68618d3e7eff34931e14da977ad25266895367c2a474abc36d1f526144893caa",
+  "stockfoil/src/meta.rs": "738668d17106057b5ffabc997a82e6ab060a6ea84bf5e0867e1d6f97649fc6a0",
+  "stockfoil/src/reader.rs": "6c246c4112a10647fa5f0c255ae07f9e8bcbd3e308a449aa67dccbb4c1139760",
+  "stockfoil/src/verified/mod.rs": "f0a90211ae00ad80a0819cd3dfc9ff3401a3ec3257a6a8609eeabbaa87c6fa2a"
+}

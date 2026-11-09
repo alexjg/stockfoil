@@ -63,7 +63,7 @@ fn fragment_members_are_ancestry_differences() {
         let level = (i % 11 == 5) as usize;
         tips.push(commit(&mut h, k, parents, level, &format!("c{i}")));
     }
-    for idx in (0..h.len()).map(|i| NodeIdx(i as u32)) {
+    for idx in (0..h.len()).map(|i| NodeIdx::new(i as u32)) {
         let level = h.node(idx).depth as usize;
         if level == 0 {
             continue;
@@ -94,7 +94,12 @@ fn deeper_fragments_retire_the_fragments_they_cover() {
     );
     let d2 = commit(&mut h, &a, vec![mid], 2, "d2");
     assert_eq!(keys(&h), vec![export::Key::Fragment(d2)]);
-    assert!(h.nodes.iter().all(|n| n.in_fragment && n.admitted));
+    assert!(
+        h.topology
+            .nodes()
+            .iter()
+            .all(|n| n.in_fragment && n.admitted)
+    );
 }
 
 #[test]
@@ -104,7 +109,7 @@ fn an_author_reuses_one_chain_across_interleaved_authors() {
     let a1 = commit(&mut h, &a, vec![], 0, "a1");
     let b1 = commit(&mut h, &b, vec![a1], 0, "b1");
     let a2 = commit(&mut h, &a, vec![b1], 0, "a2");
-    let chain = |h: &History, x: &CommitHash| h.node(h.by_hash[x]).chain;
+    let chain = |h: &History, x: &CommitHash| h.node(h.topology.by_hash().delivered(x)).chain;
     assert_eq!(chain(&h, &a1), chain(&h, &a2));
     assert_ne!(chain(&h, &a1), chain(&h, &b1));
     // A fork by the same author needs a second chain.
@@ -113,6 +118,31 @@ fn an_author_reuses_one_chain_across_interleaved_authors() {
     assert!(h.is_ancestor(&a1, &fork));
     assert!(!h.is_ancestor(&a2, &fork));
     assert!(!h.is_ancestor(&a1, &a1));
+}
+
+#[test]
+fn chain_selection_prefers_direct_tips_then_the_smallest_chain() {
+    let alice = key(1);
+    let bob = key(2);
+    let mut h = History::new();
+    let a = commit(&mut h, &alice, vec![], 0, "a-root");
+    let b = commit(&mut h, &alice, vec![], 0, "b-root");
+    let relay = commit(&mut h, &bob, vec![a, b], 0, "relay");
+    let chain = |h: &History, hash: &CommitHash| h.node(h.topology.by_hash().delivered(hash)).chain;
+    assert!(chain(&h, &a) < chain(&h, &b));
+
+    // Both Alice tips are ancestors, but only b is a direct parent.
+    let direct = commit(&mut h, &alice, vec![relay, b], 0, "direct");
+    assert_eq!(chain(&h, &direct), chain(&h, &b));
+
+    // With two direct tips, the smallest chain ID wins.
+    let merge = commit(&mut h, &alice, vec![direct, a], 0, "merge");
+    assert_eq!(chain(&h, &merge), chain(&h, &a));
+
+    // A historical member cannot replace the current tip of its chain.
+    let fork = commit(&mut h, &alice, vec![a], 0, "fork");
+    assert_ne!(chain(&h, &fork), chain(&h, &a));
+    assert_ne!(chain(&h, &fork), chain(&h, &b));
 }
 
 #[test]
@@ -192,7 +222,7 @@ fn merging_many_forks_shares_clock_structure() {
         tip = publish(&mut h, vec![tip, *f], format!("m{i}"));
     }
     let mut seen = HashSet::new();
-    for node in &h.nodes {
+    for node in h.topology.nodes() {
         if let Some(clock) = node.clock.get() {
             clock.for_each_entry(&mut |entry| seen.insert(entry));
         }

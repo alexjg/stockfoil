@@ -299,6 +299,8 @@ while let Some(mut batch) = checkout.plan(&ledger, 64)? {
   metadata. Storage and networking remain application-owned; see the
   [Subduction integration guide](https://github.com/alexjg/stockfoil/blob/main/examples/mv-register/SUBDUCTION.md).
 
+- [Verus verification](verification/README.md)
+
 ## Development
 
 ```sh

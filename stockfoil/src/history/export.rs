@@ -1,7 +1,7 @@
 //! Export inventory: one certificate per admitted bundle or assembled draft,
 //! minus those a later fragment fully covers. An export cursor records which
 //! inventory items a destination has acknowledged.
-use super::{History, NodeIdx, SignatureEvidence};
+use super::{History, NodeIdx};
 use crate::meta::Evidence;
 use crate::{
     BundleMeta, CommitHash, Error, FormatId, FragmentRange, ItemId, MemberShape, ParentRef,
@@ -10,12 +10,7 @@ use crate::{
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Key {
-    Commit(CommitHash),
-    /// A fragment's boundary is fixed by its head.
-    Fragment(CommitHash),
-}
+pub(crate) use crate::verified::history_data::{Certificate, Key};
 
 impl Key {
     pub fn of(id: &ItemId) -> Self {
@@ -24,12 +19,6 @@ impl Key {
             ItemId::Fragment(r) => Self::Fragment(r.head),
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct Certificate {
-    pub id: ItemId,
-    pub evidence: Vec<SignatureEvidence>,
 }
 
 /// The inventory items a destination has acknowledged. Persist it with the
@@ -193,9 +182,9 @@ pub(super) fn plan_export(history: &History, cursor: &ExportCursor) -> ExportPla
     }
     // Heads in delivery order put most dependencies first. A receiver must
     // still tolerate waiting: a dependency's covering item can come later.
-    added.sort_by_key(|c| history.by_hash[&c.id.head()]);
+    added.sort_by_key(|c| history.topology.by_hash().delivered(&c.id.head()));
     ExportPlan {
-        history: history.id,
+        history: history.id(),
         acknowledged: vec![false; added.len()],
         added,
         retired,
@@ -208,7 +197,7 @@ pub(super) fn build_export_item(
     plan: &ExportPlan,
     index: usize,
 ) -> Result<ExportItem, Error> {
-    if plan.history != history.id {
+    if plan.history != history.id() {
         return Err(Error::WrongHistory);
     }
     let certificate = plan
@@ -216,10 +205,14 @@ pub(super) fn build_export_item(
         .get(index)
         .ok_or(Error::OutOfRange("export item"))?;
     let members = match &certificate.id {
-        ItemId::Commit(h) => vec![history.by_hash[h]],
+        ItemId::Commit(h) => vec![history.topology.by_hash().delivered(h)],
         ItemId::Fragment(range) => {
-            let head = history.by_hash[&range.head];
-            let boundary: Vec<_> = range.boundary.iter().map(|b| history.by_hash[b]).collect();
+            let head = history.topology.by_hash().delivered(&range.head);
+            let boundary: Vec<_> = range
+                .boundary
+                .iter()
+                .map(|b| history.topology.by_hash().delivered(b))
+                .collect();
             canonical_order(history, &history.fragment_members(head, &boundary))
         }
     };
@@ -244,7 +237,7 @@ pub(super) fn build_export_item(
         .iter()
         .map(|e| Evidence {
             author: e.author,
-            member: position[&history.by_hash[&e.commit]],
+            member: position[&history.topology.by_hash().delivered(&e.commit)],
             signature: e.signature,
         })
         .collect();

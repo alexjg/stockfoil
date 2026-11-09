@@ -1,5 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Signature([u8; 64]);
+pub use crate::verified::history_data::Signature;
 
 impl Signature {
     pub fn as_slice(&self) -> &[u8] {

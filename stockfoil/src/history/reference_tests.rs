@@ -130,6 +130,56 @@ fn random_view(rng: &mut StdRng, model: &Model, keys: &[ed25519_dalek::SigningKe
 }
 
 #[test]
+fn stored_topology_matches_hash_graph() {
+    for seed in 0..8 {
+        let (history, model, _) = random_history(seed, 48);
+        let mut end = 0;
+        for (i, node) in history.topology.nodes().iter().enumerate() {
+            assert_eq!(node.parents_start, end);
+            end += node.parents_len as usize;
+            let parents = &history.topology.parent_ids()[node.parents_start..end];
+            assert!(parents.iter().all(|p| p.index() < i));
+            let hashes: HashSet<_> = parents.iter().map(|p| history.node(*p).hash).collect();
+            assert_eq!(hashes, model.parents[&node.hash].iter().copied().collect());
+            assert_eq!(node.hash, model.order[i]);
+            assert_eq!(history.topology.by_hash().delivered(&node.hash).index(), i);
+            assert_eq!(node.payload, i as PayloadId);
+            assert_eq!(
+                history.topology.chain_authors()[node.chain as usize],
+                model.authors[&node.hash]
+            );
+        }
+        assert_eq!(end, history.topology.parent_ids().len());
+        assert_eq!(
+            history.topology.chain_tips().len(),
+            history.topology.chain_nodes().len()
+        );
+        for (chain, row) in history.topology.chain_nodes().iter().enumerate() {
+            let expected: Vec<_> = history
+                .topology
+                .nodes()
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.chain as usize == chain)
+                .map(|(i, _)| super::NodeIdx::new(i as u32))
+                .collect();
+            assert_eq!(row, &expected);
+            assert_eq!(row.last(), Some(&history.topology.chain_tips()[chain]));
+            let owner = history.topology.chain_authors()[chain];
+            let owned: Vec<_> = history
+                .topology
+                .chain_authors()
+                .iter()
+                .enumerate()
+                .filter(|(_, author)| **author == owner)
+                .map(|(c, _)| c as u32)
+                .collect();
+            assert_eq!(history.topology.author_chains().get(&owner), Some(&owned));
+        }
+    }
+}
+
+#[test]
 fn topology_queries_match_the_model() {
     for seed in 0..20 {
         let (history, model, _) = random_history(seed, 120);
@@ -315,4 +365,70 @@ fn views_require_delivered_heads() {
             .unwrap_err(),
         Error::UnknownCommit(unknown)
     );
+}
+
+#[test]
+fn zero_and_unlimited_batches_preserve_the_captured_history() {
+    let (mut history, model, keys) = random_history(902, 6);
+    // Missing permissions deny everything, but new deliveries must still appear.
+    let target = history.view_point(&WritePermissions::new());
+    let mut changes = history
+        .changes(&MaterializationCursor::new(), &target)
+        .unwrap();
+    let mut records = vec![];
+    assert_eq!(
+        history.next_changes(&mut changes, &mut records, 0).unwrap(),
+        ChangeBatch::More
+    );
+    assert_eq!(changes.remaining(), model.order.len());
+    assert!(records.is_empty());
+
+    let mut builder = history
+        .begin_commit(author(&keys[0]), vec![model.order[5]])
+        .unwrap();
+    builder.update(b"delivered after the traversal was captured");
+    let prepared = builder.finish();
+    let later = prepared.hash;
+    history.publish_commit(prepared, 99).unwrap();
+
+    assert_eq!(
+        history.next_changes(&mut changes, &mut records, 1).unwrap(),
+        ChangeBatch::More
+    );
+    let ChangeBatch::Complete(cursor) = history
+        .next_changes(&mut changes, &mut records, usize::MAX)
+        .unwrap()
+    else {
+        panic!("unlimited batch must finish")
+    };
+    let order: Vec<_> = records.iter().map(|e| e.hash).collect();
+    assert_eq!(order.len(), model.order.len());
+    assert_eq!(
+        order.iter().copied().collect::<BTreeSet<_>>(),
+        model.order.iter().copied().collect::<BTreeSet<_>>()
+    );
+    assert_canonical(&model, &order);
+    assert!(
+        records
+            .iter()
+            .all(|e| e.newly_delivered && e.visibility == Vis::Neither)
+    );
+    let count = records.len();
+    assert_eq!(
+        history.next_changes(&mut changes, &mut records, 0).unwrap(),
+        ChangeBatch::Complete(cursor.clone())
+    );
+    assert_eq!(records.len(), count);
+
+    let target = history.view_point(&WritePermissions::new());
+    let mut changes = history.changes(&cursor, &target).unwrap();
+    records.clear();
+    assert!(matches!(
+        history
+            .next_changes(&mut changes, &mut records, usize::MAX)
+            .unwrap(),
+        ChangeBatch::Complete(_)
+    ));
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].hash, later);
 }

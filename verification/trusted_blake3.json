@@ -1,0 +1,20 @@
+{
+  "stockfoil/src/verified/blake3_boundary.rs": {
+    "sha256": "a01524e63eb529f25a4ce7a48fd149faaef5a5024ec5100001155de19136e08d",
+    "contracts": [
+      "BLAKE3-TYPE-1",
+      "BLAKE3-NEW-1",
+      "BLAKE3-CLONE-1",
+      "BLAKE3-UPDATE-1",
+      "BLAKE3-FINISH-1"
+    ],
+    "dependencies": {
+      "Cargo.lock": "e8199347e94cf5e9a684464d9b7a863e128223f96b2a87c4f0bd5f4d996f4402",
+      "stockfoil/Cargo.toml": "72f89cb82ae6ee17cbf5cf6d72ec2404e23d54b5c823f4663917c583d6194665",
+      "verification/blake3_args.py": "f7ac91682d659ed0abc0b6b7a181f3af5858b213bac6ce8dc75b29ec4e27fbd5",
+      "verification/deps/Cargo.lock": "35ba7ba4969ca6bacbace71c75ebc0374ad046f71a5d9c2fae5bf446311da933",
+      "verification/deps/Cargo.toml": "fd1ba828d8036bcc966735643a8e6ca73446ba7ee5311da7d11bd4526c14b6d7",
+      "verification/deps/src/lib.rs": "7f9e7bf3e590a1d2d342e5d6cb90f86064cad107472b2d883b73c26ff98a4b06"
+    }
+  }
+}

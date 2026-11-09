@@ -808,6 +808,7 @@ mod meta;
 mod queue;
 mod reader;
 mod signature;
+mod verified;
 mod verify;
 #[cfg(feature = "fuzzing")]
 pub mod wire;
@@ -829,11 +830,15 @@ pub use history::{
 };
 // Raw traversal machinery is internal; the fuzz harness still exercises it
 // directly against its independent model.
+#[cfg(all(test, not(feature = "fuzzing")))]
+pub(crate) use history::MaterializationCursor;
+#[cfg(all(test, not(feature = "fuzzing")))]
+pub(crate) use history::Vis;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use history::{Batch as ChangeBatch, Change, Changes, MaterializationCursor, Vis};
-#[cfg(not(feature = "fuzzing"))]
-pub(crate) use history::{Batch as ChangeBatch, Changes, MaterializationCursor, Vis};
+#[cfg(all(test, not(feature = "fuzzing")))]
+pub(crate) use history::{Batch as ChangeBatch, Changes};
 #[cfg(feature = "fuzzing")]
 pub use meta::Evidence;
 pub use meta::{

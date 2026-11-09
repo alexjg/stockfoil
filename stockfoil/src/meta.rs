@@ -1,24 +1,7 @@
 //! Structural metadata shared by the wire format, verification, history, and codecs.
 use crate::{Author, CommitHash, Error, Signature};
-use std::collections::BTreeSet;
 
-/// Application logical payload ID. Stockfoil only stores and returns it.
-pub type PayloadId = u64;
-
-/// A sedimentree fragment: the head, plus its ancestry down to (and excluding)
-/// the boundary commits and all their ancestors.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FragmentRange {
-    pub head: CommitHash,
-    pub boundary: BTreeSet<CommitHash>,
-}
-
-/// A standalone commit or a canonical fragment.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ItemId {
-    Commit(CommitHash),
-    Fragment(FragmentRange),
-}
+pub use crate::verified::history_data::{FragmentRange, ItemId, PayloadId};
 
 impl ItemId {
     pub fn head(&self) -> CommitHash {
@@ -136,10 +119,7 @@ impl Default for Limits {
     }
 }
 
-/// Sedimentree depth: the number of leading zero bytes of a commit hash.
-pub(crate) fn depth(hash: &CommitHash) -> usize {
-    hash.as_bytes().iter().take_while(|b| **b == 0).count()
-}
+pub(crate) use crate::verified::publication::depth;
 
 /// Incremental commit identity:
 /// `BLAKE3(J(parent count) || parents || author || BLAKE3(payload))`.
@@ -163,6 +143,7 @@ impl CommitHasher {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn commit_hash<'a>(
     parents: impl ExactSizeIterator<Item = &'a CommitHash>,
     author: &Author,

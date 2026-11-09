@@ -1,0 +1,50 @@
+{
+  "stockfoil/src/verified/stdlib.rs": {
+    "sha256": "476699bdeb9f9a61a9e8f2a5a19f21d2b2b45e3ae966dbae115af5347cd290a4",
+    "contracts": [
+      "EARLIER-TYPE-1",
+      "EARLIER-NEW-1",
+      "EARLIER-NEXT-1",
+      "HASH-NORMALIZE-1",
+      "ARC-SLICE-1",
+      "RANGE-SORT-1",
+      "READY-ORDER-1",
+      "NODE-KEY-1",
+      "NODE-ORDER-1",
+      "READY-POP-1",
+      "VEC-EMPTY-1",
+      "VEC-RESERVE-1",
+      "VEC-ROW-RESERVE-1",
+      "VEC-PUSH-1",
+      "VEC-SET-1",
+      "VEC-ROW-PUSH-1",
+      "HEAD-REMOVE-1",
+      "HEAD-INSERT-1",
+      "HASH-RESERVE-1",
+      "HASH-INSERT-1",
+      "AUTHOR-RESERVE-1",
+      "AUTHOR-PUSH-1",
+      "ATOMIC-TYPE-1",
+      "ATOMIC-NEW-1",
+      "ATOMIC-LOAD-1",
+      "ATOMIC-CAS-1",
+      "STATIC-REF-1",
+      "EXPECT-1",
+      "ONCE-TYPE-1",
+      "ONCE-NEW-1",
+      "ONCE-GET-1",
+      "ONCE-INIT-1",
+      "AUTHOR-KEY-1",
+      "COMMIT-KEY-1",
+      "COMMIT-ORDER-1",
+      "SORT-1",
+      "DEDUP-1",
+      "ARC-BYTES-1"
+    ],
+    "dependencies": {
+      "stockfoil/src/verified/author_key.rs": "de68aef94a03e6770615864e78d3e513b1d7e1f1a179a18ba7dd6c320130ad1e",
+      "stockfoil/src/verified/commit_hash.rs": "a7ed45e30d2e9a612d0220486f1d2e84ce7c4b292ab8309c26fdf12a95228530",
+      "stockfoil/src/verified/node_key.rs": "78178176d17e18d8e75b121db2bf325236f1d96ac691dbd60a7fd937fdd6745f"
+    }
+  }
+}

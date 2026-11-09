@@ -1,33 +1,12 @@
 //! One document's authenticated history and policy, without its payload bytes.
 use crate::{
-    Admission, Ancestry, Author, CommitBuilder, CommitHash, Commits, Error, ExportCursor,
-    ExportPlan, Follow, FormatId, Heads, History, ItemId, Limits, Next, PayloadId, Prepared, Queue,
-    QueueNext, Receipt, ReceiveOptions, Reply, Signature, Signer, ViewPoint, WritePermission,
-    WritePermissions,
+    Admission, Author, CommitHash, Error, ExportCursor, ExportPlan, FormatId, Heads, History,
+    ItemId, Limits, Next, PayloadId, Queue, QueueNext, Receipt, ReceiveOptions, Reply, Signature,
+    Signer, WritePermission, WritePermissions,
 };
 use std::sync::Arc;
 
-/// Everything about one document except its bytes.
-///
-/// The ledger owns history, write permissions, local drafts and a bounded queue
-/// of verified items awaiting dependencies. Payloads are only caller-assigned
-/// IDs. It never performs I/O, buffers a payload, or awaits a future.
-///
-/// Receive by servicing a [`begin_receive`](Self::begin_receive) admission's
-/// read/decode requests, then [`admit`](Self::admit) it. Commit by feeding a
-/// [`CommitBuilder`] and your storage together, then [`commit`](Self::commit)
-/// with the stored payload's ID. Export describes members and a wire header;
-/// you encode from your storage with your own buffers and runtime.
-///
-/// For payloads in memory, use [`Document`](crate::Document) instead.
-pub struct Ledger {
-    history: History,
-    author: Author,
-    options: ReceiveOptions,
-    permissions: WritePermissions,
-    policy_epoch: u64,
-    queue: Queue<ItemId>,
-}
+pub use crate::verified::ledger::Ledger;
 
 impl Ledger {
     /// Empty history, granting only the local author unbounded participation.
@@ -55,14 +34,8 @@ impl Ledger {
         self.queue = Queue::with_capacity(max);
         self
     }
-    pub fn author(&self) -> Author {
-        self.author
-    }
     pub fn format(&self) -> &FormatId {
         &self.options.format
-    }
-    pub fn history(&self) -> &History {
-        &self.history
     }
     pub fn heads(&self, which: Heads) -> Vec<CommitHash> {
         self.history.heads(which).collect()
@@ -85,26 +58,11 @@ impl Ledger {
     pub fn is_admitted(&self, hash: &CommitHash) -> bool {
         self.history.is_admitted(hash)
     }
-    pub fn author_of(&self, hash: &CommitHash) -> Option<Author> {
-        self.history.lookup(hash).map(|i| i.author)
-    }
-    pub fn parents(&self, hash: &CommitHash) -> Option<Vec<CommitHash>> {
-        self.history.parents(hash).map(Iterator::collect)
-    }
     pub fn is_ancestor(&self, a: &CommitHash, d: &CommitHash) -> bool {
         self.history.is_ancestor(a, d)
     }
     pub fn payload_id(&self, hash: &CommitHash) -> Option<PayloadId> {
         self.history.lookup(hash).map(|i| i.payload)
-    }
-    pub fn ancestry(&self, heads: &[CommitHash]) -> Result<Ancestry, Error> {
-        self.history.ancestry(heads, &self.permissions)
-    }
-    pub fn commits_since(&self, heads: &[CommitHash]) -> Result<Commits<'_>, Error> {
-        self.history.commits_since(heads)
-    }
-    pub fn permissions(&self) -> &WritePermissions {
-        &self.permissions
     }
     /// Local policy, not exported. Materializations observe it on their next plan.
     pub fn set_permissions(&mut self, permissions: WritePermissions) {
@@ -112,37 +70,6 @@ impl Ledger {
             self.permissions = permissions;
             self.policy_epoch = self.policy_epoch.checked_add(1).expect("epoch space");
         }
-    }
-    pub fn view(&self, follow: &Follow) -> ViewPoint {
-        let heads = match follow {
-            Follow::Working => self.heads(Heads::Delivered),
-            Follow::Signed => self.heads(Heads::Admitted),
-            Follow::Pinned(heads) => heads.clone(),
-        };
-        ViewPoint::from_parts(heads, self.permissions.clone())
-    }
-    /// Feed canonical bytes to this builder and your storage in any chunking.
-    pub fn begin_commit(&self, parents: Option<Vec<CommitHash>>) -> Result<CommitBuilder, Error> {
-        self.history.begin_commit(
-            self.author,
-            parents.unwrap_or_else(|| self.heads(Heads::Delivered)),
-        )
-    }
-    /// Deliver a local draft. Unsigned drafts are not durable: persist a local
-    /// journal if signing may be delayed across a restart.
-    pub fn commit(&mut self, prepared: Prepared, payload: PayloadId) -> Result<Draft, Error> {
-        if prepared.author != self.author {
-            return Err(Error::Protocol(
-                "prepared commit has a different local author",
-            ));
-        }
-        let draft = Draft {
-            hash: prepared.hash,
-            author: prepared.author,
-            parents: prepared.parents.clone(),
-        };
-        self.history.publish_commit(prepared, payload)?;
-        Ok(draft)
     }
     pub fn drafts(&self) -> impl Iterator<Item = Draft> + '_ {
         self.history
@@ -358,12 +285,7 @@ impl<F: FnMut(&ItemId, &[CommitHash]) -> Vec<PayloadId>> Bind for F {
         self(item, members)
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Draft {
-    pub hash: CommitHash,
-    pub author: Author,
-    pub parents: Vec<CommitHash>,
-}
+pub use crate::verified::draft::Draft;
 impl Draft {
     pub fn signing_bytes(&self) -> &[u8; 32] {
         self.hash.as_bytes()

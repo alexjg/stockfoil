@@ -194,3 +194,104 @@ fn byte_verification_cannot_be_bypassed_and_bad_items_do_not_publish() {
     doc.receive(&items[0]).unwrap();
     assert_eq!(doc.history().len(), 1);
 }
+
+#[test]
+fn preparation_captures_delivered_heads_and_distinguishes_an_explicit_root() {
+    let mut doc = document();
+    let a = doc.commit(&b"a"[..], Some(vec![])).unwrap().hash;
+    let b = doc.commit(&b"b"[..], Some(vec![])).unwrap().hash;
+    let c = doc.commit(&b"c"[..], Some(vec![a])).unwrap().hash;
+    let mut expected = vec![b, c];
+    expected.sort_unstable();
+    let who = doc.author();
+    let mut captured = doc.ledger().begin_commit(None).unwrap();
+    let mut explicit = doc.ledger().begin_commit(Some(vec![])).unwrap();
+    // Neither already-created builder is retargeted by a later delivery.
+    doc.commit(&b"later"[..], Some(vec![])).unwrap();
+    captured.update(b"merge");
+    explicit.update(b"root");
+    let captured = captured.finish();
+    assert_eq!(captured.hash, commit_hash(&expected, &who, b"merge"));
+    let captured = doc.ledger_mut().commit(captured, 99).unwrap();
+    assert_eq!(captured.parents, expected);
+    let explicit = explicit.finish();
+    assert_eq!(explicit.hash, commit_hash(&[], &who, b"root"));
+    assert!(
+        doc.ledger_mut()
+            .commit(explicit, 100)
+            .unwrap()
+            .parents
+            .is_empty()
+    );
+}
+
+#[test]
+fn preparation_keeps_parent_order_and_repetitions_across_clone_and_chunking() {
+    let mut doc = document();
+    let a = doc.commit(&b"a"[..], Some(vec![])).unwrap().hash;
+    let b = doc.commit(&b"b"[..], Some(vec![])).unwrap().hash;
+    let parents = vec![b, a, b];
+    let mut original = doc.ledger().begin_commit(Some(parents.clone())).unwrap();
+    original.update(b"pre");
+    let mut cloned = original.clone();
+    original.update(b"fix-payload");
+    cloned.update(b"fix-");
+    cloned.update(b"pay");
+    cloned.update(b"load");
+    let first = original.finish();
+    let second = cloned.finish();
+    assert_eq!(first, second);
+    assert_eq!(
+        first.hash,
+        commit_hash(&parents, &doc.author(), b"prefix-payload")
+    );
+    let draft = doc.ledger_mut().commit(first, 99).unwrap();
+    assert_eq!(draft.parents, parents);
+    assert_eq!(draft.author, doc.author());
+}
+
+#[test]
+fn preparation_reports_first_missing_parent_before_building_and_preserves_history() {
+    let mut doc = document();
+    let known = doc.commit(&b"known"[..], None).unwrap().hash;
+    let a = CommitHash::from([71; 32]);
+    let b = CommitHash::from([72; 32]);
+    let epoch = doc.history().epoch();
+    let heads = doc.heads(Heads::Delivered);
+    for (parents, first) in [(vec![known, a, b], a), (vec![b, known, a], b)] {
+        assert_eq!(
+            doc.ledger()
+                .begin_commit(Some(parents.clone()))
+                .unwrap_err(),
+            Error::MissingParent(first)
+        );
+        assert_eq!(
+            doc.history()
+                .begin_commit(doc.author(), parents)
+                .unwrap_err(),
+            Error::MissingParent(first)
+        );
+    }
+    assert_eq!(doc.history().epoch(), epoch);
+    assert_eq!(doc.heads(Heads::Delivered), heads);
+}
+
+#[test]
+fn public_commit_hashes_the_actual_native_input_conversion() {
+    struct Converted;
+    impl From<Converted> for Bytes {
+        fn from(_: Converted) -> Self {
+            Bytes::from(&b"converted canonical bytes"[..])
+        }
+    }
+    let mut doc = document();
+    let draft = doc.commit(Converted, Some(vec![])).unwrap();
+    assert_eq!(
+        draft.hash,
+        commit_hash(&[], &doc.author(), b"converted canonical bytes")
+    );
+    assert_eq!(
+        doc.payload(&draft.hash).unwrap().as_ref(),
+        b"converted canonical bytes"
+    );
+}
